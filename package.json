@@ -1,0 +1,38 @@
+{
+  "name": "opencode-acp-provider",
+  "version": "0.1.0",
+  "description": "Expose un agent ACP (Agent Client Protocol) comme model provider OpenCode",
+  "license": "MIT",
+  "type": "module",
+  "private": false,
+  "files": [
+    "src",
+    "bin"
+  ],
+  "bin": {
+    "acp-run": "./bin/acp-run.ts"
+  },
+  "exports": {
+    "./core": "./src/core/types.ts",
+    "./core/models": "./src/core/models.ts",
+    "./acp": "./src/acp/agent.ts",
+    "./cli": "./src/adapters/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "acp-run": "bun run src/adapters/cli.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.5.0",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "@types/node": "24.10.1",
+    "typescript": "5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
