@@ -84,8 +84,32 @@ const replay = (
   return { state, events: emitted }
 }
 
+/** Un état de réducteur portant un catalogue d'outils, comme `initial(request)` le fait. */
+const withTools = (
+  ...names: readonly string[]
+): ReducerState => ({
+  ...initialState,
+  catalog: names.map((name) => ({ name, description: "", schema: {} })),
+})
+
 /** Les types d'événements, pour comparer une séquence entière d'un coup d'œil. */
 const types = (events: readonly LLMEvent[]): string[] => events.map((event) => event.type)
+
+/**
+ * Une réponse d'agent **conforme au contrat** de `core/prompt.ts` — §7.3.
+ *
+ * ⚠️ Depuis P2b, un `text` ACP n'est plus la réponse mais l'objet du contrat : le
+ * réducteur le décode au `done`. Ces raccourcis évitent d'écrire du JSON littéral
+ * dans chaque test, et surtout rendent visible la contrainte : un `text` en dur
+ * échouerait désormais en `provider-error`.
+ */
+const say = (text: string): AcpEvent => ({
+  type: "text",
+  text: JSON.stringify({ type: "text", text }),
+})
+
+/** Un `text` ACP **brut**, c'est-à-dire un agent qui n'obéit pas au contrat. */
+const raw = (text: string): AcpEvent => ({ type: "text", text })
 
 /** L'index d'un événement de ce type, ou -1. */
 const indexOfType = (events: readonly LLMEvent[], type: string): number =>
@@ -116,30 +140,41 @@ const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pa
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("réducteur AcpEvent → LLMEvent", () => {
-  test("un texte ouvre un bloc, le stream alimente, le done le ferme", () => {
-    const { events } = replay([
-      { type: "text", text: "bon" },
-      { type: "text", text: "jour" },
-      { type: "done", stopReason: "end_turn" },
+  test("le texte est tamponné, puis rendu d'un seul bloc au done", () => {
+    // ⚠️ **Changement de comportement voulu (P2b).** Le texte n'est plus streamé
+    // delta par delta : il ne peut pas l'être, car tant qu'on n'a pas lu la
+    // réponse entière on ignore si c'est du texte ou un appel d'outil (§7.3).
+    const before = replay([
+      { type: "text", text: '{"type":"text","text":"bon' },
+      { type: "text", text: 'jour"}' },
     ])
+    // Rien n'est émis avant le `done` : c'est le cœur du compromis.
+    expect(before.events).toEqual([])
+
+    const { events } = replay(
+      [
+        { type: "text", text: '{"type":"text","text":"bon' },
+        { type: "text", text: 'jour"}' },
+        { type: "done", stopReason: "end_turn" },
+      ],
+      before.state,
+    )
     expect(types(events)).toEqual([
       "step-start",
       "text-start",
-      "text-delta",
       "text-delta",
       "text-end",
       "step-finish",
       "finish",
     ])
-    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["bon", "jour"])
-    // Un seul `text-start` : deux deltas, un seul bloc.
-    expect(events.filter((e) => e.type === "text-start")).toHaveLength(1)
+    // Un **seul** delta, qui porte la réponse et non le JSON du contrat.
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["bonjour"])
   })
 
-  test("un bloc de raisonnement est fermé avant d'ouvrir un texte", () => {
+  test("un bloc de raisonnement est fermé avant le texte rendu", () => {
     const { events } = replay([
       { type: "thought", text: "je réfléchis" },
-      { type: "text", text: "réponse" },
+      say("réponse"),
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
@@ -157,19 +192,20 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(indexOfType(events, "reasoning-end")).toBeLessThan(indexOfType(events, "text-start"))
   })
 
-  test("un texte puis du raisonnement : le texte est fermé d'abord", () => {
+  test("le raisonnement reste streamé en direct pendant que le texte s'accumule", () => {
+    // Ce qui reste en direct, c'est exactement ce que l'utilisateur a besoin de
+    // voir pendant que le tampon se remplit : l'activité de l'agent.
     const { events } = replay([
-      { type: "text", text: "a" },
-      { type: "thought", text: "b" },
-      { type: "text", text: "c" },
+      raw('{"type":"text","text":"ré'),
+      { type: "thought", text: "je cherche" },
+      { type: "plan", entries: [{ content: "Analyser", priority: "high", status: "pending" }] },
+      { type: "text", text: 'ponse"}' },
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
       "step-start",
-      "text-start",
-      "text-delta",
-      "text-end",
       "reasoning-start",
+      "reasoning-delta",
       "reasoning-delta",
       "reasoning-end",
       "text-start",
@@ -178,9 +214,12 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       "step-finish",
       "finish",
     ])
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["réponse"])
   })
 
   test("un done sans rien produit malgré tout une séquence valide", () => {
+    // Un agent qui n'écrit rien n'est pas une sortie non conforme : il n'y a
+    // simplement rien à décoder, et on finit proprement.
     const { events } = replay([{ type: "done", stopReason: "end_turn" }])
     expect(types(events)).toEqual(["step-start", "step-finish", "finish"])
   })
@@ -191,6 +230,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
         type: "plan",
         entries: [{ content: "Analyser", priority: "high", status: "pending" }],
       },
+      say("c'est fait"),
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
@@ -198,6 +238,9 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       "reasoning-start",
       "reasoning-delta",
       "reasoning-end",
+      "text-start",
+      "text-delta",
+      "text-end",
       "step-finish",
       "finish",
     ])
@@ -258,23 +301,24 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "tool-call").name).toBe("Écrire le fichier")
   })
 
-  test("un appel d'outil ferme le bloc de texte ouvert", () => {
-    // Sans cette fermeture, le core verrait un `text-delta` après un
-    // `tool-input-start` : hors des séquences acceptées (§4.0).
+  test("un appel d'outil ACP précède le texte rendu au done", () => {
+    // Le texte est tamponné : il ne peut plus « fermer » un bloc de texte ouvert
+    // par un `tool-input-start`. L'ordre reste simplement : appel d'outil d'abord
+    // (il est arrivé avant), texte ensuite.
     const { events } = replay([
-      { type: "text", text: "je regarde" },
+      say("je regarde"),
       { type: "tool", id: "c", name: "read", title: "Lire", kind: "read", status: "pending", input: {} },
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
       "step-start",
-      "text-start",
-      "text-delta",
-      "text-end",
       "tool-input-start",
       "tool-input-delta",
       "tool-input-end",
       "tool-call",
+      "text-start",
+      "text-delta",
+      "text-end",
       "step-finish",
       "finish",
     ])
@@ -297,7 +341,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     ["cancelled", "stop"],
     ["max_turn_requests", "stop"],
   ] as const)("stopReason %s → finishReason %s", (stopReason, expected) => {
-    const { events } = replay([{ type: "done", stopReason }])
+    const { events } = replay([say("voilà"), { type: "done", stopReason }])
     expect(first(events, "finish").reason.normalized).toBe(expected)
     expect(first(events, "step-finish").reason.normalized).toBe(expected)
   })
@@ -322,19 +366,15 @@ describe("réducteur AcpEvent → LLMEvent", () => {
   })
 
   test("une erreur termine le flux par provider-error, et le done suivant est ignoré", () => {
+    // ⚠️ Le tampon est **abandonné** : à l'erreur, ce qu'il contient est un JSON
+    // tronqué, et l'afficher produirait un transcript à moitié mangé. L'erreur de
+    // l'agent passe donc seule, terminale.
     const { state, events } = replay([
-      { type: "text", text: "partial" },
+      raw('{"type":"text","text":"partial'),
       { type: "error", message: "l'agent est mort" },
       { type: "done", stopReason: "cancelled" },
     ])
-    expect(types(events)).toEqual([
-      "step-start",
-      "text-start",
-      "text-delta",
-      "text-end",
-      "step-finish",
-      "provider-error",
-    ])
+    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
     expect(first(events, "provider-error").message).toBe("l'agent est mort")
     // Aucun `finish` **après** le terminal : le core le refuserait.
     expect(indexOfType(events, "finish")).toBe(-1)
@@ -344,7 +384,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
   test("l'usage de fenêtre de contexte est ignoré, celui du tour est une instance Usage", () => {
     const { events } = replay([
       { type: "usage", kind: "context", used: 12_345 },
-      { type: "text", text: "x" },
+      say("x"),
       {
         type: "usage",
         kind: "turn",
@@ -375,7 +415,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
   test("un usage vide n'est pas inventé", () => {
     const { events } = replay([
       { type: "usage", kind: "turn" },
-      { type: "text", text: "x" },
+      say("x"),
       { type: "done", stopReason: "end_turn" },
     ])
     expect(first(events, "finish").usage).toBeUndefined()
@@ -415,23 +455,43 @@ describe("réducteur AcpEvent → LLMEvent", () => {
   })
 
   test("halt ferme les blocs ouverts avant de terminer", () => {
-    // Le second `thought` a déjà refermé le bloc de texte : il ne reste que le
-    // raisonnement à fermer, ce que `halt` doit faire avant le `step-finish`.
-    const { state } = replay([{ type: "text", text: "a" }, { type: "thought", text: "b" }])
+    // Seul le raisonnement peut rester ouvert d'un `reduce` au suivant : le texte
+    // est tamponné, et le bloc de raisonnement doit être refermé avant le
+    // `step-finish`.
+    const { state } = replay([say("a"), { type: "thought", text: "b" }])
     const flushed = halt(state)
-    expect(types(flushed.events)).toEqual(["reasoning-end", "step-finish", "finish"])
+    expect(types(flushed.events)).toEqual([
+      "reasoning-end",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "step-finish",
+      "finish",
+    ])
     expect(indexOfType(flushed.events, "reasoning-end")).toBeLessThan(
-      indexOfType(flushed.events, "step-finish"),
+      indexOfType(flushed.events, "text-start"),
     )
   })
 
-  test("halt ferme un bloc de texte resté ouvert", () => {
-    const { state } = replay([{ type: "text", text: "a" }])
-    expect(types(halt(state).events)).toEqual(["text-end", "step-finish", "finish"])
+  test("halt montre le tampon s'il est complet, et le jette s'il est tronqué", () => {
+    // Une réponse arrivée entière puis un flux mort : elle est montrée. Une réponse
+    // coupée au milieu du JSON : la jeter vaut mieux qu'afficher du JSON mangé.
+    const complete = replay([say("déjà fini")])
+    expect(types(halt(complete.state).events)).toEqual([
+      "step-start",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "step-finish",
+      "finish",
+    ])
+
+    const truncated = replay([raw('{"type":"text","text":"jamais')])
+    expect(types(halt(truncated.state).events)).toEqual(["step-start", "step-finish", "finish"])
   })
 
   test("halt est sans effet après un done", () => {
-    const { state } = replay([{ type: "text", text: "a" }, { type: "done", stopReason: "end_turn" }])
+    const { state } = replay([say("a"), { type: "done", stopReason: "end_turn" }])
     expect(halt(state).events).toEqual([])
   })
 
@@ -440,6 +500,107 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       { type: "tool", id: "c", name: "bash", title: "ls", kind: "execute", status: "pending", input: {} },
     ])
     expect(first(halt(state).events, "finish").reason.normalized).toBe("tool-calls")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1bis. Le mécanisme §7.3 : le contrat de sortie, au niveau du réducteur
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
+  test("une réponse conforme « tool » devient un tool-call SANS tool-result", () => {
+    // Le test qui porte la valeur du projet : l'agent **propose**, OpenCode
+    // **exécute**. Sans `providerExecuted` ni `tool-result`, c'est exactement ce
+    // que fait la boucle OpenCode (permissions, snapshots, undo).
+    const proposal = JSON.stringify({
+      type: "tool",
+      name: "read",
+      arguments: { filePath: "README.md" },
+    })
+    const { state, events } = replay([raw(proposal), { type: "done", stopReason: "end_turn" }], withTools("read", "bash"))
+
+    expect(types(events)).toEqual([
+      "step-start",
+      "tool-input-start",
+      "tool-input-delta",
+      "tool-input-end",
+      "tool-call",
+      "step-finish",
+      "finish",
+    ])
+    expect(first(events, "tool-call")).toMatchObject({
+      name: "read",
+      input: { filePath: "README.md" },
+    })
+    expect(first(events, "tool-call").providerExecuted).toBeUndefined()
+    expect(indexOfType(events, "tool-result")).toBe(-1)
+    expect(indexOfType(events, "tool-error")).toBe(-1)
+    // C'est cette raison qui fait poursuivre la boucle OpenCode.
+    expect(first(events, "finish").reason.normalized).toBe("tool-calls")
+    expect(first(events, "step-finish").reason.normalized).toBe("tool-calls")
+    // L'appel entre dans le registre : il ne sera pas réémis.
+    expect(state.tools.size).toBe(1)
+    expect(first(events, "tool-input-delta").text).toBe('{"filePath":"README.md"}')
+  })
+
+  test("deux demandes d'outils ne peuvent pas être rendues dans un même tour", () => {
+    // Le contrat interdit d'en envoyer deux, et `parseAgentOutput` ne lit que
+    // le premier objet exploitable : le second est ignoré silencieusement plutôt
+    // que de produire une séquence que le core refuserait.
+    const both = `{"type":"tool","name":"read","arguments":{}}${JSON.stringify({
+      type: "tool",
+      name: "bash",
+      arguments: {},
+    })}`
+    const { events } = replay([raw(both), { type: "done", stopReason: "end_turn" }], withTools("read", "bash"))
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1)
+    expect(first(events, "tool-call").name).toBe("read")
+  })
+
+  test("un outil absent du catalogue échoue en nommant l'outillage et les noms acceptés", () => {
+    // Jamais de dégradation silencieuse en texte : l'utilisateur doit voir que le
+    // travail demandé est perdu, pas croire que l'agent a répondu normalement.
+    const { events } = replay(
+      [raw('{"type":"tool","name":"shell","arguments":{}}'), { type: "done", stopReason: "end_turn" }],
+      withTools("read", "bash"),
+    )
+    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+    const message = first(events, "provider-error").message
+    expect(message).toContain("shell")
+    expect(message).toContain("read, bash")
+    // Jamais de `finish` derrière un événement terminal.
+    expect(indexOfType(events, "finish")).toBe(-1)
+  })
+
+  test.each([
+    ["du texte brut", "Bonjour, je peux vous aider."],
+    ["du JSON invalide", '{"type":"text","text":'],
+    ["un type inconnu", '{"type":"réponse","text":"bonjour"}'],
+    ["un texte vide", '{"type":"text","text":""}'],
+  ])("%s finit en provider-error, jamais en troncature", (_label, output) => {
+    const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
+    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+    // Le message porte un extrait de la sortie : c'est la seule chose qui permet
+    // de comprendre *ce que* l'agent a produit de travers.
+    expect(first(events, "provider-error").message.length).toBeGreaterThan(20)
+  })
+
+  test("un objet échappé dans un bloc ``` reste lisible", () => {
+    // La tolérance de l'extraction ne s'arrête pas au premier `{` : une accolade
+    // dans une chaîne ne referme rien, sinon le texte de l'agent serait coupé.
+    const output = 'Voici : ```json\n{"type":"text","text":"voici {une} accolade"}\n```'
+    const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
+    expect(first(events, "text-delta").text).toBe("voici {une} accolade")
+  })
+
+  test("un `arguments` qui n'est pas un objet est refusé, pas avalé", () => {
+    for (const arguments_ of ['"read"', "[1,2]", "42", "null"]) {
+      const { events } = replay(
+        [raw(`{"type":"tool","name":"read","arguments":${arguments_}}`), { type: "done", stopReason: "end_turn" }],
+        withTools("read"),
+      )
+      expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+    }
   })
 })
 
@@ -574,7 +735,8 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
   test("un tour texte produit la séquence attendue", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
-    // `PING` fait répondre `PO` puis `NG` au faux agent : deux deltas, un bloc.
+    // `PING` fait répondre le faux agent, qui respecte le contrat : un seul
+    // `text` portant l'objet JSON, décodé en un unique `text-delta` au `done`.
     const request = buildRequest(languageModel, "PING")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
@@ -583,12 +745,11 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
       "step-start",
       "text-start",
       "text-delta",
-      "text-delta",
       "text-end",
       "step-finish",
       "finish",
     ])
-    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["PO", "NG"])
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["PONG"])
     expect(first(events, "finish").reason.normalized).toBe("stop")
   })
 
@@ -663,6 +824,80 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(first(events, "finish").reason.normalized).toBe("tool-calls")
   })
 
+  test("une réponse conforme « tool » devient un tool-call SANS tool-result, et finit en tool-calls", async () => {
+    // ⚠️ **Le test qui porte la valeur de P2b.** Le faux agent produit le contrat
+    // de sortie de `core/prompt.ts` — un `text` JSON unique — et le réducteur le
+    // transforme en `tool-call` que **OpenCode** exécutera. C'est le mécanisme
+    // §7.3 complet : prompt → parse → `LLMEvent` → boucle OpenCode.
+    const settings = fakeSettings()
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "TOOL_PROPOSAL")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(types(events)).toEqual([
+      "step-start",
+      "tool-input-start",
+      "tool-input-delta",
+      "tool-input-end",
+      "tool-call",
+      "step-finish",
+      "finish",
+    ])
+    // Le nom vient du **catalogue transmis dans le prompt** (ici `read`), jamais
+    // d'un nom d'outil ACP : c'est ce qui supprime tout problème de mapping.
+    expect(first(events, "tool-call")).toMatchObject({
+      name: "read",
+      input: { filePath: "README.md" },
+    })
+    expect(first(events, "tool-call").providerExecuted).toBeUndefined()
+    expect(indexOfType(events, "tool-result")).toBe(-1)
+    expect(indexOfType(events, "tool-error")).toBe(-1)
+    expect(first(events, "finish").reason.normalized).toBe("tool-calls")
+  })
+
+  test("un agent qui répond en texte brut échoue en provider-error, sans troncature", async () => {
+    // `FAKE_OUTPUT=raw` : l'agent ignore le contrat. C'est le cas qu'un agent
+    // tiers produit, et il ne doit surtout pas ressembler à une troncature.
+    const settings = fakeSettings({ FAKE_OUTPUT: "raw" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "bonjour")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+    expect(first(events, "provider-error").message).toContain("bonjour")
+    expect(indexOfType(events, "finish")).toBe(-1)
+  })
+
+  test("un outil halluciné échoue en nommant le catalogue transmis", async () => {
+    // `FAKE_OUTPUT=hallucinated` : l'agent propose un outil qui n'existe pas.
+    // Le message doit nommer l'outil **et** les noms acceptés, sinon l'utilisateur
+    // ne peut rien faire du tour.
+    const settings = fakeSettings({ FAKE_OUTPUT: "hallucinated" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "bonjour")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    const message = first(events, "provider-error").message
+    expect(message).toContain("outil_qui_nexiste_pas")
+    expect(message).toContain("read")
+    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+  })
+
+  test("une réponse enfermée dans un bloc ``` est acceptée", async () => {
+    // `FAKE_OUTPUT=fenced` : beaucoup d'agents Buryent leur JSON dans un bloc de
+    // markdown. La tolérance de `parseAgentOutput` doit absorber ça.
+    const settings = fakeSettings({ FAKE_OUTPUT: "fenced" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["PONG"])
+  })
+
   test("l'usage du tour est une instance de la classe Usage", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
@@ -683,9 +918,11 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
   })
 
   test("un flux interrompu ne hangue pas et n'émet pas de finish orphelin", async () => {
-    // `TICK` : un chunk immédiat, puis une longue latence interruptible. On ne
-    // prend que les premiers événements : le `Scope` de la requête se ferme,
-    // la session se ferme, l'agent reçoit `session/cancel`.
+    // `TICK` : un `thought` immédiat, puis une longue latence interruptible. Le
+    // raisonnement est ce qui est encore streamé en direct (le texte est
+    // tamponné jusqu'au `done`), donc c'est lui qu'on attend. On ne prend que les
+    // premiers événements : le `Scope` de la requête se ferme, la session se
+    // ferme, l'agent reçoit `session/cancel`.
     const settings = fakeSettings({ FAKE_SLOW_MS: "30000" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "TICK")
@@ -711,7 +948,7 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     // durerait 30 s.
     expect(elapsed).toBeLessThan(10_000)
     const seen = outcome.success.map((event) => event.type)
-    expect(seen).toEqual(["step-start", "text-start"])
+    expect(seen).toEqual(["step-start", "reasoning-start"])
     // Aucun événement terminal, donc surtout **pas** de `finish` sans
     // `step-finish` : ce serait exactement la troncature que le core signale
     // par « The provider response ended unexpectedly. ».

@@ -22,6 +22,16 @@
  * produit exactement le même message d'erreur qu'un flux tronqué ; le réducteur
  * construit donc toujours l'instance, et ne l'ajoute à l'état que si l'agent a
  * réellement rapporté des compteurs.
+ *
+ * ⚠️ **Depuis P2b, le texte d'un tour est tamponné.** Le `text` de l'agent n'est
+ * plus traduit au fil de l'eau : il est accumulé, puis décodé par
+ * `core/parse.ts` au `done`, et rendu d'un seul bloc. La raison est le mécanisme
+ * §7.3 : tant qu'on n'a pas lu la réponse entière, on ne sait pas si c'est du
+ * texte ou un appel d'outil — et émettre le premier `text-delta` plus tôt
+ * afficherait le JSON brut du contrat dans le transcript. C'est un compromis
+ * assumé : ce qui reste streamé en direct, c'est l'activité de l'agent
+ * (`thought` → `reasoning-*`, `plan`), donc l'utilisateur n'attend jamais dans
+ * le vide.
  */
 
 import { Effect, Schema } from "effect"
@@ -29,7 +39,16 @@ import { Protocol } from "@opencode/ai/route"
 import { Usage } from "@opencode/ai/schema/index"
 import type { AIError, FinishReason, LLMEvent, LLMRequest } from "@opencode/ai/schema/index"
 
-import type { AcpEvent, AcpStopReason, NormalizedMessage, NormalizedRequest, PlanEntry } from "../core/types.js"
+import { parseAgentOutput } from "../core/parse.js"
+import type { AgentOutput } from "../core/parse.js"
+import type {
+  AcpEvent,
+  AcpStopReason,
+  NormalizedMessage,
+  NormalizedRequest,
+  NormalizedTool,
+  PlanEntry,
+} from "../core/types.js"
 import type { AcpProviderSettings } from "../settings.js"
 
 /** Identifiant du protocole, visible dans les diagnostics de `@opencode/ai`. */
@@ -189,12 +208,43 @@ export interface ReducerState {
   readonly step: number
   /** Un `step-start` a-t-il été émis pour le step courant ? */
   readonly started: boolean
-  /** Id du bloc de texte ouvert, `null` si aucun. */
-  readonly text: string | null
-  /** Id du bloc de raisonnement ouvert, `null` si aucun. */
+  /**
+   * Id du bloc de raisonnement ouvert, `null` si aucun.
+   *
+   * ⚠️ C'est le **seul** bloc qui puisse rester ouvert entre deux `reduce` : un
+   * bloc de texte est désormais émis d'un trait (`text-start` / `text-delta` /
+   * `text-end` dans le même tableau) une fois la sortie décodée, donc il ne peut
+   * pas structurellement être laissé ouvert. Il n'y a donc plus de champ « texte
+   * ouvert » dans l'état.
+   */
   readonly reasoning: string | null
   /** Compteur de blocs ouverts, pour des ids uniques et lisibles dans les logs. */
   readonly blocks: number
+  /**
+   * Sortie brute de l'agent, accumulée **sans être émise**.
+   *
+   * ⚠️ Compromis assumé de P2b : on ne peut savoir si la réponse est du texte ou
+   * un appel d'outil qu'après l'avoir lue **en entier**. Émettre le premier
+   * `text-delta` avant la fin ferait apparaître le JSON brut dans le transcript —
+   * c'est-à-dire exactement le texte que l'agentACP a produit et non sa réponse.
+   * On tamponne donc, et on rend le texte d'un seul bloc à la fin. Ce qui reste
+   * **streamé en direct** : `thought` → `reasoning-*`, `plan`, et l'agent continue
+   * de montrer son activité pendant qu'on attend.
+   */
+  readonly buffer: string
+  /**
+   * Catalogue d'outils de la requête, recopié depuis `NormalizedRequest.tools`.
+   *
+   * ⚠️ Il est dans l'état, et non global, pour deux raisons : le réducteur reste
+   * **pur** (même catalogue + mêmes événements ⇒ même sortie, donc tests
+   * reproductibles) et deux requêtes concurrentes ne peuvent pas se voler le
+   * catalogue l'une de l'autre. `initial(request)` le remplit ; `initialState`
+   * le laisse vide, ce qui est la seule façon de tester le cas « l'agent a
+   * proposé un outil alors qu'aucun n'était disponible ».
+   */
+  readonly catalog: readonly NormalizedTool[]
+  /** Compteur d'appels d'outils émis, pour des ids de `tool-call` uniques. */
+  readonly calls: number
   /** Ids des appels d'outils **déjà émis** — une seule fois par id (§7.3). */
   readonly tools: ReadonlySet<string>
   /** Un `step-finish` a-t-il été émis pour le step courant ? */
@@ -219,9 +269,11 @@ export interface Reduction {
 export const initialState: ReducerState = {
   step: 0,
   started: false,
-  text: null,
   reasoning: null,
   blocks: 0,
+  buffer: "",
+  catalog: [],
+  calls: 0,
   tools: new Set<string>(),
   stepFinished: false,
   finished: false,
@@ -317,13 +369,58 @@ const toolNameOf = (event: Extract<AcpEvent, { type: "tool" }>): string =>
   event.name !== "" ? event.name : event.title !== "" ? event.title : "tool"
 
 /**
+ * Traduit une sortie d'agent **validée** en `LLMEvent` — §7.3, le cœur du projet.
+ *
+ * Fonction pure, partagée par le `done` et par la `flush` de `halt`.
+ *
+ * ⚠️ Le `tool-call` est émis **sans `providerExecuted` et sans `tool-result`** :
+ * c'est précisément ce qui fait qu'OpenCode exécute l'outil pour de vrai, avec ses
+ * permissions, ses snapshots et son undo. Un `tool-result` ici ferait croire que
+ * l'agent a déjà fait le travail — il l'a seulement **proposé**.
+ *
+ * ⚠️ L'id du `tool-call` est synthétisé ici, et c'est le seul endroit du projet qui
+ * ose le faire : il vient du `buffer`, pas du transcript, donc il ne peut pas
+ * entrer en collision avec un id de `request.messages`. Il est renvoyé verbatim au
+ * tour suivant par `fromRequest` (§2.1).
+ */
+const emitOutput = (state: ReducerState, output: AgentOutput): Reduction => {
+  if (output.type === "text") {
+    const id = `text-${state.blocks}`
+    return {
+      state: { ...state, blocks: state.blocks + 1 },
+      events: [
+        { type: "text-start", id },
+        { type: "text-delta", id, text: output.text },
+        { type: "text-end", id },
+      ],
+    }
+  }
+  const id = `acp-call-${state.calls}`
+  const { name } = output
+  const input = output.arguments
+  return {
+    state: { ...state, calls: state.calls + 1, tools: new Set([...state.tools, id]) },
+    events: [
+      { type: "tool-input-start", id, name },
+      { type: "tool-input-delta", id, name, text: renderJson(input), input },
+      { type: "tool-input-end", id, name },
+      { type: "tool-call", id, name, input },
+    ],
+  }
+}
+
+/**
  * Traduit **un** `AcpEvent`.
  *
  * Fonction pure : mêmes entrées, même sortie, aucun état mutable partagé.
  *
+ * ⚠️ Le `text` n'est plus traduit au fil de l'eau depuis P2b : il est **tamponné**
+ * (voir `ReducerState.buffer`) et rendu d'un bloc au `done`, une fois le contrat
+ * de sortie de `core/prompt.ts` décodé. Le raisonnement et les plans, eux, restent
+ * émis en direct — c'est ce qui continue de montrer l'activité de l'agent.
+ *
  * ⚠️ ACP n'a pas d'événement « début de bloc » ni « fin de bloc » : un `text`
- * est un delta, rien de plus. L'ouverture est donc **dérivée** (`openText`
- * n'émet `text-start` que si aucun bloc n'est ouvert) et la fermeture est
+ * est un delta, rien de plus. L'ouverture reste donc **dérivée** et la fermeture
  * **calculée** (`closeText` n'émet `text-end` que si un bloc est ouvert). Un
  * agent qui envoie un delta sans avoir « ouvert » ne peut pas nous mettre en
  * défaut, puisqu'il n'y a rien à ouvrir.
@@ -351,31 +448,16 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
     next = { ...next, reasoning: null }
   }
 
-  /** Ferme le bloc de texte s'il est ouvert. */
-  const closeText = (): void => {
-    if (next.text === null) return
-    events.push({ type: "text-end", id: next.text })
-    next = { ...next, text: null }
-  }
-
-  /** Ferme tout bloc ouvert : un seul à la fois, l'ordre d'ouverture est respecté. */
-  const closeBlocks = (): void => {
-    closeReasoning()
-    closeText()
-  }
-
-  /** Ouvre un bloc de texte, en refermant d'abord tout ce qui traîne. */
-  const openText = (): void => {
-    closeReasoning()
-    if (next.text !== null) return
-    const id = `text-${next.blocks}`
-    events.push({ type: "text-start", id })
-    next = { ...next, text: id, blocks: next.blocks + 1 }
-  }
-
-  /** Ouvre un bloc de raisonnement, en refermant d'abord tout ce qui traîne. */
+  /**
+   * Ouvre un bloc de raisonnement.
+   *
+   * ⚠️ Le raisonnement est le **seul** bloc qui puisse rester ouvert d'un
+   * `reduce` au suivant : un bloc de texte est désormais émis d'un trait par
+   * `emitOutput` (`text-start` / `text-delta` / `text-end` dans le même tableau),
+   * donc il ne peut structurellement pas rester ouvert. Le raisonnement, lui, est
+   * streamé au fil de l'eau, et c'est donc le seul à refermer ici.
+   */
   const openReasoning = (): void => {
-    closeText()
     if (next.reasoning !== null) return
     const id = `reasoning-${next.blocks}`
     events.push({ type: "reasoning-start", id })
@@ -384,11 +466,11 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
 
   switch (event.type) {
     case "text": {
+      // ⚠️ Tamponné, rien n'est émis : voir `ReducerState.buffer`. Aucun
+      // `step-start` ici non plus — un step ne s'ouvre que lorsqu'il a quelque
+      // chose à montrer, et le `done` l'ouvrira de toute façon.
       if (event.text === "") return { state: next, events }
-      ensureStep()
-      openText()
-      events.push({ type: "text-delta", id: next.text ?? "", text: event.text })
-      return { state: next, events }
+      return { state: { ...next, buffer: next.buffer + event.text }, events }
     }
 
     case "thought": {
@@ -416,7 +498,7 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
       // reviendra au tour suivant, dans `request.messages`.
       if (next.tools.has(event.id)) return { state: next, events }
       ensureStep()
-      closeBlocks()
+      closeReasoning()
       const name = toolNameOf(event)
       const input = event.input ?? {}
       events.push({ type: "tool-input-start", id: event.id, name })
@@ -425,7 +507,10 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
       // ⚠️ **Pas** de `providerExecuted` : c'est ce qui fait qu'OpenCode exécute
       // l'outil pour de vrai (permissions, snapshots, undo, journalisation).
       events.push({ type: "tool-call", id: event.id, name, input })
-      return { state: { ...next, tools: new Set([...next.tools, event.id]) }, events }
+      return {
+        state: { ...next, calls: next.calls + 1, tools: new Set([...next.tools, event.id]) },
+        events,
+      }
     }
 
     case "usage": {
@@ -446,7 +531,7 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
 
     case "error": {
       ensureStep()
-      closeBlocks()
+      closeReasoning()
       events.push({ type: "step-finish", index: next.step, reason: { normalized: "error" } })
       // `provider-error` **est** l'événement terminal du protocole (§4.0) : il
       // porte le message de l'agent jusqu'à l'interface, là où un
@@ -458,9 +543,35 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
 
     case "done": {
       ensureStep()
-      closeBlocks()
-      const reason = { normalized: finishReasonOf(next, event.stopReason) } as const
+      closeReasoning()
       const usage = next.usage
+
+      // ⚠️ Le moment de vérité du mécanisme §7.3 : c'est ici, et **seulement**
+      // ici, qu'on sait si la réponse accumulée est du texte ou un appel d'outil.
+      //
+      // Un tampon **vide** n'est pas une sortie non conforme : l'agent a pu ne
+      // rien écrire du tout (il a proposé un outil via ACP, ou il a été annulé),
+      // et il n'y a alors rien à décoder. On n'applique le contrat que s'il y a
+      // effectivement quelque chose à lire.
+      const parsed =
+        next.buffer.trim() === "" ? undefined : parseAgentOutput(next.buffer, next.catalog)
+      if (parsed !== undefined && !parsed.ok) {
+        // `provider-error` est terminal et le core **refuse** tout événement
+        // après lui : on émet donc le `step-finish` qui manque, et surtout
+        // **jamais** un `finish` derrière. Un `ParseError` qui nierait la
+        // présence de ce `step-finish` se lirait comme une troncature de flux —
+        // indiscernable d'une panne de pipe, donc inexploitable (§4.0).
+        events.push({ type: "step-finish", index: next.step, reason: { normalized: "error" } })
+        events.push({ type: "provider-error", message: parsed.error.message })
+        return { state: { ...next, stepFinished: true, terminal: true }, events }
+      }
+
+      const emitted =
+        parsed === undefined ? { state: next, events: [] } : emitOutput(next, parsed.output)
+      events.push(...emitted.events)
+      next = emitted.state
+
+      const reason = { normalized: finishReasonOf(next, event.stopReason) } as const
       events.push({
         type: "step-finish",
         index: next.step,
@@ -501,9 +612,17 @@ export const halt = (state: ReducerState): Reduction => {
     events.push({ type: "reasoning-end", id: next.reasoning })
     next = { ...next, reasoning: null }
   }
-  if (next.text !== null) {
-    events.push({ type: "text-end", id: next.text })
-    next = { ...next, text: null }
+  // ⚠️ Le tampon est lu ici, et **seulement s'il est complet**. Un flux interrompu
+  // au milieu d'un JSON n'a rien d'exploitable — l'afficher produirait un
+  // transcript à moitié mangé — mais un flux dont la réponse est arrivée complète
+  // et qui meurt ensuite sur le `done` mérite bien d'être montré.
+  if (next.buffer.trim() !== "") {
+    const parsed = parseAgentOutput(next.buffer, next.catalog)
+    if (parsed.ok) {
+      const emitted = emitOutput(next, parsed.output)
+      events.push(...emitted.events)
+      next = emitted.state
+    }
   }
   const reason = { normalized: haltReason(next) } as const
   const usage = next.usage
@@ -589,6 +708,20 @@ interface Textual {
   readonly role: "user" | "assistant"
   readonly parts: string[]
 }
+
+/**
+ * État initial d'un tour, catalogue compris.
+ *
+ * ⚠️ `Protocol.stream.initial` reçoit la `LLMRequest` résolue : c'est le seul
+ * endroit où le catalogue d'outils est disponible pour le réducteur, puisque les
+ * trames qui suivent ne portent que de l'ACP. On le recopie **dans l'état** et
+ * non dans une variable de module : le réducteur reste pur, et deux tours
+ * concurrents ne partagent pas leur catalogue.
+ */
+export const initialStateFor = (request: LLMRequest): ReducerState => ({
+  ...initialState,
+  catalog: flattenTools(request.tools),
+})
 
 /**
  * `LLMRequest` → `NormalizedRequest`.
@@ -704,7 +837,7 @@ export const makeProtocol = (settings: AcpProviderSettings): Protocol<
     },
     stream: {
       event: frameSchema,
-      initial: () => initialState,
+      initial: initialStateFor,
       step: (state, frame) => {
         const { state: next, events } = reduce(state, frame.ev)
         return Effect.succeed([next, events] as const)

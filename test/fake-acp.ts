@@ -10,14 +10,26 @@
  *   - `initialize`  → protocole v1, `agentInfo: { name: "fake-acp", … }`
  *   - `session/new`  → 4 `configOptions` réalistes (3 modèles, 3 niveaux
  *                      d'effort, 2 modes dont un à URL longue, permissions)
- *   - `session/prompt` :
- *       · contient `PING`           → deux chunks texte `PO` puis `NG`
- *       · contient `TICK`           → `TICK`, longue latence interruptible, `TOK`
- *       · contient `TOOL`           → `tool_call` puis deux `tool_call_update`
- *       · contient `PLAN`           → une notification `plan`
+ *   - `session/prompt` (les mots-clés sont cherchés dans le **dernier message
+ *     utilisateur** du transcript, pas dans tout le prompt — voir `userText`) :
+ *       · contient `PING`           → un chunk texte : `{"type":"text","text":"PONG"}`
+ *       · contient `TICK`           → un `thought`, longue latence interruptible,
+ *                                     puis `{"type":"text","text":"TOK"}`
+ *       · contient `TOOL_PROPOSAL`  → une proposition d'outil au format JSON (§7.3)
+ *       · contient `TOOL`           → `tool_call` puis deux `tool_call_update`,
+ *                                     puis `{"type":"text","text":"TOOL_OK"}`
+ *       · contient `PLAN`           → une notification `plan`, puis `PLAN_OK`
  *       · contient `NEED_PERMISSION`→ permission, puis `ALLOWED`/`DENIED`/`CANCELLED`
- *       · sinon                      → un chunk texte `ACK: <prompt>`
+ *       · sinon                      → `{"type":"text","text":"ACK: <prompt>"}`
  *     puis `stop` avec un `usage`.
+ *
+ * ⚠️ **Pourquoi tout ceci respecte le contrat JSON de `core/prompt.ts` (§7.3).**
+ * Depuis P2b, le provider **tamponne** le texte de l'agent et le décode au `done` :
+ * un faux agent qui répond « ACK: … » en texte brut ferait échouer **tous** les
+ * tours du bout-en-bout avec un `provider-error`. Un agent trop gentil laisse
+ * passer des mutations, et le premier réflexe d'un faux est d'être inexact : il
+ * obéit donc au contrat, et `FAKE_OUTPUT` permet de reprendre ponctuellement le
+ * rôle d'un agent qui ne l'obéit pas.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * Paramétrage par variables d'environnement
@@ -42,6 +54,7 @@
  * | `FAKE_EXIT_AT_INIT=1`          | quitte avant de répondre à `initialize`                     |
  * | `FAKE_SLOW_INIT_MS=<n>`         | `initialize` ne répond qu'après `<n>` ms (teste le timeout)  |
  * | `FAKE_SLOW_MS=<n>`             | latence volontaire, interruptible par `session/cancel`      |
+ * | `FAKE_OUTPUT=<x>`              | forme de la réponse : `contract` (défaut), `raw`, `fenced`, `hallucinated`, `bad-type` |
  */
 
 import { writeFileSync } from "node:fs"
@@ -76,6 +89,52 @@ const SLOW_INIT_MS = positiveInt("FAKE_SLOW_INIT_MS")
 
 /** Latence partagée par `wait()`. */
 const SLOW_MS = positiveInt("FAKE_SLOW_MS")
+
+/**
+ * Forme de la réponse du faux agent — §7.3.
+ *
+ * `contract` est le seul mode « honnête » : c'est ce qu'un agent qui a compris
+ * la consigne produit, et c'est donc le mode par défaut des tours de bout-en-bout.
+ * Les autres rejouent les mutations les plus coûteuses à atteindre avec un vrai
+ * agent : ne pas répondre du tout dans le format demandé, l'enfermer dans un
+ * bloc de markdown, proposer un outil qui n'existe pas, ou se tromper de `type`.
+ */
+type OutputMode = "contract" | "raw" | "fenced" | "hallucinated" | "bad-type"
+
+const OUTPUT_MODE = ((): OutputMode => {
+  const raw = process.env["FAKE_OUTPUT"]
+  if (raw === "raw" || raw === "fenced" || raw === "hallucinated" || raw === "bad-type") return raw
+  return "contract"
+})()
+
+/** Le JSON du contrat, éventuellement déformé selon `FAKE_OUTPUT`. */
+const answer = (text: string): string => {
+  const contract = JSON.stringify({ type: "text", text })
+  switch (OUTPUT_MODE) {
+    case "raw":
+      return text
+    case "fenced":
+      return `Voici ma réponse :\n\`\`\`json\n${contract}\n\`\`\`\n`
+    case "hallucinated":
+      return JSON.stringify({ type: "tool", name: "outil_qui_nexiste_pas", arguments: {} })
+    case "bad-type":
+      return JSON.stringify({ type: "réponse", text })
+    default:
+      return contract
+  }
+}
+
+/** Un `thought` : le seul contenu encore streamé en direct depuis P2b. */
+const thought = (text: string): acp.SessionUpdate => ({
+  sessionUpdate: "agent_thought_chunk",
+  content: { type: "text", text },
+})
+
+/** La forme « tool » du contrat, déformée elle aussi par `FAKE_OUTPUT`. */
+const answerTool = (name: string, args: Record<string, unknown>): string => {
+  if (OUTPUT_MODE === "raw") return `${name} ${JSON.stringify(args)}`
+  return JSON.stringify({ type: "tool", name, arguments: args })
+}
 
 /** Jeu d'options de permission proposé lors d'une `session/request_permission`. */
 type PermissionFlavor = "mixed" | "reject" | "allow" | "cancel"
@@ -301,7 +360,7 @@ class FakeAgent {
     params: acp.PromptRequest,
     cx: acp.AgentContext,
   ): Promise<acp.PromptResponse> {
-    const text = promptText(params)
+    const text = userText(promptText(params))
     const notify = (update: acp.SessionUpdate): Promise<void> =>
       cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update })
     const finish = (stopReason: acp.StopReason = STOP_REASON): acp.PromptResponse => ({
@@ -310,13 +369,15 @@ class FakeAgent {
     })
     const interrupted = (): boolean => this.cancelled.has(params.sessionId)
 
-    // Cas « TICK » : un événement tout de suite, puis une longue latence. Sert à
-    // prouver qu'un abandon du consommateur rend la main sans attendre le tour.
+    // Cas « TICK » : un `thought` tout de suite, puis une longue latence. Le
+    // `thought` est ce qui reste streamé en direct depuis P2b (le texte, lui, est
+    // tamponné jusqu'au `done`), donc c'est lui qui permet de vérifier que le
+    // tour avance et que l'abandon du consommateur rend la main sans attendre.
     if (text.includes("TICK")) {
-      await notify(chunk("TICK"))
+      await notify(thought("TICK"))
       await this.wait(params.sessionId)
       if (interrupted()) return finish("cancelled")
-      await notify(chunk("TOK"))
+      await notify(chunk(answer("TOK")))
       return finish()
     }
 
@@ -344,7 +405,12 @@ class FakeAgent {
       const selected = response.outcome.outcome === "selected" ? response.outcome.optionId : ""
       const verdict =
         selected === "allow-once" ? "ALLOWED" : selected === "reject-once" ? "DENIED" : "CANCELLED"
-      await notify(chunk(verdict))
+      await notify(chunk(answer(verdict)))
+    } else if (text.includes("TOOL_PROPOSAL")) {
+      // ⚠️ Le chemin §7.3 : l'agent **propose** un outil d'OpenCode et
+      // n'exécute rien lui-même. C'est du texte ordinaire côté ACP — c'est le
+      // réducteur qui le décode et en fait un `tool-call`.
+      await notify(chunk(answerTool("read", { filePath: "README.md" })))
     } else if (text.includes("TOOL")) {
       // §4 : `tool_call` puis `tool_call_update` (pending → in_progress →
       // completed), avec `content`/`rawOutput` sur la mise à jour finale.
@@ -368,7 +434,7 @@ class FakeAgent {
         content: [{ type: "content", content: { type: "text", text: "# README" } }],
         rawOutput: { bytes: 1234 },
       })
-      await notify(chunk("TOOL_OK"))
+      await notify(chunk(answer("TOOL_OK")))
     } else if (text.includes("PLAN")) {
       await notify({
         sessionUpdate: "plan",
@@ -377,12 +443,19 @@ class FakeAgent {
           { content: "Implémenter", priority: "medium", status: "in_progress" },
         ],
       })
-      await notify(chunk("PLAN_OK"))
+      await notify(chunk(answer("PLAN_OK")))
     } else if (text.includes("PING")) {
-      await notify(chunk("PO"))
-      await notify(chunk("NG"))
+      await notify(chunk(answer("PONG")))
     } else {
-      await notify(chunk(`ACK: ${text}`))
+      // Le défaut « echo » : il renvoie le prompt **qu'il a reçu**, ce qui est le
+      // seul moyen de vérifier `fromRequest` et `renderRequest` de bout en bout.
+      //
+      // ⚠️ En mode `raw` on n'échoie que le message utilisateur : le prompt
+      // complet contient le contrat de sortie et ses exemples, donc l'extracteur
+      // tolérant de `parseAgentOutput` y trouverait un objet **valide** — et
+      // « raw » passerait par un chemin vert, exactement le faux positif que ce
+      // mode est censé produire.
+      await notify(chunk(answer(OUTPUT_MODE === "raw" ? text : `ACK: ${promptText(params)}`)))
     }
 
     if (flag("FAKE_DIE_ON_PROMPT") && text.includes("DIE")) {
@@ -405,6 +478,32 @@ const promptText = (params: acp.PromptRequest): string =>
   params.prompt
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join("\n")
+
+/** Ce qui interrompt un message utilisateur : un autre rôle, ou la section suivante. */
+const END_OF_USER_MESSAGE = /(?:\n## |\n(?:Utilisateur|Assistant|Outil [^\n]*) : )/
+
+/** Début de ligne du préfixe de rôle écrit par `renderRequest`. */
+const USER_LINE = /^Utilisateur : /gm
+
+/**
+ * Le **dernier message utilisateur** du prompt.
+ *
+ * ⚠️ Les mots-clés du faux agent (`PING`, `TOOL`…) ne doivent porter que sur ce
+ * que l'utilisateur a réellement demandé. Les chercher dans tout le prompt était
+ * tenable tant qu'il ne contenait que le transcript ; depuis P2b il contient le
+ * **contrat de sortie**, ses exemples et le nom de tous les outils — n'importe
+ * lequel de ces mots rendrait le faux incapable de choisir sa branche. On isole
+ * donc le segment, du préfixe « Utilisateur : » jusqu'au premier début de ligne
+ * qui en est un autre ou au début de la section suivante.
+ */
+const userText = (full: string): string => {
+  const starts = [...full.matchAll(USER_LINE)]
+  const last = starts[starts.length - 1]
+  if (last?.index === undefined) return full
+  const after = full.slice(last.index + last[0].length)
+  const end = after.search(END_OF_USER_MESSAGE)
+  return end === -1 ? after : after.slice(0, end)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Câblage stdio

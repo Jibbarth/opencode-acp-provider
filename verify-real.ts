@@ -17,6 +17,7 @@ import {
   Message,
   SystemPart,
   ToolEntry,
+  Usage,
 } from "@opencode/ai/schema/index"
 import type { LLMEvent } from "@opencode/ai/schema/index"
 
@@ -37,10 +38,16 @@ const route = languageModel.route
 console.log(`# agent    : ${command} ${settings.args.join(" ")}`)
 console.log(`# route    : id=${route.id} protocol=${route.protocol} transport=${route.transport.id}`)
 
+// Par défaut on exige le contrat : sans cette consigne, l'agent répond
+// simplement « pong » et l'analyse échoue — ce qui testerait la constance de
+// l'agent plutôt que notre code.
+const DEFAULT_TEXT =
+  'Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"pong"}'
+
 const request = new LLMRequest({
   model: languageModel,
   system: [SystemPart.make("Tu es un assistant de test.")],
-  messages: [Message.user(process.env.ACP_PROBE_TEXT ?? "ping")],
+  messages: [Message.user(process.env.ACP_PROBE_TEXT ?? DEFAULT_TEXT)],
   tools: [
     ToolEntry.make({
       name: "read",
@@ -99,9 +106,14 @@ for (const e of events) {
     case "finish": {
       console.log(`\n[${e.type}] reason=${e.reason.normalized}`)
       if (e.usage) {
-        const u = e.usage as unknown as Record<string, unknown>
-        console.log(`  usage: ${u.constructor?.name} input=${u.inputTokens} output=${u.outputTokens} cacheWrite=${u.cacheWriteInputTokens}`)
-        if (u.constructor?.name !== "Usage") {
+        // `Usage` est une classe de schéma : un objet littéral ferait
+        // échouer le flux avec un message trompeur, donc on le vérifie
+        // pour de vrai plutôt que sur son nom.
+        const u = e.usage
+        console.log(
+          `  usage: ${u.constructor.name} input=${u.inputTokens} output=${u.outputTokens} cacheWrite=${u.cacheWriteInputTokens}`,
+        )
+        if (!(u instanceof Usage)) {
           console.log("  !! usage n'est pas une instance de Usage")
           ok = false
         }

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url"
 
 import { createAcpAgent, AcpAgentError } from "../src/acp/agent.js"
 import { parseInventory, shortenModeId } from "../src/core/models.js"
+import { parseAgentOutput } from "../src/core/parse.js"
 import { renderRequest } from "../src/core/prompt.js"
 import type {
   AcpAgent,
@@ -187,9 +188,25 @@ const eventTypes = (jsonl: string): string[] =>
       return typeof parsed.type === "string" ? parsed.type : "?"
     })
 
-/** Les `text` d'un flux, joints. */
-const textOf = (events: readonly AcpEvent[]): string =>
+/** Les `text` d'un flux, joints — **bruts**, contrat de sortie compris. */
+const rawTextOf = (events: readonly AcpEvent[]): string =>
   events.flatMap((e) => (e.type === "text" ? [e.text] : [])).join("")
+
+/**
+ * Le texte **visible** d'un flux.
+ *
+ * ⚠️ Depuis P2b, un `AcpEvent` de type `text` porte l'objet du contrat de sortie
+ * écrit par `core/prompt.ts` (`{"type":"text","text":"…"}`), pas la réponse : le
+ * décodage est fait par l'adaptateur (`adapters/opencode-protocol.ts`), pas par
+ * la couche ACP. On le refait ici avec le **vrai** `parseAgentOutput`, pour que
+ * ces tests couvrent exactement ce que l'utilisateur verra.
+ */
+const textOf = (events: readonly AcpEvent[]): string => {
+  const parsed = parseAgentOutput(rawTextOf(events), [])
+  if (!parsed.ok) throw new Error(parsed.error.message)
+  if (parsed.output.type !== "text") throw new Error("une demande d'outil n'a pas de texte visible")
+  return parsed.output.text
+}
 
 beforeAll(async () => {
   agent = await spawnFake()
@@ -347,7 +364,7 @@ describe("inventaire (configOptions)", () => {
 })
 
 describe("prompt → AcpEvent", () => {
-  test('un prompt "PING" produit les texte "PONG" puis usage et done', async () => {
+  test('un prompt "PING" produit un texte conforme au contrat, puis usage et done', async () => {
     const session = await agent.open()
     try {
       const events = await collect(session.prompt(request("PING")))
@@ -356,8 +373,10 @@ describe("prompt → AcpEvent", () => {
       // porte les compteurs **et** les paliers de cache, tous présents dans
       // l'`Usage` ACP (cf. §4.1).
       expect(events).toEqual([
-        { type: "text", text: "PO" },
-        { type: "text", text: "NG" },
+        // ⚠️ Un **seul** `text` : depuis P2b le faux respecte le contrat de
+        // sortie, donc il ne découpe plus « PONG » en morceaux — c'est l'adaptateur
+        // qui décide, au `done`, si c'est du texte ou un appel d'outil.
+        { type: "text", text: '{"type":"text","text":"PONG"}' },
         {
           type: "usage",
           kind: "turn",
@@ -403,7 +422,9 @@ describe("prompt → AcpEvent", () => {
       // ⚠️ Le préfixe de rôle n'est pas cosmétique : ACP n'a pas de champ
       // « system », le transcript est rendu à plat, et l'agent doit pouvoir
       // distinguer une instruction de sa propre sortie antérieure (§7.3).
-      expect(events[0]).toEqual({ type: "text", text: "ACK: Utilisateur : bonjour le monde" })
+      const answered = textOf(events)
+      expect(answered.startsWith("ACK: ")).toBe(true)
+      expect(answered).toContain("Utilisateur : bonjour le monde")
     } finally {
       await session.close()
     }
@@ -599,14 +620,16 @@ describe("annulation", () => {
         const events: AcpEvent[] = []
         for await (const event of session.prompt(request("TICK"), { signal: controller.signal })) {
           events.push(event)
-          if (event.type === "text" && event.text === "TICK") controller.abort()
+          // ⚠️ `thought`, plus `text` : depuis P2b c'est le raisonnement qui est
+          // streamé en direct, le texte de réponse n'arrive qu'au `done`.
+          if (event.type === "thought" && event.text === "TICK") controller.abort()
         }
-        expect(events[0]).toEqual({ type: "text", text: "TICK" })
+        expect(events[0]).toEqual({ type: "thought", text: "TICK" })
         expect(events.at(-1)).toEqual({ type: "done", stopReason: "cancelled" })
         // L'annulation a bien court-circuité la latence de 800 ms : sans elle,
         // le tour serait allé jusqu'à « TOK » puis `end_turn`.
         expect(Date.now() - started).toBeLessThan(800)
-        expect(textOf(events)).not.toContain("TOK")
+        expect(rawTextOf(events)).not.toContain("TOK")
       } finally {
         await session.close()
       }
@@ -625,7 +648,7 @@ describe("annulation", () => {
       try {
         let abandonedAt = 0
         for await (const event of session.prompt(request("TICK"))) {
-          expect(event).toEqual({ type: "text", text: "TICK" })
+          expect(event).toEqual({ type: "thought", text: "TICK" })
           abandonedAt = Date.now()
           break
         }
@@ -648,7 +671,7 @@ describe("annulation", () => {
       try {
         // Sans abandon, l'annulation automatique ne doit jamais se déclencher.
         const events = await collect(session.prompt(request("TICK")))
-        expect(textOf(events)).toBe("TICKTOK")
+        expect(textOf(events)).toBe("TOK")
         expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
         expect(events.some((e) => e.type === "usage")).toBe(true)
       } finally {
@@ -669,9 +692,7 @@ describe("permissions (§7.4)", () => {
     const session = await agent.open()
     try {
       const events = await collect(session.prompt(request("NEED_PERMISSION")))
-      const texts = events.flatMap((e) => (e.type === "text" ? [e.text] : []))
-      expect(texts).toContain("DENIED")
-      expect(texts).not.toContain("ALLOWED")
+      expect(textOf(events)).toBe("DENIED")
     } finally {
       await session.close()
     }
@@ -683,8 +704,7 @@ describe("permissions (§7.4)", () => {
       const session = await permissive.open()
       try {
         const events = await collect(session.prompt(request("NEED_PERMISSION")))
-        const texts = events.flatMap((e) => (e.type === "text" ? [e.text] : []))
-        expect(texts).toContain("ALLOWED")
+        expect(textOf(events)).toBe("ALLOWED")
       } finally {
         await session.close()
       }
@@ -1070,7 +1090,7 @@ describe("concurrence des tours", () => {
       const session = await local.open()
       // On consomme le premier événement : c'est ce qui arme l'invariant.
       const first = session.prompt(request("TICK"))[Symbol.asyncIterator]()
-      expect(await first.next()).toEqual({ value: { type: "text", text: "TICK" }, done: false })
+      expect(await first.next()).toEqual({ value: { type: "thought", text: "TICK" }, done: false })
 
       const error = await captureAgentError(collect(session.prompt(request("PING"))))
       expect(error.name).toBe("AcpAgentError")
@@ -1259,8 +1279,12 @@ describe("renderRequest (pur)", () => {
       { role: "assistant", text: "salut" },
       { role: "tool", id: "call-1", name: "read_file", output: "# README" },
     ]
-    expect(renderRequest({ system: ["SYSTÈME"], tools: [], messages })).toBe(
-      "SYSTÈME\n\nUtilisateur : bonjour\n\nAssistant : salut\n\nOutil read_file : # README",
+    // Le rendu complet (§7.3 : rôle + système + catalogue + transcript + contrat
+    // de sortie) est vérifié ligne à ligne dans `test/parse.test.ts`. On ne
+    // contrôle ici que le **transcript**, qui est la partie de ce fichier.
+    const rendered = renderRequest({ system: ["SYSTÈME"], tools: [], messages })
+    expect(rendered).toContain(
+      "Utilisateur : bonjour\n\nAssistant : salut\n\nOutil read_file : # README",
     )
   })
 
