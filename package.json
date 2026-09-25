@@ -26,7 +26,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "acp-run": "bun run src/adapters/cli.ts"
+    "acp-run": "bun run src/adapters/cli.ts",
+    "verify:real": "bun run verify-real.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.5.0",
