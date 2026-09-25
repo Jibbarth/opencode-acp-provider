@@ -14,7 +14,7 @@
  */
 
 import { createAcpAgent } from "../acp/agent.js"
-import type { Inventory, NormalizedRequest } from "../core/types.js"
+import type { AcpAgent, Inventory, NormalizedRequest } from "../core/types.js"
 import { allowAllPermissions, denyAllPermissions } from "../core/types.js"
 
 /** Ce que `--list-models` affiche. */
@@ -160,13 +160,22 @@ export const main = async (argv: readonly string[]): Promise<number> => {
     return 2
   }
 
-  const agent = await createAcpAgent({
-    command: options.command,
-    args: options.args,
-    cwd: options.cwd,
-    policy: options.allowTools ? allowAllPermissions : denyAllPermissions,
-  })
+  let agent: AcpAgent
+  try {
+    agent = await createAcpAgent({
+      command: options.command,
+      args: options.args,
+      cwd: options.cwd,
+      policy: options.allowTools ? allowAllPermissions : denyAllPermissions,
+    })
+  } catch (error) {
+    // `AcpAgentError` porte déjà un message qui nomme la commande : inutile
+    // d'y ajouter une stack de SDK illisible.
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+    return 3
+  }
 
+  let failed = false
   try {
     process.stderr.write(`→ ${options.command} ${options.args.join(" ")} (${agent.info.name} ${agent.info.version})\n`)
 
@@ -199,9 +208,12 @@ export const main = async (argv: readonly string[]): Promise<number> => {
         // Un événement par ligne : lisible à l'œil *et* pipeable dans `jq`.
         for await (const event of session.prompt(toRequest(options.prompt))) {
           process.stdout.write(`${JSON.stringify(event)}\n`)
+          // ⚠️ Un `error` dans le flux doit rendre un code **non nul** : avec 0,
+          // la CI ne voit rien et l'échec passe inaperçu.
+          if (event.type === "error") failed = true
         }
       }
-      return 0
+      return failed ? 1 : 0
     } finally {
       await session?.close()
     }

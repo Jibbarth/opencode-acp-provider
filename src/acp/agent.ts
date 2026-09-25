@@ -68,6 +68,41 @@ export class AcpAgentError extends Error {
 
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 30_000
 
+/** Point d'entrée des événements de permission d'une session (voir `createSession`). */
+type PermissionSink = (event: AcpEvent) => void
+
+/**
+ * Réécrit toute erreur en `AcpAgentError` **en nommant la commande**.
+ * C'est la seule garantie exploitable en CI : sans le nom de la commande, un
+ * échec se réduit à « ACP connection closed », sans le moindre indice.
+ */
+const asAgentError = (error: unknown, label: string): AcpAgentError => {
+  if (error instanceof AcpAgentError) return error
+  const detail = error instanceof Error ? error.message : String(error)
+  return new AcpAgentError(`${label}: échec du protocole ACP : ${detail}`, label, {
+    cause: error,
+  })
+}
+
+/**
+ * Termine le sous-processus : `SIGTERM`, attente bornée, puis `SIGKILL`.
+ * Idempotent, et sans effet si le spawn a échoué (pas de `pid`) ou si le
+ * processus est déjà mort.
+ */
+const terminate = async (child: ReturnType<typeof spawn>): Promise<void> => {
+  // Spawn impossible (commande inexistante) : `pid` est `undefined` et il n'y a
+  // rien à tuer. Idem si le processus est déjà terminé — attendre 2 s un
+  // `close` déjà émis n'apporterait rien.
+  if (child.pid === undefined) return
+  if (child.exitCode !== null || child.signalCode !== null) return
+  child.kill("SIGTERM")
+  await Promise.race([
+    new Promise<void>((resolve) => child.once("close", () => resolve())),
+    new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+  ])
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Normalisation du prompt
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,30 +206,49 @@ export const updateToEvents = (update: acp.SessionUpdate): AcpEvent[] => {
 // Implémentation
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Réponse `session/request_permission` + l'option réellement retenue. */
+interface PermissionOutcome {
+  response: acp.RequestPermissionResponse
+  /** `undefined` quand le tour est annulé : rien n'a été proposé à l'agent. */
+  selectedOptionId?: string
+}
+
 /**
  * Traduit une décision de policy en réponse `session/request_permission`.
  * Un `reject` sans `optionId` explicite désigne la première option `reject_*`
- * proposée par l'agent ; s'il n'y en a aucune, on annule le tour.
+ * proposée par l'agent ; s'il n'y en a aucune, on annule le tour. Idem pour
+ * `select` sans `optionId` avec les options `allow_*`.
  */
 const toPermissionResponse = (
   decision: PermissionDecision,
   request: PermissionRequest,
-): acp.RequestPermissionResponse => {
-  if (decision.action === "cancel") return { outcome: { outcome: "cancelled" } }
+): PermissionOutcome => {
+  if (decision.action === "cancel") {
+    return { response: { outcome: { outcome: "cancelled" } } }
+  }
   if (decision.optionId !== undefined) {
-    return { outcome: { outcome: "selected", optionId: decision.optionId } }
+    return {
+      response: { outcome: { outcome: "selected", optionId: decision.optionId } },
+      selectedOptionId: decision.optionId,
+    }
   }
   const fallback = request.options.find((o) =>
     decision.action === "reject" ? o.kind.startsWith("reject_") : o.kind.startsWith("allow_"),
   )
-  return fallback === undefined
-    ? { outcome: { outcome: "cancelled" } }
-    : { outcome: { outcome: "selected", optionId: fallback.id } }
+  if (fallback === undefined) {
+    // L'agent ne propose rien de compatible : on annule plutôt que d'accorder.
+    return { response: { outcome: { outcome: "cancelled" } } }
+  }
+  return {
+    response: { outcome: { outcome: "selected", optionId: fallback.id } },
+    selectedOptionId: fallback.id,
+  }
 }
 
 const createSession = (
   connection: acp.ClientConnection,
   session: acp.ActiveSession,
+  permissionSinks: Map<string, PermissionSink>,
 ): AcpSession => {
   // Les `configOptions` évoluent en cours de vie (§5.2) : on conserve le
   // **dernier relevé brut** renvoyé par l'agent, et `parseInventory` (fonction
@@ -205,14 +259,17 @@ const createSession = (
   let closed = false
 
   const assertOpen = (): void => {
-    if (closed) throw new AcpAgentError("session closed", session.sessionId)
+    if (closed) throw new AcpAgentError(`session ${session.sessionId}: session fermée`, session.sessionId)
   }
 
   const setOption = async (configId: string, value: string): Promise<void> => {
     assertOpen()
     const option = parseInventory(raw).options.find((o) => o.id === configId)
     if (option === undefined) {
-      throw new AcpAgentError(`unknown config option "${configId}"`, session.sessionId)
+      throw new AcpAgentError(
+        `session ${session.sessionId}: option de configuration inconnue « ${configId} »`,
+        session.sessionId,
+      )
     }
     // Un booléen exige un payload typé : `{ type: "boolean", value: bool }`.
     const params: acp.SetSessionConfigOptionRequest = option.type === "boolean"
@@ -236,32 +293,53 @@ const createSession = (
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<AcpEvent> {
         const signal = options_?.signal
-        const onAbort = (): void => {
-          // `session/cancel` est une notification : on ne peut pas await ici.
+
+        // Les décisions de permission sont prises **pendant** le tour, depuis un
+        // handler qui n'a pas accès au générateur : on les tamponne et on les
+        // réinjecte à chaque tour de boucle. Sans ça la politique est invisible
+        // dans le flux.
+        const pending: AcpEvent[] = []
+        permissionSinks.set(session.sessionId, (event) => {
+          pending.push(event)
+        })
+
+        /** `session/cancel` est une notification : on ne peut pas `await` ici. */
+        const sendCancel = (): void => {
           void connection.agent
             .notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId })
             .catch(() => undefined)
         }
+        const onAbort = (): void => {
+          sendCancel()
+        }
         if (signal?.aborted === true) onAbort()
         else signal?.addEventListener("abort", onAbort, { once: true })
 
-        // `prompt()` résout avec la même completion que le message `stop` :
-        // on s'en sert uniquement pour ne jamais laisser une rejection orpheline
-        // si le consommateur abandonne l'itérateur.
-        const pending = session.prompt(renderRequest(request))
-        const settled = pending.then(
+        // `prompt()` résout avec la même completion que le message `stop`.
+        // `settled` n'est **jamais** rejeté (les deux branches convertissent) :
+        // c'est un filet anti-rejection orpheline, pas une attente.
+        const pendingPrompt = session.prompt(renderRequest(request))
+        const settled = pendingPrompt.then(
           () => undefined,
           (error: unknown) => error,
         )
 
+        let completed = false
         try {
           for (;;) {
             const message = await session.nextUpdate()
+            // Les permissions demandées pendant l'attente arrivent ici.
+            for (const event of pending.splice(0)) yield event
+
             if (message.kind === "stop") {
               const usage = message.response.usage
               if (usage !== undefined && usage !== null) {
                 yield { type: "usage", input: usage.inputTokens, output: usage.outputTokens }
               }
+              // `completed` est positionné **avant** le `yield` : à cet instant le
+              // tour est fini, et il ne faut surtout pas envoyer un `session/cancel`
+              // dans le vide si le consommateur s'arrête sur le `done`.
+              completed = true
               yield { type: "done", stopReason: toStopReason(message.stopReason) }
               return
             }
@@ -274,12 +352,26 @@ const createSession = (
           }
         } catch (error) {
           yield { type: "error", message: error instanceof Error ? error.message : String(error) }
+          // §4.0 : un flux qui s'arrête sans `done` fait échouer la chaîne
+          // `@opencode/ai` avec « The provider response ended unexpectedly. ».
+          // On ferme donc explicitement le tour.
+          completed = true
+          yield { type: "done", stopReason: "cancelled" }
         } finally {
           signal?.removeEventListener("abort", onAbort)
-          // Si l'itérateur a été abandonné avant la fin du tour, `prompt()`
-          // résout (ou rejette) en arrière-plan : on l'attend pour ne jamais
-          // laisser une rejection orpheline.
-          await settled
+          permissionSinks.delete(session.sessionId)
+          if (completed) {
+            // Chemin nominal : le tour est fini, `settled` est déjà résolu.
+            // On l'attend pour ne jamais laisser quoi que ce soit en suspens.
+            await settled
+          } else {
+            // ⚠️ Le consommateur a abandonné (break / return / throw), possiblement
+            // **sans** avoir fourni d'`AbortSignal`. Attendre `settled` ici
+            // pouvait bloquer jusqu'à 80 s le tick suivant. On annule le tour et
+            // on rend la main immédiatement ; `settled` ne rejette jamais, donc
+            // aucune rejection ne peut devenir orpheline.
+            sendCancel()
+          }
         }
       },
     }
@@ -303,7 +395,10 @@ const createSession = (
     async setModel(modelId: string): Promise<void> {
       const modelOption = parseInventory(raw).options.find((o) => o.category === "model")
       if (modelOption === undefined) {
-        throw new AcpAgentError('agent exposes no "model" config option', session.sessionId)
+        throw new AcpAgentError(
+          `session ${session.sessionId}: l'agent n'expose aucune option de catégorie « model »`,
+          session.sessionId,
+        )
       }
       await setOption(modelOption.id, modelId)
     },
@@ -316,102 +411,166 @@ const createSession = (
 /**
  * Lance l'agent ACP et négocie `initialize`.
  * Renvoie un objet **persistant** : la connexion reste ouverte jusqu'à `close()`.
+ *
+ * ⚠️ Invariant de processus : *tout* chemin qui sort de cette fonction sans avoir
+ * rendu l'objet doit avoir tué l'enfant. Avant, un `initialize` en timeout ou un
+ * agent mort laissait un processus orphelin adopté par init — soit **un cumul par
+ * requête** pour un agent qui timeoute systématiquement. C'est ce que garantit le
+ * `try/catch` unique enveloppant toute la phase de démarrage.
  */
 export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent> => {
   const policy = options.policy ?? denyAllPermissions
   const stderrMode = options.stderr ?? "inherit"
+  const args = [...(options.args ?? [])]
+  // Étiquette lisible présente dans **tous** les messages d'erreur : sans elle,
+  // un échec se réduit à « ACP connection closed », sans le nom de la commande.
+  const label = [options.command, ...args].join(" ").trim()
 
-  // `stdio` est typé comme une union : on le fixe en amont pour que TypeScript
-  // sache que stdin/stdout sont bien des pipes (condition de l'échange ACP).
-  const stdio: ["pipe", "pipe", "pipe" | "inherit" | "ignore"] = [
-    "pipe",
-    "pipe",
-    stderrMode,
-  ]
-  const child = spawn(options.command, [...(options.args ?? [])], {
+  // Le stderr est **toujours** capté, quel que soit le mode : c'est la seule
+  // source qui dise *pourquoi* l'agent est mort. `inherit` le retransmet vers
+  // notre propre stderr, `ignore` l'écarte, `pipe` ne le garde que pour l'erreur.
+  // (L'ancienne version ne captait qu'en mode `pipe`, que la CLI n'expose pas :
+  // la queue était donc toujours vide — du code mort.)
+  const stdio: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"]
+  const child = spawn(options.command, args, {
     cwd: options.cwd ?? process.cwd(),
     env: { ...process.env, ...options.env },
     stdio,
   })
 
-  const stream = acp.ndJsonStream(
-    Writable.toWeb(requireStream(child.stdin, "stdin")),
-    Readable.toWeb(requireStream(child.stdout, "stdout")),
-  )
-
-  // Un stdout illisible est un symptôme classique (l'agent a écrit sur stdout
-  // avant de démarrer le protocole) : on remonte son stderr dans l'erreur.
   let stderrTail = ""
-  if (child.stderr !== null) {
-    child.stderr.setEncoding("utf8")
-    child.stderr.on("data", (chunk: string) => {
-      stderrTail = (stderrTail + chunk).slice(-2000)
+  const fail = (reason: string, cause?: unknown): AcpAgentError =>
+    new AcpAgentError(
+      `${label}: ${reason}${stderrTail === "" ? "" : `\n--- stderr de l'agent ---\n${stderrTail.trim()}`}`,
+      label,
+      cause === undefined ? undefined : { cause },
+    )
+  const captureStderr = child.stderr
+  if (captureStderr !== null) {
+    captureStderr.setEncoding("utf8")
+    captureStderr.on("data", (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-2_000)
+      if (stderrMode === "inherit") process.stderr.write(chunk)
     })
   }
 
-  let exited: Error | undefined
-  child.once("error", (error: Error) => {
-    exited = new AcpAgentError(`failed to spawn agent: ${error.message}`, options.command, {
-      cause: error,
+  // Permissions demandées pendant un tour, par `sessionId` : c'est le seul moyen
+  // de les rendre observables dans le flux `AcpEvent` (§7.4).
+  const permissionSinks = new Map<string, PermissionSink>()
+
+  let connection: acp.ClientConnection | undefined
+  let terminated = false
+  const shutdown = async (): Promise<void> => {
+    if (terminated) return
+    terminated = true
+    await terminate(child)
+  }
+
+  // Garde-fou « l'agent est mort », unique et réellement atteignable. Le premier
+  // des trois signaux observés sur un sous-processus l'emporte :
+  //   · `error` → le spawn a échoué (commande inexistante) ; `exit` n'est alors
+  //     jamais émis, c'est `close` qui l'est ;
+  //   · `exit`  → mort avec un code ;
+  //   · `close` → fin des stdio (couvre le cas sans code).
+  let deathReason: AcpAgentError | undefined
+  const death = new Promise<never>((_resolve, reject) => {
+    const die = (error: AcpAgentError): void => {
+      deathReason ??= error
+      // On propage notre cause aux requêtes **en vol** : sinon elles ne
+      // verraient que « ACP connection closed », sans nom de commande.
+      connection?.close(deathReason)
+      reject(deathReason)
+    }
+    child.once("error", (error: Error) => {
+      die(fail(`impossible de lancer l'agent : ${error.message}`, error))
     })
-  })
-  const exit = new Promise<never>((_resolve, reject) => {
     child.once("exit", (code, signal) => {
-      reject(
-        new AcpAgentError(
-          `agent exited (code=${String(code)}, signal=${String(signal)})${
-            stderrTail ? `\n${stderrTail}` : ""
-          }`,
-          options.command,
-        ),
-      )
+      die(fail(`l'agent s'est arrêté (code=${String(code)}, signal=${String(signal)})`))
+    })
+    child.once("close", () => {
+      die(deathReason ?? fail("l'agent s'est arrêté sans code de sortie"))
     })
   })
-  // On n'observe jamais ce rejet directement : il sert de garde-fou « l'agent
-  // est mort » pour les requêtes en vol.
-  exit.catch(() => undefined)
+  // `death` ne rejette pas toujours : l'agent peut mourir après coup, à la
+  // fermeture. On neutralise son rejet pour éviter un `unhandledRejection`.
+  death.catch(() => undefined)
 
-  const app = acp
-    .client({ name: options.clientName ?? "opencode-acp-provider" })
-    .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
-      const request: PermissionRequest = {
-        sessionId: ctx.params.sessionId,
-        toolCallId: ctx.params.toolCall.toolCallId,
-        title: ctx.params.toolCall.title ?? ctx.params.toolCall.toolCallId,
-        kind: ctx.params.toolCall.kind ?? "other",
-        options: ctx.params.options.map((o) => ({
-          id: o.optionId,
-          name: o.name,
-          kind: o.kind,
-        })),
-      }
-      return toPermissionResponse(await policy(request), request)
-    })
-    // On déclare le support fs mais on ne lit ni n'écrit : c'est le mode
-    // « cerveau brut », l'agent ne doit rien faire sur le disque (§7.4).
-    .onRequest(acp.methods.client.fs.readTextFile, () => ({ content: "" }))
-    .onRequest(acp.methods.client.fs.writeTextFile, () => ({}))
+  /**
+   * Attend **brièvement** le constat de mort de l'agent. Renvoie `undefined`
+   * s'il est toujours vivant au bout du délai.
+   */
+  const deathSoon = async (ms: number): Promise<AcpAgentError | undefined> =>
+    await Promise.race([
+      death,
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+    ])
 
-  const connection = app.connect(stream)
+  let initResponse: acp.InitializeResponse
+  try {
+    // Un stdout illisible est un symptôme classique (l'agent a écrit sur stdout
+    // avant de démarrer le protocole) : le message d'erreur le dira.
+    const stream = acp.ndJsonStream(
+      Writable.toWeb(requireStream(child.stdin, "stdin")),
+      Readable.toWeb(requireStream(child.stdout, "stdout")),
+    )
 
-  const initialize = async (): Promise<acp.InitializeResponse> => {
-    if (exited !== undefined) throw exited
+    const app = acp
+      .client({ name: options.clientName ?? "opencode-acp-provider" })
+      .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
+        const request: PermissionRequest = {
+          sessionId: ctx.params.sessionId,
+          toolCallId: ctx.params.toolCall.toolCallId,
+          title: ctx.params.toolCall.title ?? ctx.params.toolCall.toolCallId,
+          kind: ctx.params.toolCall.kind ?? "other",
+          options: ctx.params.options.map((o) => ({
+            id: o.optionId,
+            name: o.name,
+            kind: o.kind,
+          })),
+        }
+        const decision = await policy(request)
+        const outcome = toPermissionResponse(decision, request)
+        permissionSinks.get(ctx.params.sessionId)?.({
+          type: "permission",
+          request,
+          decision,
+          ...(outcome.selectedOptionId === undefined
+            ? {}
+            : { selectedOptionId: outcome.selectedOptionId }),
+        })
+        return outcome.response
+      })
+
+    connection = app.connect(stream)
+
     const request = connection.agent.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: {
-        fs: { readTextFile: true, writeTextFile: true },
+        // Mode « cerveau brut » : on ne sait ni lire ni écrire sur le disque.
+        // Déclarer `true` était une **capacité mensongère** — l'agent croyait
+        // pouvoir nous faire lire des fichiers et n'obtenait que du vide. On
+        // déclare donc explicitement `false` plutôt que d'ôter les handlers.
+        fs: { readTextFile: false, writeTextFile: false },
       },
     })
     const timeout = AbortSignal.timeout(options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS)
-    try {
-      return await Promise.race([request, exit, rejectOn(timeout, options.command)])
-    } catch (error) {
-      connection.close(error)
-      throw error
-    }
+    initResponse = await Promise.race([request, death, rejectOn(timeout, label)])
+  } catch (error) {
+    // ⚠️ Correction de la fuite de processus : *aucune* sortie d'erreur ne doit
+    // rendre la main avec l'enfant vivant. Ça couvre aussi une exception pendant
+    // la construction du stream ou l'enregistrement des handlers.
+    //
+    // Quand l'agent est mort, **sa mort est la cause** : le SDK ne sait que dire
+    // « ACP connection closed », ce qui est inutilisable. On attend donc brièvement
+    // le constat de mort pour préférer le message qui nomme la commande, le code de
+    // sortie et le stderr. Borné à 250 ms, et sans surcoût si l'agent est vivant
+    // (timeout explicite) car on ne le consulte que sur une erreur non typée.
+    const cause =
+      error instanceof AcpAgentError ? undefined : (deathReason ?? (await deathSoon(250)))
+    connection?.close(cause ?? error)
+    await shutdown()
+    throw cause ?? asAgentError(error, label)
   }
-
-  const initResponse = await initialize()
 
   const info: AcpAgentInfo = {
     name: initResponse.agentInfo?.name ?? options.command,
@@ -420,7 +579,7 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
 
   let closed = false
   const assertAlive = (): void => {
-    if (closed) throw new AcpAgentError("agent closed", options.command)
+    if (closed) throw new AcpAgentError(`${label}: agent fermé`, label)
   }
 
   const openSession = async (
@@ -430,7 +589,7 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
     const active = await connection.agent
       .buildSession(openOptions.cwd ?? options.cwd ?? process.cwd())
       .start()
-    return createSession(connection, active)
+    return createSession(connection, active, permissionSinks)
   }
 
   // L'inventaire vit dans la réponse de `session/new` : on ouvre une session
@@ -459,13 +618,11 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
     async close(): Promise<void> {
       if (closed) return
       closed = true
-      connection.close()
-      child.kill("SIGTERM")
-      await Promise.race([
-        new Promise<void>((resolve) => child.once("exit", () => resolve())),
-        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-      ])
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      // Les sessions encore ouvertes perdent leur capacité à émettre : on
+      // libère le routage avant de fermer le canal.
+      permissionSinks.clear()
+      connection?.close()
+      await shutdown()
     },
   }
 }
@@ -479,7 +636,7 @@ const requireStream = <T>(stream: T | null, name: string): T => {
 const rejectOn = (signal: AbortSignal, command: string): Promise<never> =>
   new Promise((_resolve, reject) => {
     const onAbort = (): void =>
-      reject(new AcpAgentError(`initialize timed out for "${command}"`, command))
+      reject(new AcpAgentError(`${command}: initialize a expiré`, command))
     if (signal.aborted) onAbort()
     else signal.addEventListener("abort", onAbort, { once: true })
   })

@@ -5,17 +5,34 @@
  * moyen de valider la chaîne complète (spawn → ndJsonStream → initialize →
  * session/new → session/prompt → traduction en `AcpEvent`) exactement comme le
  * fera le plugin face à `copilot --acp`.
+ *
+ * Le faux est paramétrable par variables d'environnement (voir l'en-tête de
+ * `fake-acp.ts`) : chaque cas difficile à atteindre avec un agent « gentil » —
+ * `tool_call`, `stopReason ≠ end_turn`, option `boolean`, repli de policy,
+ * annulation, stdout bruyant, agent mort — devient une variable d'env.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { createAcpAgent } from "../src/acp/agent.js"
+import { createAcpAgent, AcpAgentError } from "../src/acp/agent.js"
 import { parseInventory, shortenModeId } from "../src/core/models.js"
-import type { AcpAgent, AcpEvent, NormalizedRequest } from "../src/core/types.js"
+import type {
+  AcpAgent,
+  AcpEvent,
+  AcpPermissionPolicy,
+  NormalizedRequest,
+  PermissionDecision,
+} from "../src/core/types.js"
 import { allowAllPermissions } from "../src/core/types.js"
 
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
+const CLI = fileURLToPath(new URL("../src/adapters/cli.ts", import.meta.url))
+/** Commande qui n'existe pas, pour exercer le chemin d'échec du spawn. */
+const MISSING = "opencode-acp-commande-inexistante-42"
 
 let agent: AcpAgent
 
@@ -32,13 +49,136 @@ const collect = async (events: AsyncIterable<AcpEvent>): Promise<AcpEvent[]> => 
   return out
 }
 
-beforeAll(async () => {
-  agent = await createAcpAgent({
-    command: process.execPath, // `bun` quand les tests tournent sous bun
+/** Lance le faux agent avec un sur-ensemble de variables d'environnement. */
+const spawnFake = async (
+  env: Record<string, string> = {},
+  policy?: AcpPermissionPolicy,
+): Promise<AcpAgent> =>
+  createAcpAgent({
+    command: process.execPath,
     args: ["run", FAKE],
     cwd: process.cwd(),
     stderr: "ignore",
+    ...(policy === undefined ? {} : { policy }),
+    env,
   })
+
+/**
+ * Lance un faux agent dont le pid est écrit dans `pidFile` : le test peut ainsi
+ * vérifier que *ce* processus-là est mort, sans compter des `ps` et sans risquer
+ * qu'un orphelin disparaisse dans la fenêtre d'attente.
+ */
+const spawnTrackedFake = async (
+  env: Record<string, string>,
+  pidFile: string,
+  options: { initializeTimeoutMs?: number } = {},
+): Promise<AcpAgent> =>
+  createAcpAgent({
+    command: process.execPath,
+    args: ["run", FAKE],
+    stderr: "ignore",
+    ...(options.initializeTimeoutMs === undefined
+      ? {}
+      : { initializeTimeoutMs: options.initializeTimeoutMs }),
+    env: { ...env, FAKE_PID_FILE: pidFile },
+  })
+
+/** Répertoire temporaire jetable, pour les fichiers de pid. */
+const pidFiles: string[] = []
+const tmpPidFile = async (label: string): Promise<string> => {
+  const dir = await mkdtemp(join(tmpdir(), `acp-pid-${label}-`))
+  pidFiles.push(dir)
+  return join(dir, "pid")
+}
+
+afterAll(async () => {
+  await Promise.all(pidFiles.map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
+/** Attend que le pid apparaisse dans le fichier (l'agent démarre). */
+const readPid = async (pidFile: string, timeoutMs = 5_000): Promise<number> => {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const raw = await readFile(pidFile, "utf8").catch(() => "")
+    const pid = Number(raw.trim())
+    if (Number.isInteger(pid) && pid > 0) return pid
+    if (Date.now() >= deadline) throw new Error(`le faux agent n'a jamais écrit ${pidFile}`)
+    await Bun.sleep(20)
+  }
+}
+
+/** `true` tant que le processus existe (signal 0 = « es-tu vivant ? »). */
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Attend la disparition du processus, ou le délai. */
+const waitForDeath = async (pid: number, timeoutMs = 3_000): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs
+  while (isAlive(pid) && Date.now() < deadline) await Bun.sleep(25)
+  return !isAlive(pid)
+}
+
+/**
+ * Nombre de processus `fake-acp` vivants, tel que vu par le système.
+ * C'est le seul constat global possible : un orphelin adopté par init
+ * n'apparaît dans aucun `close()` du code qui l'a lancé.
+ */
+const countFakeProcesses = (): number => {
+  const ps = Bun.spawnSync(["ps", "-eo", "args="])
+  if (!ps.success) return -1
+  return ps.stdout
+    .toString()
+    .split("\n")
+    .filter((line) => line.includes("fake-acp.ts")).length
+}
+
+/** Attend que le nombre de processus redescende (ou dépasse le délai). */
+const waitForFakeCount = async (target: number, timeoutMs = 5_000): Promise<number> => {
+  const deadline = Date.now() + timeoutMs
+  let current = countFakeProcesses()
+  while (current > target && Date.now() < deadline) {
+    await Bun.sleep(50)
+    current = countFakeProcesses()
+  }
+  return current
+}
+
+/** Capture le rejet d'une promesse, en gardant le type `Error`. */
+const captureError = async (promise: Promise<unknown>): Promise<Error> => {
+  const error = await promise.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  if (!(error instanceof Error)) {
+    throw new Error(`un rejet était attendu, reçu : ${String(error)}`)
+  }
+  return error
+}
+
+/** Les valeurs de `type` d'un flux JSONL, sans cast. */
+const eventTypes = (jsonl: string): string[] =>
+  jsonl
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const parsed: unknown = JSON.parse(line)
+      if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) return "?"
+      return typeof parsed.type === "string" ? parsed.type : "?"
+    })
+
+/** Les `text` d'un flux, joints. */
+const textOf = (events: readonly AcpEvent[]): string =>
+  events.flatMap((e) => (e.type === "text" ? [e.text] : [])).join("")
+
+beforeAll(async () => {
+  agent = await spawnFake()
 })
 
 afterAll(async () => {
@@ -54,13 +194,36 @@ describe("cycle de vie", () => {
   })
 
   test("close() est idempotent", async () => {
-    const other = await createAcpAgent({
-      command: process.execPath,
-      args: ["run", FAKE],
-      stderr: "ignore",
-    })
+    const other = await spawnFake()
     await other.close()
     await other.close()
+  })
+})
+
+describe("fermeture de session", () => {
+  test("close() libère la session et close() l'agent reste sans effet", async () => {
+    const local = await spawnFake()
+    try {
+      const session = await local.open()
+      // Le tour nominal fonctionne…
+      expect(textOf(await collect(session.prompt(request("PING"))))).toBe("PONG")
+
+      await session.close()
+      // …et `close()` est idempotent côté session aussi.
+      await session.close()
+
+      // `dispose()` a coupé le routage des updates : plus aucune méthode ne parle
+      // à l'agent, et aucune promesse ne traîne.
+      expect(() => session.prompt(request("PING"))).toThrow(/session fermée/)
+      await expect(session.setOption("model", "auto")).rejects.toThrow(/session fermée/)
+      await expect(session.setModel("auto")).rejects.toThrow(/session fermée/)
+
+      // La connexion partagée, elle, est intacte : une session neuve fonctionne.
+      const other = await local.open()
+      await other.close()
+    } finally {
+      await local.close()
+    }
   })
 })
 
@@ -129,10 +292,42 @@ describe("inventaire (configOptions)", () => {
     const session = await agent.open()
     try {
       await expect(session.setOption("pas-une-option", "x")).rejects.toThrow(
-        /unknown config option/,
+        /option de configuration inconnue/,
       )
     } finally {
       await session.close()
+    }
+  })
+
+  test("une option `boolean` fait l'aller-retour avec un payload typé", async () => {
+    const booleanAgent = await spawnFake({ FAKE_BOOLEAN_OPTION: "1" })
+    try {
+      const session = await booleanAgent.open()
+      try {
+        const option = session.inventory().options.find((o) => o.id === "telemetry")
+        expect(option).toEqual({
+          id: "telemetry",
+          name: "Telemetry",
+          category: "permissions",
+          type: "boolean",
+          currentValue: "false",
+          values: ["false", "true"],
+        })
+
+        // `session/set_config_option` exige `{ type: "boolean", value: bool }`.
+        // Le faux ne teste que `params.value === true` : si nous avions envoyé
+        // la chaîne `"true"`, la valeur relue serait restée à `false`.
+        await session.setOption("telemetry", "true")
+        expect(session.inventory().options.find((o) => o.id === "telemetry")?.currentValue).toBe("true")
+
+        // Et le retour à `false` fonctionne par le même chemin.
+        await session.setOption("telemetry", "false")
+        expect(session.inventory().options.find((o) => o.id === "telemetry")?.currentValue).toBe("false")
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await booleanAgent.close()
     }
   })
 })
@@ -150,8 +345,7 @@ describe("prompt → AcpEvent", () => {
         { type: "done", stopReason: "end_turn" },
       ])
 
-      const text = events.filter((e) => e.type === "text").map((e) => (e as { text: string }).text).join("")
-      expect(text).toBe("PONG")
+      expect(textOf(events)).toBe("PONG")
     } finally {
       await session.close()
     }
@@ -187,6 +381,177 @@ describe("prompt → AcpEvent", () => {
   })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// §4 — `tool_call` / `tool_call_update` : le cœur du mapping, zéro-testé avant.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("tool_call (§4)", () => {
+  test("un tool_call et ses updates deviennent des AcpEvent `tool`", async () => {
+    const toolAgent = await spawnFake({ FAKE_EMIT_TOOL_CALL: "1" })
+    try {
+      const session = await toolAgent.open()
+      try {
+        const events = await collect(session.prompt(request("TOOL")))
+        const tools = events.filter((e) => e.type === "tool")
+
+        // Trois événements : l'ouverture puis les deux mises à jour.
+        expect(tools).toHaveLength(3)
+
+        // 1. Ouverture : `pending`, avec l'entrée brute de l'appel.
+        expect(tools[0]).toEqual({
+          type: "tool",
+          id: "call-tool-1",
+          name: "read_file",
+          title: "Lire README.md",
+          kind: "read",
+          status: "pending",
+          input: { path: "README.md" },
+        })
+
+        // 2. Mise à jour partielle : ni `name` ni `rawOutput` → statut seulement.
+        //    On ne fabrique surtout pas de valeur par défaut qui ferait croire
+        //    à un `output` ou à un `input` réels.
+        expect(tools[1]).toEqual({
+          type: "tool",
+          id: "call-tool-1",
+          name: "",
+          title: "call-tool-1",
+          kind: "other",
+          status: "in_progress",
+          input: undefined,
+        })
+
+        // 3. Mise à jour finale : statut `completed` + `rawOutput` relayé tel quel.
+        expect(tools[2]).toEqual({
+          type: "tool",
+          id: "call-tool-1",
+          name: "",
+          title: "call-tool-1",
+          kind: "other",
+          status: "completed",
+          input: undefined,
+          output: { bytes: 1234 },
+        })
+
+        // La séquence conserve bien son ordre, puis le tour se ferme normalement.
+        expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+        expect(textOf(events)).toContain("TOOL_OK")
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await toolAgent.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §4 — `stopReason` : seuls `end_turn` étaient couverts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("stopReason", () => {
+  for (const reason of ["max_tokens", "refusal", "cancelled"] as const) {
+    test(`un stopReason « ${reason} » est relayé dans l'AcpEvent done`, async () => {
+      const local = await spawnFake({ FAKE_STOP_REASON: reason })
+      try {
+        const session = await local.open()
+        try {
+          const events = await collect(session.prompt(request("PING")))
+          expect(events.at(-1)).toEqual({ type: "done", stopReason: reason })
+          // Le texte et l'usage précédant toujours le `done`.
+          expect(textOf(events)).toBe("PONG")
+          expect(events.some((e) => e.type === "usage")).toBe(true)
+        } finally {
+          await session.close()
+        }
+      } finally {
+        await local.close()
+      }
+    })
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Annulation — condition « `Esc` interrompt proprement » (P4, §8).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("annulation", () => {
+  test("un AbortSignal déclenche session/cancel et produit done: cancelled", async () => {
+    // L'agent met 800 ms à répondre : on annule bien avant.
+    const local = await spawnFake({ FAKE_SLOW_MS: "800" })
+    try {
+      const session = await local.open()
+      try {
+        const controller = new AbortController()
+        const started = Date.now()
+        const events: AcpEvent[] = []
+        for await (const event of session.prompt(request("TICK"), { signal: controller.signal })) {
+          events.push(event)
+          if (event.type === "text" && event.text === "TICK") controller.abort()
+        }
+        expect(events[0]).toEqual({ type: "text", text: "TICK" })
+        expect(events.at(-1)).toEqual({ type: "done", stopReason: "cancelled" })
+        // L'annulation a bien court-circuité la latence de 800 ms : sans elle,
+        // le tour serait allé jusqu'à « TOK » puis `end_turn`.
+        expect(Date.now() - started).toBeLessThan(800)
+        expect(textOf(events)).not.toContain("TOK")
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("un abandon du consommateur SANS signal rend la main tout de suite", async () => {
+    // Régression du blocage de 80 s : le `finally` attendait `session/prompt`
+    // complet. Un `break` sans `AbortSignal` faisait donc patienter le tick
+    // suivant pendant toute la durée du tour.
+    const local = await spawnFake({ FAKE_SLOW_MS: "1500" })
+    try {
+      const session = await local.open()
+      try {
+        let abandonedAt = 0
+        for await (const event of session.prompt(request("TICK"))) {
+          expect(event).toEqual({ type: "text", text: "TICK" })
+          abandonedAt = Date.now()
+          break
+        }
+        // `for await` attend le `return()` du générateur : c'est ce temps qui
+        // mesurait 80 101 ms avant correction.
+        expect(abandonedAt).toBeGreaterThan(0)
+        expect(Date.now() - abandonedAt).toBeLessThan(300)
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("le chemin nominal consomme toujours le flux jusqu'à done", async () => {
+    const local = await spawnFake({ FAKE_SLOW_MS: "50" })
+    try {
+      const session = await local.open()
+      try {
+        // Sans abandon, l'annulation automatique ne doit jamais se déclencher.
+        const events = await collect(session.prompt(request("TICK")))
+        expect(textOf(events)).toBe("TICKTOK")
+        expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+        expect(events.some((e) => e.type === "usage")).toBe(true)
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Permissions (§7.4 / §9)
+// ─────────────────────────────────────────────────────────────────────────────
+
 describe("permissions (§7.4)", () => {
   test("la policy par défaut refuse", async () => {
     const session = await agent.open()
@@ -201,12 +566,7 @@ describe("permissions (§7.4)", () => {
   })
 
   test("une policy « allow » reçoit bien l'option allow_once", async () => {
-    const permissive = await createAcpAgent({
-      command: process.execPath,
-      args: ["run", FAKE],
-      stderr: "ignore",
-      policy: allowAllPermissions,
-    })
+    const permissive = await spawnFake({}, allowAllPermissions)
     try {
       const session = await permissive.open()
       try {
@@ -219,6 +579,303 @@ describe("permissions (§7.4)", () => {
     } finally {
       await permissive.close()
     }
+  })
+
+  test("la décision est visible dans le flux AcpEvent", async () => {
+    const session = await agent.open()
+    try {
+      const events = await collect(session.prompt(request("NEED_PERMISSION")))
+      const decisions = events.filter((e) => e.type === "permission")
+      expect(decisions).toHaveLength(1)
+      const decision = decisions[0]
+      expect(decision?.type).toBe("permission")
+      if (decision?.type !== "permission") return
+      expect(decision.request.sessionId).toBe(session.sessionId)
+      expect(decision.request.toolCallId).toBe("call-perm-1")
+      expect(decision.request.title).toBe("Écrire dans config.json")
+      expect(decision.request.options.map((o) => o.id)).toEqual(["allow-once", "reject-once"])
+      expect(decision.decision).toEqual({ action: "select", optionId: "reject-once" })
+      expect(decision.selectedOptionId).toBe("reject-once")
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("l'agent ne proposant que des options allow_*, on annule le tour", async () => {
+    // Repli de `toPermissionResponse` : une policy « reject » sans `optionId`
+    // explicite cherche une option `reject_*` ; il n'y en a pas, donc on
+    // **annule** plutôt que d'accorder.
+    const rejectWithoutId: AcpPermissionPolicy = (): PermissionDecision => ({ action: "reject" })
+    const local = await spawnFake({ FAKE_PERMISSION_OPTIONS: "allow" }, rejectWithoutId)
+    try {
+      const session = await local.open()
+      try {
+        const events = await collect(session.prompt(request("NEED_PERMISSION")))
+        expect(textOf(events)).toContain("CANCELLED")
+        expect(textOf(events)).not.toContain("ALLOWED")
+
+        const decision = events.find((e) => e.type === "permission")
+        expect(decision?.type === "permission" && decision.decision).toEqual({ action: "reject" })
+        expect(decision?.type === "permission" && decision.selectedOptionId).toBeUndefined()
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("l'agent ne proposant que des options reject_*, le refus passe", async () => {
+    const local = await spawnFake({ FAKE_PERMISSION_OPTIONS: "reject" })
+    try {
+      const session = await local.open()
+      try {
+        const events = await collect(session.prompt(request("NEED_PERMISSION")))
+        expect(textOf(events)).toContain("DENIED")
+        expect(textOf(events)).not.toContain("CANCELLED")
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("l'agent ne proposant aucune option, la policy annule", async () => {
+    const local = await spawnFake({ FAKE_PERMISSION_OPTIONS: "cancel" }, allowAllPermissions)
+    try {
+      const session = await local.open()
+      try {
+        const events = await collect(session.prompt(request("NEED_PERMISSION")))
+        expect(textOf(events)).toContain("CANCELLED")
+        expect(events.some((e) => e.type === "permission" && e.decision.action === "cancel")).toBe(true)
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Erreurs : typées, nommantes, et toujours suivies d'un `done`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("capacités déclarées", () => {
+  test("initialize n'annonce pas de capacité fs mensongère", async () => {
+    // En mode « cerveau brut » on ne sait ni lire ni écrire sur le disque.
+    // Déclarer `readTextFile/writeTextFile: true` pendant que les handlers
+    // renvoyaient `""` et un no-op était une capacité **fausse** : l'agent
+    // croyait pouvoir obtenir des fichiers et n'obtenait que du vide.
+    const dir = await mkdtemp(join(tmpdir(), "acp-caps-"))
+    pidFiles.push(dir)
+    const capsFile = join(dir, "caps.json")
+    const local = await createAcpAgent({
+      command: process.execPath,
+      args: ["run", FAKE],
+      stderr: "ignore",
+      env: { FAKE_CAPABILITIES_FILE: capsFile },
+    })
+    try {
+      const raw = await readFile(capsFile, "utf8")
+      const declared: unknown = JSON.parse(raw)
+      expect(typeof declared).toBe("object")
+      if (typeof declared !== "object" || declared === null || !("fs" in declared)) {
+        throw new Error(`clientCapabilities sans « fs » : ${raw}`)
+      }
+      // Le SDK ajoute ses propres défauts (`terminal`, `auth`) : on ne juge que
+      // ce qui nous concerne, c'est-à-dire la promesse faite sur le disque.
+      expect(declared.fs).toEqual({ readTextFile: false, writeTextFile: false })
+    } finally {
+      await local.close()
+    }
+  })
+})
+
+describe("erreurs", () => {
+  test("une commande inexistante produit une AcpAgentError qui la nomme", async () => {
+    const error = await captureError(
+      createAcpAgent({ command: MISSING, stderr: "ignore" }),
+    )
+    if (!(error instanceof AcpAgentError)) {
+      throw new Error(`attendu une AcpAgentError, reçu ${error.name}: ${error.message}`)
+    }
+    expect(error.name).toBe("AcpAgentError")
+    // Le message doit être *utile* : nom de la commande ET cause réelle, que le
+    // runtime la formule « ENOENT » (Node) ou « Executable not found in $PATH »
+    // (Bun). Avant, on obtenait « ACP connection closed » et aucun nom de
+    // commande n'apparaissait nulle part.
+    expect(error.message).toContain(MISSING)
+    expect(error.message).toMatch(/impossible de lancer l'agent/i)
+    expect(error.message).toMatch(/ENOENT|not found/i)
+    expect(error.command).toBe(MISSING)
+  })
+
+  test("un agent qui meurt avant initialize remonte son code de sortie", async () => {
+    const error = await captureError(spawnFake({ FAKE_EXIT_AT_INIT: "1" }))
+    expect(error.name).toBe("AcpAgentError")
+    // Ni « ACP connection closed » ni un nom de commande fantaisiste.
+    expect(error.message).toContain("fake-acp.ts")
+    expect(error.message).toMatch(/code=3/)
+  })
+
+  test("un initialize en timeout remonte la commande et tue l'agent", async () => {
+    const error = await captureError(
+      createAcpAgent({
+        command: process.execPath,
+        args: ["run", FAKE],
+        stderr: "ignore",
+        initializeTimeoutMs: 300,
+        env: { FAKE_SLOW_INIT_MS: "5000" },
+      }),
+    )
+    expect(error.name).toBe("AcpAgentError")
+    expect(error.message).toContain("fake-acp.ts")
+    expect(error.message).toMatch(/initialize a expiré/)
+  })
+
+  test("le bruit sur stdout n'empêche pas de parler ACP", async () => {
+    // Le SDK de ligne NDJSON ignore ce qui n'est pas du JSON : l'agent bavard
+    // reste utilisable. Ce qui compte ici, c'est qu'aucune erreur ne soit
+    // déclenchée et que le flux reste complet.
+    const local = await spawnFake({ FAKE_NOISY_STDOUT: "1" })
+    try {
+      const session = await local.open()
+      try {
+        const events = await collect(session.prompt(request("PING")))
+        expect(textOf(events)).toBe("PONG")
+        expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("le stderr de l'agent est remonté dans le message d'erreur", async () => {
+    // La queue de stderr était du code mort (le CLI n'expose jamais
+    // `stderr: "pipe"`). Elle est désormais toujours alimentée, quel que soit le
+    // mode — c'est la seule information qui explique la mort de l'agent.
+    const error = await captureError(
+      spawnFake({ FAKE_NOISY_STDOUT: "1", FAKE_EXIT_AT_INIT: "1" }),
+    )
+    expect(error.name).toBe("AcpAgentError")
+    expect(error.message).toContain("fake-acp.ts")
+    expect(error.message).toContain("fake-acp: avertissement de démarrage")
+  })
+
+  test("un agent qui meurt en plein tour émet error PUIS done", async () => {
+    const local = await spawnFake({ FAKE_DIE_ON_PROMPT: "1" })
+    try {
+      const session = await local.open()
+      const events = await collect(session.prompt(request("DIE")))
+      // §4.0 : sans `done` final, `@opencode/ai` rejette avec « The provider
+      // response ended unexpectedly. », indiscernable d'une troncature.
+      expect(events.at(-1)).toEqual({ type: "done", stopReason: "cancelled" })
+      expect(events.some((e) => e.type === "error")).toBe(true)
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("acp-run sort avec un code non nul quand le flux contient une erreur", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "run", CLI, "--command", process.execPath, "--arg", "run",
+       "--arg", FAKE, "--prompt", "DIE"],
+      { stdout: "pipe", stderr: "pipe", env: { ...process.env, FAKE_DIE_ON_PROMPT: "1" } },
+    )
+    const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])
+    expect(code).not.toBe(0)
+    // Le flux reste exploitable : `done` est bien présent malgré l'erreur.
+    const types = eventTypes(stdout)
+    expect(types).toContain("error")
+    expect(types).toContain("done")
+  })
+
+  test("acp-run sort avec un code non nul sur une commande inexistante", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "run", CLI, "--command", MISSING, "--list-models"],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+    expect(code).not.toBe(0)
+    // Le message nomme la commande : c'est toute la valeur de l'erreur typée.
+    expect(stderr).toContain(MISSING)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fuite de processus : le bloqueur n°1.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("cycle de vie des processus", () => {
+  test("close() tue le sous-processus", async () => {
+    const pidFile = await tmpPidFile("close")
+    const local = await spawnTrackedFake({}, pidFile)
+    const pid = await readPid(pidFile)
+    expect(isAlive(pid)).toBe(true)
+
+    await local.close()
+    expect(await waitForDeath(pid)).toBe(true)
+  })
+
+  test("un initialize en timeout ne laisse pas d'orphelin", async () => {
+    // ⚠️ C'est *ce* chemin qui fuyait avant correction : `createAcpAgent`
+    // throwait avant de rendre l'objet, donc personne ne portait le `child.kill()`,
+    // et le processus était adopté par init. Un agent qui timeoute à chaque
+    // lancement ⇒ un processus cumulé par requête.
+    const pidFile = await tmpPidFile("timeout")
+    const pidPromise = readPid(pidFile)
+    await spawnTrackedFake({ FAKE_SLOW_INIT_MS: "30000" }, pidFile, {
+      initializeTimeoutMs: 300,
+    }).catch(() => undefined)
+
+    const pid = await pidPromise
+    expect(isAlive(pid)).toBe(false)
+  })
+
+  test("un agent mort avant initialize ne laisse pas d'orphelin", async () => {
+    const pidFile = await tmpPidFile("exit-init")
+    const pidPromise = readPid(pidFile)
+    await spawnTrackedFake({ FAKE_EXIT_AT_INIT: "1" }, pidFile).catch(() => undefined)
+
+    expect(await waitForDeath(await pidPromise)).toBe(true)
+  })
+
+  test("une commande inexistante ne laisse pas d'orphelin", async () => {
+    const before = countFakeProcesses()
+    await createAcpAgent({ command: MISSING, stderr: "ignore" }).catch(() => undefined)
+    // Rien à tuer (`spawn` n'a jamais produit de pid) : on vérifie seulement
+    // qu'aucun processus `fake-acp` n'est apparu.
+    expect(countFakeProcesses()).toBe(before)
+  })
+
+  test("aucun fils ne survit à close() ni à un échec d'initialisation", async () => {
+    const baseline = countFakeProcesses()
+    expect(baseline).toBeGreaterThan(0)
+
+    // 1. Chemin nominal.
+    const healthy = await spawnFake()
+    await healthy.close()
+
+    // 2. Spawn impossible.
+    await createAcpAgent({ command: MISSING, stderr: "ignore" }).catch(() => undefined)
+
+    // 3. Agent mort avant `initialize`.
+    await spawnFake({ FAKE_EXIT_AT_INIT: "1" }).catch(() => undefined)
+
+    // 4. Agent qui fait expirer le timeout d'`initialize`.
+    await createAcpAgent({
+      command: process.execPath,
+      args: ["run", FAKE],
+      stderr: "ignore",
+      initializeTimeoutMs: 300,
+      env: { FAKE_SLOW_INIT_MS: "5000" },
+    }).catch(() => undefined)
+
+    expect(await waitForFakeCount(baseline)).toBe(baseline)
   })
 })
 

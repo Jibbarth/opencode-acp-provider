@@ -49,7 +49,27 @@ export type AcpEvent =
    * `context` des notifications d'usage en cours de tour (fenêtre de contexte).
    */
   | { type: "usage"; input?: number; output?: number; context?: number }
-  /** Fin de tour. Toujours le dernier événement d'un `prompt()`. */
+  /**
+   * Décision de permission prise pendant le tour.
+   *
+   * ⚠️ Sans cet événement la politique est **invisible** dans le flux : ni P2
+   * ni P4 ne peuvent afficher « l'agent voulait écrire, on a refusé », alors
+   * que c'est précisément ce que l'utilisateur doit voir en mode cerveau brut
+   * (§7.4). `selectedOptionId` est absent quand le tour a été annulé.
+   */
+  | {
+      type: "permission"
+      request: PermissionRequest
+      decision: PermissionDecision
+      selectedOptionId?: string
+    }
+  /**
+   * Fin de tour. Toujours le dernier événement d'un `prompt()`.
+   *
+   * ⚠️ Émis **aussi** après un `error` : un flux qui se termine sans `done`
+   * fait échouer la chaîne `@opencode/ai` avec « The provider response ended
+   * unexpectedly. », indiscernable d'une troncature (§4.0).
+   */
   | { type: "done"; stopReason: AcpStopReason }
   /** Erreur récupérée pendant le tour ; le flux se termine juste après. */
   | { type: "error"; message: string }
@@ -240,7 +260,14 @@ export interface AcpSession {
   setModel(modelId: string): Promise<void>
   /** Change une option quelconque (`reasoning_effort`, `allow_all`…). */
   setOption(configId: string, value: string): Promise<void>
-  /** Le point que les trois adaptateurs ont en commun. */
+  /**
+   * Le point que les trois adaptateurs ont en commun.
+   *
+   * ⚠️ `signal` est **facultatif et piégeux** : ne pas le fournir ne doit pas
+   * être plus dangereux que de le fournir. L'implémentation annule donc le
+   * tour automatiquement quand le consommateur abandonne l'itération
+   * (`break`, `return`, `throw`) — avec ou sans signal.
+   */
   prompt(
     request: NormalizedRequest,
     options?: { signal?: AbortSignal },
