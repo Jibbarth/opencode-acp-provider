@@ -352,6 +352,35 @@ Séquence **obligatoire** (vérifiée) : `step-start` → (`text-start` → `tex
 `finish.reason.normalized` : `stopReason` ACP → `"stop"` / `"tool-calls"` (selon config) / `"error"`.
 `step-finish` et `finish` portent tous deux `reason` + `index`.
 
+### 4.0 Séquences d'événements — validées une par une
+
+Chaque forme a été soumise au pipeline réel (`Route` + `Transport` custom) sous Bun.
+Résultats :
+
+| Séquence émise | Verdict |
+| --- | --- |
+| `step-start` → `text-*` → `step-finish` → `finish` | ✅ |
+| `reasoning-*` puis `text-*` | ✅ |
+| `tool-input-*` → `tool-call` → `tool-result` | ✅ |
+| **`tool-call` seul, sans `tool-result`** | ✅ |
+| `tool-call` + `tool-result` avec `providerExecuted: true` | ✅ |
+| `text-*` puis `tool-call` dans le même step | ✅ |
+| `tool-call` puis `tool-error` | ✅ |
+
+> 🔎 **Les deux résultats les plus importants pour la conception :**
+>
+> 1. **`tool-call` seul est accepté.** C'est exactement ce dont le mécanisme §7.3 a besoin :
+>    le provider **propose**, OpenCode **exécute** et renvoie le résultat au tour suivant.
+>    On ne doit donc pas émettre de `tool-result` dans ce mode — le core s'en charge.
+>
+> 2. **`usage` doit être une instance de la classe `Usage`**, pas un objet littéral.
+>    Un objet plat échoue avec `The provider response ended unexpectedly.` — un message
+>    **identique** à celui d'un flux tronqué, donc quasiment impossible à diagnostiquer.
+>    Toujours construire via `new Usage({ … })` importé de `@opencode/ai/schema/index`.
+
+Cet état-machine (`open`/`text`/`reasoning`/`tool`) est la spec de référence pour
+`adapters/opencode-protocol.ts` en P1/P2.
+
 ### 4.1 `usage` — mesuré, ça marche
 
 `PromptResponse` transporte un `usage` complet, et une notification `usage_update` le met à jour
