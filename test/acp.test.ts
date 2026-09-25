@@ -20,10 +20,12 @@ import { fileURLToPath } from "node:url"
 
 import { createAcpAgent, AcpAgentError } from "../src/acp/agent.js"
 import { parseInventory, shortenModeId } from "../src/core/models.js"
+import { renderRequest } from "../src/core/prompt.js"
 import type {
   AcpAgent,
   AcpEvent,
   AcpPermissionPolicy,
+  NormalizedMessage,
   NormalizedRequest,
   PermissionDecision,
 } from "../src/core/types.js"
@@ -157,6 +159,18 @@ const captureError = async (promise: Promise<unknown>): Promise<Error> => {
   )
   if (!(error instanceof Error)) {
     throw new Error(`un rejet était attendu, reçu : ${String(error)}`)
+  }
+  return error
+}
+
+/** Idem pour `AcpAgentError`, dont on veut typer le champ `subject`. */
+const captureAgentError = async (promise: Promise<unknown>): Promise<AcpAgentError> => {
+  const error = await promise.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  if (!(error instanceof AcpAgentError)) {
+    throw new Error(`une AcpAgentError était attendue, reçue : ${String(error)}`)
   }
   return error
 }
@@ -338,10 +352,22 @@ describe("prompt → AcpEvent", () => {
     try {
       const events = await collect(session.prompt(request("PING")))
 
+      // L'`usage` de fin de tour est la variante `turn`, discriminantée : elle
+      // porte les compteurs **et** les paliers de cache, tous présents dans
+      // l'`Usage` ACP (cf. §4.1).
       expect(events).toEqual([
         { type: "text", text: "PO" },
         { type: "text", text: "NG" },
-        { type: "usage", input: 40, output: 2 },
+        {
+          type: "usage",
+          kind: "turn",
+          input: 40,
+          output: 2,
+          total: 42,
+          reasoning: 1,
+          cacheRead: 7,
+          cacheWrite: 9,
+        },
         { type: "done", stopReason: "end_turn" },
       ])
 
@@ -370,11 +396,97 @@ describe("prompt → AcpEvent", () => {
     }
   })
 
-  test("le texte demandé est transmis tel quel à l'agent", async () => {
+  test("le texte demandé est transmis à l'agent, préfixé de son rôle", async () => {
     const session = await agent.open()
     try {
       const events = await collect(session.prompt(request("bonjour le monde")))
-      expect(events[0]).toEqual({ type: "text", text: "ACK: bonjour le monde" })
+      // ⚠️ Le préfixe de rôle n'est pas cosmétique : ACP n'a pas de champ
+      // « system », le transcript est rendu à plat, et l'agent doit pouvoir
+      // distinguer une instruction de sa propre sortie antérieure (§7.3).
+      expect(events[0]).toEqual({ type: "text", text: "ACK: Utilisateur : bonjour le monde" })
+    } finally {
+      await session.close()
+    }
+  })
+
+  test("deux résultats du même outil atteignent l'agent sans être fusionnés", async () => {
+    // De bout en bout : le faux fait `ACK: <prompt entier>`, donc l'on vérifie
+    // ce que l'agent reçoit vraiment — les deux résultats, dans l'ordre, avec
+    // le nom de l'outil. C'est le round-trip de l'`id` (§4) sans table de
+    // correspondance côté adaptateur.
+    const session = await agent.open()
+    try {
+      const transcript: NormalizedRequest = {
+        system: [],
+        tools: [],
+        messages: [
+          { role: "user", text: "relis" },
+          { role: "tool", id: "call-a", name: "read_file", output: "contenu A" },
+          { role: "tool", id: "call-b", name: "read_file", output: "contenu B" },
+        ],
+      }
+      const events = await collect(session.prompt(transcript))
+      const echoed = textOf(events)
+      expect(echoed).toContain("Utilisateur : relis")
+      expect(echoed).toContain("Outil read_file : contenu A")
+      expect(echoed).toContain("Outil read_file : contenu B")
+      expect(echoed.indexOf("contenu A")).toBeLessThan(echoed.indexOf("contenu B"))
+    } finally {
+      await session.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `usage` : deux variantes distinctes, jamais une à champs vides.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("usage (§4.1)", () => {
+  test("l'usage de contexte et celui du tour ne se confondent pas", async () => {
+    const local = await spawnFake({ FAKE_EMIT_USAGE_UPDATE: "1" })
+    try {
+      const session = await local.open()
+      try {
+        const events = await collect(session.prompt(request("PING")))
+        const usages = events.flatMap((e) => (e.type === "usage" ? [e] : []))
+
+        // ⚠️ `{ input?, output?, context? }` rendait `{}` légitime et laissait le
+        // réducteur deviner : c'est le piège du §4.0, transposé à `AcpEvent`.
+        expect(usages).toHaveLength(2)
+
+        // 1. La notification en cours de tour : **fenêtre de contexte**, pas coût.
+        expect(usages[0]).toEqual({ type: "usage", kind: "context", used: 12_345 })
+
+        // 2. Le `PromptResponse` final : coût du tour.
+        expect(usages[1]).toEqual({
+          type: "usage",
+          kind: "turn",
+          input: 40,
+          output: 2,
+          total: 42,
+          reasoning: 1,
+          cacheRead: 7,
+          cacheWrite: 9,
+        })
+
+        // Aucun des deux n'est assimilable à l'autre : c'est tout l'intérêt.
+        expect(usages.every((u) => u.kind === "context" || u.kind === "turn")).toBe(true)
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("un agent sans `usage` n'émet aucun événement de ce type", async () => {
+    // Le faux en émet toujours ; on vérifie donc seulement qu'un flux sans
+    // `usage_update` ne produit **que** la variante de tour, jamais les deux.
+    const session = await agent.open()
+    try {
+      const events = await collect(session.prompt(request("PING")))
+      const kinds = events.flatMap((e) => (e.type === "usage" ? [e.kind] : []))
+      expect(kinds).toEqual(["turn"])
     } finally {
       await session.close()
     }
@@ -709,7 +821,10 @@ describe("erreurs", () => {
     expect(error.message).toContain(MISSING)
     expect(error.message).toMatch(/impossible de lancer l'agent/i)
     expect(error.message).toMatch(/ENOENT|not found/i)
-    expect(error.command).toBe(MISSING)
+    // Le champ s'appelle `subject` et non `command` : selon l'origine, il
+    // contient la commande **ou** un `sessionId`, et `log(e.command)` affichait
+    // un UUID en croyant que c'était une ligne de commande.
+    expect(error.subject).toBe(MISSING)
   })
 
   test("un agent qui meurt avant initialize remonte son code de sortie", async () => {
@@ -749,6 +864,66 @@ describe("erreurs", () => {
       } finally {
         await session.close()
       }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("acp-run refuse un `--model` inconnu avec un code de sortie dédié", async () => {
+    // « Modèle inconnu » est le diagnostic le plus probable face à un agent
+    // exotique. Sans le `try/catch`, ça remontait en rejection non rattrapée
+    // avec une stack de SDK, sans la liste des valeurs acceptées.
+    const proc = Bun.spawn(
+      [process.execPath, "run", CLI, "--command", process.execPath, "--arg", "run",
+       "--arg", FAKE, "--model", "pas-un-modele", "--list-models"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FAKE_REJECT_UNKNOWN_MODEL: "1" },
+      },
+    )
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+    expect(code).toBe(4)
+    expect(stderr).toContain("option refusée par l'agent")
+    expect(stderr).toContain("Invalid model")
+    expect(stderr).toContain("modèles connus")
+    // Aucun `invalid model` ne doit fuiter en rejection non rattrapée.
+    expect(stderr).not.toContain("promise rejection")
+  })
+
+  test("acp-run accepte un `--model` connu et met l'inventaire à jour", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, "run", CLI, "--command", process.execPath, "--arg", "run",
+       "--arg", FAKE, "--model", "claude-sonnet-5", "--list-models"],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FAKE_REJECT_UNKNOWN_MODEL: "1" },
+      },
+    )
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+    expect(code).toBe(0)
+    expect(stderr).toContain("claude-sonnet-5")
+  })
+
+  test("`stderr: \"pipe\"` alimente `onStderr` sans écrire sur notre stderr", async () => {
+    // Le défaut est désormais `"pipe"` : un hébergeur (futur serveur HTTP) ne
+    // veut pas que les logs de l'agent atterrissent dans son journal. C'est la
+    // seule CLI, dont le terminal *est* l'utilisateur, qui demande `inherit`.
+    const chunks: string[] = []
+    const local = await createAcpAgent({
+      command: process.execPath,
+      args: ["run", FAKE],
+      stderr: "pipe",
+      onStderr: (chunk) => chunks.push(chunk),
+      env: { FAKE_NOISY_STDOUT: "1" },
+    })
+    try {
+      // Un aller-retour complet garantit que le chunk de démarrage a été livré.
+      const session = await local.open()
+      expect(textOf(await collect(session.prompt(request("PING"))))).toBe("PONG")
+      await session.close()
+      expect(chunks.join("")).toContain("fake-acp: avertissement de démarrage")
     } finally {
       await local.close()
     }
@@ -880,6 +1055,135 @@ describe("cycle de vie des processus", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Un seul tour à la fois : un invariant de session, connu des appelants.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("concurrence des tours", () => {
+  test("un second tour concurrent est refusé", async () => {
+    // Sans cette garde : les `session/update` des deux tours seraient
+    // indiscernables, et surtout le second `permissionSinks.set` **écraserait**
+    // celui du premier — dont les permissions deviendraient invisibles pendant
+    // que le `finally` du premier les supprimerait. Un refus muet est le pire
+    // échec possible en mode « cerveau brut » (§7.4).
+    const local = await spawnFake({ FAKE_SLOW_MS: "800" })
+    try {
+      const session = await local.open()
+      // On consomme le premier événement : c'est ce qui arme l'invariant.
+      const first = session.prompt(request("TICK"))[Symbol.asyncIterator]()
+      expect(await first.next()).toEqual({ value: { type: "text", text: "TICK" }, done: false })
+
+      const error = await captureAgentError(collect(session.prompt(request("PING"))))
+      expect(error.name).toBe("AcpAgentError")
+      expect(error.message).toMatch(/tour est déjà en cours/)
+      // L'erreur nomme la session, pas une « commande ».
+      expect(error.subject).toBe(session.sessionId)
+
+      // Le refus ne **désarme pas** le drapeau du premier tour : il l'a seulement
+      // empêché d'être volé. On le laisse finir pour vérifier qu'il va à son terme.
+      // `TICK` a déjà été consommé : il ne reste que la fin du tour.
+      const rest: AcpEvent[] = []
+      for await (const event of { [Symbol.asyncIterator]: () => first }) rest.push(event)
+      expect(textOf(rest)).toBe("TOK")
+      expect(rest.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("l'invariant est par session, et se désarme après le tour", async () => {
+    const local = await spawnFake({ FAKE_SLOW_MS: "800" })
+    try {
+      const blocked = await local.open()
+      const first = blocked.prompt(request("TICK"))[Symbol.asyncIterator]()
+      await first.next()
+
+      // Une session neuve fonctionne : l'invariant est local, pas global.
+      const other = await local.open()
+      expect(textOf(await collect(other.prompt(request("PING"))))).toBe("PONG")
+
+      // Et l'agent reste utilisable sur `blocked` une fois son tour terminé.
+      const rest: AcpEvent[] = []
+      for await (const event of { [Symbol.asyncIterator]: () => first }) rest.push(event)
+      expect(textOf(rest)).toBe("TOK")
+      expect(rest.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
+    } finally {
+      await local.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `configOptions` absents : un agent tiers n'est pas tenu de les envoyer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("configOptions non conformes", () => {
+  test("un `session/new` sans configOptions donne un inventaire vide, pas un TypeError", async () => {
+    const local = await spawnFake({ FAKE_NO_CONFIG_OPTIONS: "1" })
+    try {
+      const session = await local.open()
+      try {
+        expect(session.inventory()).toEqual({
+          models: [],
+          thoughtLevels: [],
+          modes: [],
+          options: [],
+        })
+        // Et surtout : les appelants suivants lèvent une **vraie** erreur
+        // applicative, pas un `TypeError` sur `undefined`.
+        await expect(session.setOption("model", "auto")).rejects.toThrow(
+          /option de configuration inconnue/,
+        )
+        await expect(session.setModel("auto")).rejects.toThrow(/options disponibles/)
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("une réponse `set_config_option` sans configOptions conserve l'état courant", async () => {
+    // `?? []` aurait vidé l'inventaire : le `parseInventory` suivant aurait
+    // alors rendu un inventaire vide, et `setModel` aurait cessé de fonctionner.
+    const local = await spawnFake({ FAKE_SET_OMITS_CONFIG_OPTIONS: "1" })
+    try {
+      const session = await local.open()
+      try {
+        expect(session.inventory().currentModel).toBe("gpt-5.6-terra")
+
+        await session.setModel("claude-sonnet-5")
+        expect(session.inventory().options).toHaveLength(4)
+        expect(session.inventory().currentModel).toBe("gpt-5.6-terra")
+
+        // L'option est toujours adressable : rien n'a été perdu.
+        await expect(session.setModel("auto")).resolves.toBeUndefined()
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+
+  test("`setModel` sans option de catégorie model liste les configId existants", async () => {
+    const local = await spawnFake({ FAKE_NO_CONFIG_OPTIONS: "1" })
+    try {
+      const session = await local.open()
+      try {
+        const error = await captureError(session.setModel("auto"))
+        // « aucune option de catégorie model » sans les ids disponibles ne dit
+        // pas à l'utilisateur quoi tenter à la place.
+        expect(error.message).toContain("options disponibles")
+      } finally {
+        await session.close()
+      }
+    } finally {
+      await local.close()
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // `parseInventory` est pur : on le teste sans process, sur des relevés bruts.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -940,5 +1244,44 @@ describe("parseInventory (pur)", () => {
     expect(shortenModeId("https://example.com/a/b")).toBe("b")
     expect(shortenModeId("mode")).toBe("mode")
     expect(shortenModeId("")).toBe("")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `renderRequest` : pur, et living dans `core/prompt.ts` — donc sans le SDK
+// (§2.2). On le teste directement, sans process.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("renderRequest (pur)", () => {
+  test("chaque message est préfixé de son rôle", () => {
+    const messages: readonly NormalizedMessage[] = [
+      { role: "user", text: "bonjour" },
+      { role: "assistant", text: "salut" },
+      { role: "tool", id: "call-1", name: "read_file", output: "# README" },
+    ]
+    expect(renderRequest({ system: ["SYSTÈME"], tools: [], messages })).toBe(
+      "SYSTÈME\n\nUtilisateur : bonjour\n\nAssistant : salut\n\nOutil read_file : # README",
+    )
+  })
+
+  test("deux résultats du même outil ne se confondent pas", () => {
+    // C'est tout l'objet du `id` explicite de `NormalizedMessage` : deux appels
+    // du même outil dans la même conversation doivent rester **distincts**. Un
+    // rendu qui reconstruirait un id les fusionnerait, et le §4 n'aurait plus
+    // quel `tool-result` refermer.
+    const messages: readonly NormalizedMessage[] = [
+      { role: "user", text: "lis deux fichiers" },
+      { role: "tool", id: "call-a", name: "read_file", output: "contenu A" },
+      { role: "tool", id: "call-b", name: "read_file", output: "contenu B" },
+    ]
+    const request: NormalizedRequest = { system: [], tools: [], messages }
+    const rendered = renderRequest(request)
+
+    expect(rendered).toContain("Outil read_file : contenu A")
+    expect(rendered).toContain("Outil read_file : contenu B")
+    // Ordre conservé, et surtout **deux** blocs distincts.
+    expect(rendered.split("Outil read_file : ")).toHaveLength(3)
+    // Le rendu est stable : aucun identifiant re-synthétisé d'un appel à l'autre.
+    expect(renderRequest(request)).toBe(rendered)
   })
 })

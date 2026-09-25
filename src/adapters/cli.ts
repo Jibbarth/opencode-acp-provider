@@ -49,9 +49,15 @@ const usage = (): string => `acp-run — lance un agent ACP et montre ce qu'il p
   --allow-tools       autorise les outils natifs de l'agent au lieu de tout refuser
   -h, --help          cette aide
 
-Exemple :
+Exemples :
   acp-run --command copilot --arg --acp --list-models
-  acp-run --command copilot --arg --acp --prompt 'Réponds uniquement par {"type":"text","text":"pong"}'
+  acp-run --command copilot --arg --acp --model claude-sonnet-5 --list-models
+  acp-run --command copilot --arg --acp --prompt '{"type":"text","text":"pong"}'
+
+Codes de sortie :
+  0  succès   1  le flux a émis un événement "error"
+  2  arguments invalides   3  l'agent n'a pas pu démarrer
+  4  l'agent a refusé une option (--model / --effort)
 `
 
 /** Parseur d'arguments minimal : pas de dépendance externe. */
@@ -132,16 +138,20 @@ const printInventory = (report: InventoryReport): void => {
     process.stderr.write(`${label.padEnd(16)}${value}\n`)
   }
   const { inventory } = report
-  line("agent", `${report.agentName} ${report.agentVersion} (protocole v${report.protocolVersion})`)
+  const version = `protocole v${report.protocolVersion}`
+  line("agent", `${report.agentName} ${report.agentVersion} (${version})`)
   line("modèles", inventory.models.map((m) => m.id).join(", ") || "(aucun)")
   line("modèle actif", inventory.currentModel ?? "(aucun)")
   line("efforts", inventory.thoughtLevels.join(", ") || "(aucun)")
   line("modes", inventory.modes.map((m) => m.id).join(", ") || "(aucun)")
   const perms = inventory.permissions
-  line("permissions", perms ? `${perms.id}=${perms.currentValue} [${perms.values.join(", ")}]` : "(aucune)")
+  line(
+    "permissions",
+    perms ? `${perms.id}=${perms.currentValue} [${perms.values.join(", ")}]` : "(aucune)",
+  )
 }
 
-/** Point d'entrée, exporté pour être testable. */
+/** Point d'entrée du binaire `acp-run` (voir `bin/acp-run.ts`). */
 export const main = async (argv: readonly string[]): Promise<number> => {
   let options: CliOptions | { help: true }
   try {
@@ -167,6 +177,9 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       args: options.args,
       cwd: options.cwd,
       policy: options.allowTools ? allowAllPermissions : denyAllPermissions,
+      // Seule la CLI veut voir les logs de l'agent : elle **est** le terminal
+      // de l'utilisateur. Un hébergeur garderait le défaut `"pipe"` (§2.3).
+      stderr: "inherit",
     })
   } catch (error) {
     // `AcpAgentError` porte déjà un message qui nomme la commande : inutile
@@ -177,22 +190,38 @@ export const main = async (argv: readonly string[]): Promise<number> => {
 
   let failed = false
   try {
-    process.stderr.write(`→ ${options.command} ${options.args.join(" ")} (${agent.info.name} ${agent.info.version})\n`)
+    process.stderr.write(
+      `→ ${options.command} ${options.args.join(" ")}` +
+        ` (${agent.info.name} ${agent.info.version})\n`,
+    )
 
     // Une seule session pour les deux opérations : quand `--list-models` est
     // combiné à `--model`/`--effort`, l'inventaire affiché reflète l'état réel
     // après application des bascules.
-    const session = options.listModels || options.prompt !== undefined
-      ? await agent.open({ cwd: options.cwd })
-      : undefined
+    const session = await agent.open({ cwd: options.cwd })
 
     try {
-      if (session === undefined) return 0
-
-      if (options.model !== undefined) await session.setModel(options.model)
-      if (options.effort !== undefined) {
-        const effort = session.inventory().options.find((o) => o.category === "thought_level")
-        if (effort !== undefined) await session.setOption(effort.id, options.effort)
+      // ⚠️ « Modèle inconnu » est le diagnostic le plus probable face à un agent
+      // exotique. Sans ce `try/catch`, une valeur refusée remonte en rejection
+      // non rattrapée avec une stack de SDK illisible, et l'utilisateur ne voit
+      // ni la liste des valeurs acceptées ni la commande qui a échoué.
+      try {
+        if (options.model !== undefined) await session.setModel(options.model)
+        if (options.effort !== undefined) {
+          const effort = session.inventory().options.find((o) => o.category === "thought_level")
+          if (effort !== undefined) await session.setOption(effort.id, options.effort)
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        const known = session
+          .inventory()
+          .models.map((m) => m.id)
+          .join(", ")
+        process.stderr.write(
+          `option refusée par l'agent : ${detail}\n` +
+            (known === "" ? "" : `modèles connus : ${known}\n`),
+        )
+        return 4
       }
 
       if (options.listModels) {
@@ -215,7 +244,7 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       }
       return failed ? 1 : 0
     } finally {
-      await session?.close()
+      await session.close()
     }
   } finally {
     await agent.close()
@@ -223,12 +252,13 @@ export const main = async (argv: readonly string[]): Promise<number> => {
 }
 
 // Exécution directe (`bun run src/adapters/cli.ts`) — ignorée quand le module
-// est importé par un test.
+// est importé (par `bin/acp-run.ts`).
 if (import.meta.main === true) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (error: unknown) => {
-      process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`)
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+      process.stderr.write(`${detail}\n`)
       process.exit(1)
     },
   )

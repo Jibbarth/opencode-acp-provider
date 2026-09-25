@@ -30,8 +30,12 @@
  * | Variable                       | Effet                                                      |
  * | ------------------------------ | ---------------------------------------------------------- |
  * | `FAKE_EMIT_TOOL_CALL=1`        | émet `tool_call` + `tool_call_update` (pending→in_progress→completed) |
+ * | `FAKE_EMIT_USAGE_UPDATE=1`     | émet une notification `usage_update` (fenêtre de contexte) |
  * | `FAKE_STOP_REASON=<x>`         | `stopReason` du tour (`max_tokens`, `refusal`, `cancelled`) |
  * | `FAKE_BOOLEAN_OPTION=1`        | ajoute une `configOption` de `type: "boolean"`              |
+ * | `FAKE_NO_CONFIG_OPTIONS=1`     | `session/new` **omet** `configOptions` (agent tiers non conforme) |
+ * | `FAKE_SET_OMITS_CONFIG_OPTIONS=1` | `set_config_option` répond sans `configOptions`           |
+ * | `FAKE_REJECT_UNKNOWN_MODEL=1`  | `set_config_option` refuse une valeur hors de la liste (`Invalid model`) |
  * | `FAKE_PERMISSION_OPTIONS=<x>`  | `reject` \| `allow` \| `cancel` : seules ces options sont proposées |
  * | `FAKE_DIE_ON_PROMPT=1`         | quitte au milieu du prompt (avant le `stop`)                |
  * | `FAKE_NOISY_STDOUT=1`          | écrit du non-JSON sur stdout avant le protocole              |
@@ -174,7 +178,22 @@ const CONFIG_OPTIONS: acp.SessionConfigOption[] = [
   ...(flag("FAKE_BOOLEAN_OPTION") ? [BOOLEAN_OPTION] : []),
 ]
 
-const USAGE = { totalTokens: 42, inputTokens: 40, outputTokens: 2 }
+/**
+ * Compteurs du tour, avec les champs optionnels réellement renseignés : c'est
+ * la forme relevée sur `copilot --acp` (§4.1), et elle doit survivre jusqu'à
+ * l'`AcpEvent` pour alimenter la classe `Usage` d'OpenCode en P1.
+ */
+const USAGE = {
+  totalTokens: 42,
+  inputTokens: 40,
+  outputTokens: 2,
+  thoughtTokens: 1,
+  cachedReadTokens: 7,
+  cachedWriteTokens: 9,
+}
+
+/** Fenêtre de contexte, dans `usage_update`. */
+const CONTEXT_USED = 12_345
 
 const chunk = (text: string): acp.SessionUpdate => ({
   sessionUpdate: "agent_message_chunk",
@@ -214,12 +233,36 @@ class FakeAgent {
   newSession(): acp.NewSessionResponse {
     const sessionId = `fake-${Math.random().toString(16).slice(2, 10)}`
     this.sessions.set(sessionId, structuredClone(CONFIG_OPTIONS))
-    return { sessionId, configOptions: structuredClone(CONFIG_OPTIONS) }
+    const response: acp.NewSessionResponse = {
+      sessionId,
+      configOptions: structuredClone(CONFIG_OPTIONS),
+    }
+    // `FAKE_NO_CONFIG_OPTIONS=1` : on **omet** le champ. Un agent tiers n'est
+    // pas tenu de l'envoyer, et le client ne doit pas exploser sur du
+    // `undefined` au prochain `inventory()`. (`Reflect.deleteProperty` car
+    // `delete` exigerait un champ optionnel — et le test doit envoyer un objet
+    // *réellement* dépourvu du champ, pas un objet typé `undefined`.)
+    if (flag("FAKE_NO_CONFIG_OPTIONS")) Reflect.deleteProperty(response, "configOptions")
+    return response
   }
 
   setConfigOption(
     params: acp.SetSessionConfigOptionRequest,
   ): acp.SetSessionConfigOptionResponse {
+    // `FAKE_REJECT_UNKNOWN_MODEL=1` : on se comporte comme `copilot`, qui
+    // répond -32602 « Invalid model » avec la liste des valeurs acceptées.
+    if (
+      flag("FAKE_REJECT_UNKNOWN_MODEL") &&
+      params.configId === "model" &&
+      !MODELS.some((m) => m.value === params.value)
+    ) {
+      // Une `RequestError` explicite : un `throw` d'`Error` brut serait
+      // remonté en -32603 « Internal error », sans le message utile.
+      throw acp.RequestError.invalidParams(
+        { supported: MODELS.map((m) => m.value) },
+        `Invalid model: ${String(params.value)}`,
+      )
+    }
     const current = this.sessions.get(params.sessionId) ?? structuredClone(CONFIG_OPTIONS)
     const next = current.map((option) => {
       if (option.id !== params.configId) return option
@@ -229,8 +272,13 @@ class FakeAgent {
       return { ...option, currentValue: String(params.value) }
     })
     this.sessions.set(params.sessionId, next)
-    // La spec impose de renvoyer l'état complet.
-    return { configOptions: next }
+    // La spec impose de renvoyer l'état complet. Un agent non conforme l'omet :
+    // le client doit alors **conserver** son état courant, pas le vider.
+    const response: acp.SetSessionConfigOptionResponse = { configOptions: next }
+    if (flag("FAKE_SET_OMITS_CONFIG_OPTIONS")) {
+      Reflect.deleteProperty(response, "configOptions")
+    }
+    return response
   }
 
   /** `session/cancel` : on mémorise la session, `wait()` le remarque au tick suivant. */
@@ -274,6 +322,13 @@ class FakeAgent {
 
     await this.wait(params.sessionId)
     if (interrupted()) return finish("cancelled")
+
+    // `usage_update` est une sémantique **différente** du `usage` de fin de tour
+    // (fenêtre de contexte vs coût du tour) : les deux doivent rester
+    // distinguables dans le flux, d'où deux variantes distinctes de `AcpEvent`.
+    if (flag("FAKE_EMIT_USAGE_UPDATE")) {
+      await notify({ sessionUpdate: "usage_update", used: CONTEXT_USED, size: 200_000 })
+    }
 
     if (text.includes("NEED_PERMISSION")) {
       const response = await cx.request(acp.methods.client.session.requestPermission, {

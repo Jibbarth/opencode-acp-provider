@@ -6,6 +6,10 @@
  * de négocier le protocole, de brancher les handlers client, et de traduire les
  * notifications `session/update` en `AcpEvent` (contrat portable).
  *
+ * La construction du prompt vit dans `core/prompt.ts`, **pas ici** : c'est de la
+ * logique métier, et un adaptateur qui la réutiliserait ne doit pas se retrouver
+ * avec le SDK dans son graphe de dépendances (§2.2). On n'y fait qu'un appel.
+ *
  * Point de conception important : `client().connectWith(stream, fn)` lie la durée
  * de vie de `fn` à celle de la connexion. On utilise donc `client().connect(stream)`
  * qui renvoie une `ClientConnection` persistante (`{ agent, signal, closed, close() }`),
@@ -17,6 +21,7 @@ import { Readable, Writable } from "node:stream"
 import * as acp from "@agentclientprotocol/sdk"
 
 import { parseInventory } from "../core/models.js"
+import { renderRequest } from "../core/prompt.js"
 import type {
   AcpAgent,
   AcpAgentInfo,
@@ -48,17 +53,40 @@ export interface AcpAgentOptions {
   policy?: AcpPermissionPolicy
   /** Nom annoncé par le client ACP dans `initialize`. */
   clientName?: string
-  /** Que faire du stderr de l'agent (utile en debug). */
+  /**
+   * Que faire du stderr de l'agent (utile en debug).
+   *
+   * ⚠️ Défaut `"pipe"` : un hébergeur (futur serveur HTTP, §2.3) ne veut pas
+   * voir les logs de l'agent ACP tomber dans **son** journal, qui mélange
+   * alors deux sources. Seule la CLI demande `"inherit"`.
+   *
+   * Quel que soit le mode, les dernières lignes sont conservées pour les
+   * messages d'erreur : c'est la seule source qui dise *pourquoi* l'agent est
+   * mort. Seule différence entre les modes : `"inherit"` les retransmet vers
+   * notre propre stderr, `"pipe"` les transmet à `onStderr`, `"ignore"` n'en
+   * fait rien (mais les garde pour l'erreur).
+   */
   stderr?: "inherit" | "ignore" | "pipe"
+  /** Reçoit chaque chunk de stderr de l'agent (mode `"pipe"`). */
+  onStderr?: (chunk: string) => void
   /** Timeout d'`initialize`, en ms. */
   initializeTimeoutMs?: number
 }
 
-/** Erreur enrichie du chemin de la commande, pour un diagnostic lisible. */
+/**
+ * Erreur enrichie du **sujet** de l'échec, pour un diagnostic lisible.
+ *
+ * ⚠️ Le champ s'appelle `subject` et non `command` parce qu'il ne contient
+ * pas toujours une commande : selon l'origine de l'erreur, c'est l'étiquette
+ * « commande + arguments », ou le `sessionId` d'une session, ou une chaîne
+ * vide. Un champ nommé `command` invitait `log(e.command)` à afficher un UUID
+ * en croyant que c'était une ligne de commande.
+ */
 export class AcpAgentError extends Error {
   constructor(
     message: string,
-    readonly command: string,
+    /** Commande lancée **ou** `sessionId`, selon l'origine de l'erreur. */
+    readonly subject: string,
     options?: { cause?: unknown },
   ) {
     super(message, options)
@@ -104,38 +132,6 @@ const terminate = async (child: ReturnType<typeof spawn>): Promise<void> => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Normalisation du prompt
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Rendu texte minimal d'une `NormalizedRequest`.
- *
- * ⚠️ Volontairement provisoire : la construction complète du prompt
- * (système + catalogue d'outils + contrat de sortie JSON, §7.3) arrive en P2b
- * et remplacera cette fonction par `core/prompt.ts`. Pour l'instant on se
- * contente de garder tout le texte visible, ce qui suffit à valider la chaîne
- * spawn → initialize → session/new → prompt → events.
- */
-export const renderRequest = (request: NormalizedRequest): string => {
-  const parts: string[] = []
-  if (request.system.length > 0) parts.push(request.system.join("\n\n"))
-  for (const message of request.messages) {
-    switch (message.role) {
-      case "user":
-        parts.push(message.text)
-        break
-      case "assistant":
-        parts.push(message.text)
-        break
-      case "tool":
-        parts.push(`${message.name}: ${message.output}`)
-        break
-    }
-  }
-  return parts.join("\n\n")
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Traduction des notifications ACP en `AcpEvent`
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -147,6 +143,11 @@ const textOf = (content: acp.ContentBlock | undefined): string | undefined => {
   return undefined
 }
 
+/**
+ * Couture assumée : les deux unions sont identiques, le typecheck suffit.
+ * Le mapping ne sera nécessaire que si l'un des deux évolue — auquel cas ce
+ * fichier est **le** point à retoucher, pas les appelants.
+ */
 const toStopReason = (reason: acp.StopReason): AcpStopReason => reason
 
 /**
@@ -196,7 +197,9 @@ export const updateToEvents = (update: acp.SessionUpdate): AcpEvent[] => {
       // seuls les items structurés sont traduisibles en `PlanEntry`.
       return update.plan.type === "items" ? [{ type: "plan", entries: update.plan.entries }] : []
     case "usage_update":
-      return [{ type: "usage", context: update.used }]
+      // Fenêtre de contexte, pas coût du tour : les deux sémantiques sont
+      // désormais deux variantes distinctes de `usage` (cf. `core/types.ts`).
+      return [{ type: "usage", kind: "context", used: update.used }]
     default:
       return []
   }
@@ -205,6 +208,26 @@ export const updateToEvents = (update: acp.SessionUpdate): AcpEvent[] => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Implémentation
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `Usage` ACP (au `stop`) → variante `turn` de l'`AcpEvent`.
+ *
+ * On ne propage que les champs **présents** : l'union les déclare optionnels
+ * pour que le réducteur puisse les distinguer, pas pour qu'on invente des zéros.
+ * `reasoning` / `cacheRead` / `cacheWrite` alimenteront directement la classe
+ * `Usage` d'OpenCode en P1 (§4.1) — d'où leur présence ici plutôt qu'un simple
+ * `input`/`output`.
+ */
+const toUsageEvent = (usage: acp.Usage): AcpEvent => ({
+  type: "usage",
+  kind: "turn",
+  input: usage.inputTokens,
+  output: usage.outputTokens,
+  total: usage.totalTokens,
+  ...(usage.thoughtTokens == null ? {} : { reasoning: usage.thoughtTokens }),
+  ...(usage.cachedReadTokens == null ? {} : { cacheRead: usage.cachedReadTokens }),
+  ...(usage.cachedWriteTokens == null ? {} : { cacheWrite: usage.cachedWriteTokens }),
+})
 
 /** Réponse `session/request_permission` + l'option réellement retenue. */
 interface PermissionOutcome {
@@ -256,15 +279,39 @@ const createSession = (
   // déjà normalisée : la forme brute et la forme normalisée n'ont pas les
   // mêmes noms de champs (`options` vs `values`).
   let raw: readonly unknown[] = session.newSessionResponse.configOptions ?? []
+  // `parseInventory` est pur : le résultat ne dépend que de `raw`. On le
+  // mémoïse pour ne pas re-parcourir le relevé à chaque `inventory()`,
+  // `setModel` et `setOption`, et on l'invalide à chaque écriture de `raw`.
+  let parsedInventory: Inventory | undefined
+
+  /** Invariant : `raw` est toujours un relevé exploitable, jamais `undefined`. */
+  const setRaw = (next: readonly unknown[] | undefined): void => {
+    // Un agent tiers peut omettre `configOptions`. `?? []` perdrait
+    // l'inventaire courant ; on **conserve l'état précédent** plutôt que de
+    // le vider — c'est le seul choix qui ne fasse pas régresser l'agent.
+    if (next === undefined) return
+    raw = next
+    parsedInventory = undefined
+  }
+
+  /**
+   * Invariant : `closed` passe à `true` **une fois** et ne revient jamais en
+   * arrière, donc `assertOpen` est une garde suffisante pour tout le cycle de
+   * vie de la session (aucune réouverture, aucune course possible).
+   */
   let closed = false
+  /** Invariant : armé à l'entrée de tout tour, désarmé dans son `finally`. */
+  let turnInFlight = false
 
   const assertOpen = (): void => {
-    if (closed) throw new AcpAgentError(`session ${session.sessionId}: session fermée`, session.sessionId)
+    if (closed) {
+      throw new AcpAgentError(`session ${session.sessionId}: session fermée`, session.sessionId)
+    }
   }
 
   const setOption = async (configId: string, value: string): Promise<void> => {
     assertOpen()
-    const option = parseInventory(raw).options.find((o) => o.id === configId)
+    const option = inventory().options.find((o) => o.id === configId)
     if (option === undefined) {
       throw new AcpAgentError(
         `session ${session.sessionId}: option de configuration inconnue « ${configId} »`,
@@ -280,10 +327,10 @@ const createSession = (
       params,
     )
     // La spécification impose de renvoyer l'état complet : on le relaie tel quel.
-    raw = response.configOptions
+    setRaw(response.configOptions)
   }
 
-  const inventory = (): Inventory => parseInventory(raw)
+  const inventory = (): Inventory => (parsedInventory ??= parseInventory(raw))
 
   const prompt = (
     request: NormalizedRequest,
@@ -293,6 +340,24 @@ const createSession = (
     return {
       async *[Symbol.asyncIterator](): AsyncIterator<AcpEvent> {
         const signal = options_?.signal
+
+        // ⚠️ Invariant : **un seul tour à la fois** par session. Armé dès
+        // l'entrée du générateur, désarmé dans le `finally`.
+        //
+        // Sans cette garde, deux `prompt()` concurrents partagent le même
+        // `session.nextUpdate()` : les `session/update` des deux tours
+        // seraient indiscernables, et surtout le second
+        // `permissionSinks.set(sessionId, …)` **écraserait** celui du premier —
+        // dont les permissions deviendraient invisibles, pendant que le
+        // `finally` du premier les supprimerait. Un refus de permission muet est
+        // le pire échec possible en mode « cerveau brut » (§7.4).
+        if (turnInFlight) {
+          throw new AcpAgentError(
+            `session ${session.sessionId}: un tour est déjà en cours sur cette session`,
+            session.sessionId,
+          )
+        }
+        turnInFlight = true
 
         // Les décisions de permission sont prises **pendant** le tour, depuis un
         // handler qui n'a pas accès au générateur : on les tamponne et on les
@@ -333,19 +398,19 @@ const createSession = (
 
             if (message.kind === "stop") {
               const usage = message.response.usage
-              if (usage !== undefined && usage !== null) {
-                yield { type: "usage", input: usage.inputTokens, output: usage.outputTokens }
-              }
-              // `completed` est positionné **avant** le `yield` : à cet instant le
-              // tour est fini, et il ne faut surtout pas envoyer un `session/cancel`
-              // dans le vide si le consommateur s'arrête sur le `done`.
+              if (usage !== undefined && usage !== null) yield toUsageEvent(usage)
+              // Invariant : `completed` est armé **avant** le `yield done` — à
+              // cet instant le tour est fini, et il ne faut surtout pas envoyer
+              // un `session/cancel` dans le vide si le consommateur s'arrête
+              // dessus. L'armer après laisserait le `finally` annuler un tour
+              // déjà terminé.
               completed = true
               yield { type: "done", stopReason: toStopReason(message.stopReason) }
               return
             }
             const update = message.update
             if (update.sessionUpdate === "config_option_update") {
-              raw = update.configOptions
+              setRaw(update.configOptions)
               continue
             }
             for (const event of updateToEvents(update)) yield event
@@ -358,6 +423,10 @@ const createSession = (
           completed = true
           yield { type: "done", stopReason: "cancelled" }
         } finally {
+          // ⚠️ Invariant : le tour se désarme dans **tous** les cas de sortie —
+          // chemin nominal, `error`, ou abandon du consommateur. Sans cela, un
+          // seul tour interrompu rendrait la session inutilisable à jamais.
+          turnInFlight = false
           signal?.removeEventListener("abort", onAbort)
           permissionSinks.delete(session.sessionId)
           if (completed) {
@@ -382,7 +451,9 @@ const createSession = (
     closed = true
     session.dispose()
     try {
-      await connection.agent.request(acp.methods.agent.session.close, { sessionId: session.sessionId })
+      await connection.agent.request(acp.methods.agent.session.close, {
+        sessionId: session.sessionId,
+      })
     } catch {
       // `session/close` est optionnel (§ sessionCapabilities.close) : son absence
       // n'est pas une erreur, on se contente de libérer le routage local.
@@ -393,10 +464,15 @@ const createSession = (
     sessionId: session.sessionId,
     inventory,
     async setModel(modelId: string): Promise<void> {
-      const modelOption = parseInventory(raw).options.find((o) => o.category === "model")
+      const options = inventory().options
+      const modelOption = options.find((o) => o.category === "model")
       if (modelOption === undefined) {
+        // On liste les `configId` existants : « aucune option de catégorie
+        // model » ne dit pas à l'utilisateur quoi tenter à la place.
+        const known = options.map((o) => o.id).join(", ") || "(aucune)"
         throw new AcpAgentError(
-          `session ${session.sessionId}: l'agent n'expose aucune option de catégorie « model »`,
+          `session ${session.sessionId}: aucune option de catégorie « model »` +
+            ` ; options disponibles : ${known}`,
           session.sessionId,
         )
       }
@@ -420,16 +496,18 @@ const createSession = (
  */
 export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent> => {
   const policy = options.policy ?? denyAllPermissions
-  const stderrMode = options.stderr ?? "inherit"
+  // Défaut `"pipe"` : un hébergeur ne veut pas que les logs de l'agent ACP
+  // atterrissent dans son propre journal. Seule la CLI demande `"inherit"`.
+  const stderrMode = options.stderr ?? "pipe"
   const args = [...(options.args ?? [])]
   // Étiquette lisible présente dans **tous** les messages d'erreur : sans elle,
   // un échec se réduit à « ACP connection closed », sans le nom de la commande.
   const label = [options.command, ...args].join(" ").trim()
 
   // Le stderr est **toujours** capté, quel que soit le mode : c'est la seule
-  // source qui dise *pourquoi* l'agent est mort. `inherit` le retransmet vers
-  // notre propre stderr, `ignore` l'écarte, `pipe` ne le garde que pour l'erreur.
-  // (L'ancienne version ne captait qu'en mode `pipe`, que la CLI n'expose pas :
+  // source qui dise *pourquoi* l'agent est mort. Le mode ne décide que de la
+  // **redistribution** (voir `AcpAgentOptions.stderr`), jamais de la capture.
+  // (L'ancienne version ne captait qu'en mode `pipe`, que la CLI n'exposait pas :
   // la queue était donc toujours vide — du code mort.)
   const stdio: ["pipe", "pipe", "pipe"] = ["pipe", "pipe", "pipe"]
   const child = spawn(options.command, args, {
@@ -439,9 +517,11 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
   })
 
   let stderrTail = ""
+  const tailOf = (): string =>
+    stderrTail === "" ? "" : `\n--- stderr de l'agent ---\n${stderrTail.trim()}`
   const fail = (reason: string, cause?: unknown): AcpAgentError =>
     new AcpAgentError(
-      `${label}: ${reason}${stderrTail === "" ? "" : `\n--- stderr de l'agent ---\n${stderrTail.trim()}`}`,
+      `${label}: ${reason}${tailOf()}`,
       label,
       cause === undefined ? undefined : { cause },
     )
@@ -450,12 +530,20 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
     captureStderr.setEncoding("utf8")
     captureStderr.on("data", (chunk: string) => {
       stderrTail = (stderrTail + chunk).slice(-2_000)
+      // `"inherit"` retransmet vers notre stderr, `"pipe"` vers l'hôte qui a
+      // fourni `onStderr`, `"ignore"` nulle part — mais les trois modes
+      // alimentent `stderrTail`, seule source du diagnostic de mort.
       if (stderrMode === "inherit") process.stderr.write(chunk)
+      else if (stderrMode === "pipe") options.onStderr?.(chunk)
     })
   }
 
   // Permissions demandées pendant un tour, par `sessionId` : c'est le seul moyen
   // de les rendre observables dans le flux `AcpEvent` (§7.4).
+  //
+  // Invariant : **au plus une entrée par session ouverte**, posée par le tour en
+  // cours et retirée par son `finally`. C'est pourquoi `prompt()` refuse deux
+  // tours concurrents : un `set` aurait écrasé l'entrée du premier tour.
   const permissionSinks = new Map<string, PermissionSink>()
 
   let connection: acp.ClientConnection | undefined
@@ -553,7 +641,9 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
         fs: { readTextFile: false, writeTextFile: false },
       },
     })
-    const timeout = AbortSignal.timeout(options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS)
+    const timeout = AbortSignal.timeout(
+      options.initializeTimeoutMs ?? DEFAULT_INITIALIZE_TIMEOUT_MS,
+    )
     initResponse = await Promise.race([request, death, rejectOn(timeout, label)])
   } catch (error) {
     // ⚠️ Correction de la fuite de processus : *aucune* sortie d'erreur ne doit
@@ -633,10 +723,10 @@ const requireStream = <T>(stream: T | null, name: string): T => {
   return stream
 }
 
-const rejectOn = (signal: AbortSignal, command: string): Promise<never> =>
+const rejectOn = (signal: AbortSignal, subject: string): Promise<never> =>
   new Promise((_resolve, reject) => {
     const onAbort = (): void =>
-      reject(new AcpAgentError(`${command}: initialize a expiré`, command))
+      reject(new AcpAgentError(`${subject}: initialize a expiré`, subject))
     if (signal.aborted) onAbort()
     else signal.addEventListener("abort", onAbort, { once: true })
   })

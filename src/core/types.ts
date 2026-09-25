@@ -45,10 +45,36 @@ export type AcpEvent =
   /** Plan d'exécution de l'agent. */
   | { type: "plan"; entries: readonly PlanEntry[] }
   /**
-   * Compteurs de tokens. `input`/`output` viennent du `PromptResponse` final,
-   * `context` des notifications d'usage en cours de tour (fenêtre de contexte).
+   * Compteurs de tokens, en **deux variantes discriminées par `kind`**.
+   *
+   * ⚠️ Pourquoi deux variantes plutôt qu'un objet à champs optionnels : les
+   * deux sémantiques viennent de **deux producteurs distincts** et ne se
+   * recoupent pas. `usage_update` ne parle que de la fenêtre de contexte
+   * (combien de tokens sont *réservés*), le `PromptResponse` final ne parle que
+   * de ce que le tour a *coûté*. Un `{ input?, output?, context? }` à champs
+   * tous optionnels rend `{}` légitime : le réducteur de l'adaptateur devrait
+   * alors deviner de quel côté on parle — exactement le piège documenté au
+   * §4.0 pour `LLMEvent`, où un objet mal formé produit « The provider
+   * response ended unexpectedly. », indiscernable d'une troncature.
+   *
+   * - `context` : notification `usage_update`, en cours de tour (monotonique).
+   * - `turn` : le `PromptResponse` final du tour. `reasoning` / `cacheRead` /
+   *   `cacheWrite` correspondent à `thoughtTokens` / `cachedReadTokens` /
+   *   `cachedWriteTokens` de l'`Usage` ACP (§4.1) et alimentent directement la
+   *   classe `Usage` d'OpenCode en P1, **instances de `Usage` comprises**.
    */
-  | { type: "usage"; input?: number; output?: number; context?: number }
+  | { type: "usage"; kind: "context"; used: number }
+  | {
+      type: "usage"
+      kind: "turn"
+      input?: number
+      output?: number
+      total?: number
+      /** Tokens de raisonnement (`thoughtTokens` côté ACP). */
+      reasoning?: number
+      cacheRead?: number
+      cacheWrite?: number
+    }
   /**
    * Décision de permission prise pendant le tour.
    *
@@ -85,11 +111,29 @@ export interface PlanEntry {
 // Requête normalisée — indépendante d'OpenCode comme de l'API OpenAI
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Un message du transcript, rendu sous une forme agnostique. */
+/**
+ * Un message du transcript, rendu sous une forme agnostique.
+ *
+ * ⚠️ La variante `tool` porte un **`id` explicite** alors qu'ACP n'en
+ * transporte aucun. Raison : cet id est **synthétisé par l'émetteur** (au tour
+ * N, quand on émet le `tool-call`) et **renvoyé fidèlement** par le
+ * consommateur au tour N+1 — OpenCode via `toolCallId`, l'API OpenAI via
+ * `tool_call_id`. Le round-trip est donc stable dans les deux cas, sans table de
+ * correspondance à maintenir.
+ *
+ * L'alternative — laisser l'id de côté et le reconstruire au rendu — rendait
+ * deux appels du même outil dans la même conversation **indiscernables**, alors
+ * que le §4 exige d'émettre `tool-result{ id, name, result }` : sans id stable,
+ * le réducteur ne sait pas quel résultat refermer.
+ *
+ * **Contrainte pour les adaptateurs** : propager cet `id` **verbatim**, et
+ * garantir son **unicité par requête** — deux `tool-call` d'un même tour ne
+ * doivent jamais porter le même id.
+ */
 export type NormalizedMessage =
   | { role: "user"; text: string }
   | { role: "assistant"; text: string }
-  | { role: "tool"; name: string; output: string }
+  | { role: "tool"; id: string; name: string; output: string }
 
 /** Un outil exposé à l'agent, avec son vrai nom et son vrai schéma JSON. */
 export interface NormalizedTool {

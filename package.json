@@ -15,6 +15,7 @@
   "exports": {
     "./core": "./src/core/types.ts",
     "./core/models": "./src/core/models.ts",
+    "./core/prompt": "./src/core/prompt.ts",
     "./acp": "./src/acp/agent.ts",
     "./cli": "./src/adapters/cli.ts"
   },
