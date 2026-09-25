@@ -13,10 +13,14 @@
     "acp-run": "./bin/acp-run.ts"
   },
   "exports": {
+    ".": "./src/index.ts",
     "./core": "./src/core/types.ts",
     "./core/models": "./src/core/models.ts",
     "./core/prompt": "./src/core/prompt.ts",
     "./acp": "./src/acp/agent.ts",
+    "./settings": "./src/settings.ts",
+    "./opencode-transport": "./src/adapters/opencode-transport.ts",
+    "./opencode-protocol": "./src/adapters/opencode-protocol.ts",
     "./cli": "./src/adapters/cli.ts"
   },
   "scripts": {
@@ -26,6 +30,9 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.5.0",
+    "@opencode/ai": "2.0.3",
+    "@opencode/schema": "2.0.3",
+    "effect": "4.0.0-rc.112",
     "zod": "4.1.12"
   },
   "devDependencies": {
