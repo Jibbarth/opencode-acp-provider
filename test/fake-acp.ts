@@ -47,6 +47,7 @@
  * | `FAKE_BOOLEAN_OPTION=1`        | ajoute une `configOption` de `type: "boolean"`              |
  * | `FAKE_NO_CONFIG_OPTIONS=1`     | `session/new` **omet** `configOptions` (agent tiers non conforme) |
  * | `FAKE_SET_OMITS_CONFIG_OPTIONS=1` | `set_config_option` répond sans `configOptions`           |
+ * | `FAKE_ECHO_CONFIG=1`           | `PING` répond `PONG <modèle> <effort>` : les options courantes    |
  * | `FAKE_REJECT_UNKNOWN_MODEL=1`  | `set_config_option` refuse une valeur hors de la liste (`Invalid model`) |
  * | `FAKE_PERMISSION_OPTIONS=<x>`  | `reject` \| `allow` \| `cancel` : seules ces options sont proposées |
  * | `FAKE_DIE_ON_PROMPT=1`         | quitte au milieu du prompt (avant le `stop`)                |
@@ -346,6 +347,23 @@ class FakeAgent {
   }
 
   /**
+   * Valeurs courantes du modèle et de l'effort, pour les tests qui vérifient
+   * que l'adaptateur les a **appliquées** avant le prompt (§5.2).
+   *
+   * Sans cela, `set_config_option` serait un aller-retour JSON-RPC sans
+   * contrepartie observable : le test passerait même si le câblage du variant
+   * disparaissait, ce qui est précisément la régression à surveiller.
+   */
+  private echoConfig(sessionId: string): string {
+    const current = this.sessions.get(sessionId) ?? CONFIG_OPTIONS
+    const read = (id: string): string => {
+      const option = current.find((entry) => entry.id === id)
+      return option === undefined ? "?" : String(option.currentValue)
+    }
+    return `PONG ${read("model")} ${read("reasoning_effort")}`
+  }
+
+  /**
    * Latence interruptible : unlike à `setTimeout`, elle **réagit** à
    * `session/cancel`, ce qui permet de tester l'annulation sans.course.
    */
@@ -445,7 +463,7 @@ class FakeAgent {
       })
       await notify(chunk(answer("PLAN_OK")))
     } else if (text.includes("PING")) {
-      await notify(chunk(answer("PONG")))
+      await notify(chunk(answer(flag("FAKE_ECHO_CONFIG") ? this.echoConfig(params.sessionId) : "PONG")))
     } else {
       // Le défaut « echo » : il renvoie le prompt **qu'il a reçu**, ce qui est le
       // seul moyen de vérifier `fromRequest` et `renderRequest` de bout en bout.

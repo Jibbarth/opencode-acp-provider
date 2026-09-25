@@ -55,7 +55,10 @@ afterAll(async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Settings du faux agent ; échoue bruyamment si la validation se trompe. */
-const fakeSettings = (env: Record<string, string> = {}): AcpProviderSettings => {
+const fakeSettings = (
+  env: Record<string, string> = {},
+  extra: Readonly<Record<string, unknown>> = {},
+): AcpProviderSettings => {
   const parsed = parseSettings({
     command: process.execPath,
     args: ["run", FAKE],
@@ -64,6 +67,7 @@ const fakeSettings = (env: Record<string, string> = {}): AcpProviderSettings => 
     // il ne parle pas ; sans ça, `FAKE_NOISY_STDOUT` polluerait la sortie du test.
     stderr: "ignore",
     env,
+    ...extra,
   })
   if (!parsed.ok) throw new Error(parsed.message)
   return parsed.value
@@ -967,6 +971,66 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     // Un `step-finish` **avant** le terminal : c'est lui qui empêche le core de
     // lire une troncature.
     expect(indexOfType(events, "step-finish")).toBeLessThan(indexOfType(events, "provider-error"))
+  })
+
+  test("le variant d'effort est appliqué avant le prompt, après le modèle", async () => {
+    // `effort` vient d'un `variant` de `Model.Info` (§5.2) : le plugin publie
+    // `{ effort: "high" }`, OpenCode le fusionne dans les settings, et c'est
+    // l'adaptateur qui doit le traduire en `set_config_option("reasoning_effort")`.
+    // Sans ce test, ce câblage pourrait disparaître sans qu'aucun vert ne tombe :
+    // `set_config_option` est un aller-retour JSON-RPC sans contrepartie.
+    const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1" }, { effort: "high" })
+    const languageModel = model("claude-sonnet-5", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "claude-sonnet-5", request)
+
+    // Le faux agent répond ce qu'il a **appliqué** : les deux options ont donc
+    // été prises en compte, dans l'ordre.
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual([
+      "PONG claude-sonnet-5 high",
+    ])
+  })
+
+  test("sans variant, l'agent garde la valeur qu'il annonce lui-même", async () => {
+    const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual([
+      "PONG gpt-5.6-terra medium",
+    ])
+  })
+
+  test("un effort hors liste échoue en nommant les valeurs acceptées", async () => {
+    // Un effort peut être valide pour le modèle courant et invalide pour un
+    // autre (`none` n'existe pas pour `claude-sonnet-5` sur `copilot --acp`) : on
+    // échoue donc en nommant la liste, plutôt que de laisser l'agent refuser une
+    // valeur muette.
+    const settings = fakeSettings({}, { effort: "absent" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const route = languageModel.route
+          const body = yield* route.body.from(request)
+          const prepared: AcpPrepared = yield* route.prepareTransport(body, request)
+          return yield* Stream.runCollect(route.streamPrepared(prepared, request, NO_HTTP))
+        }),
+      ).pipe(Effect.result),
+    )
+
+    expect(Result.isFailure(outcome)).toBe(true)
+    if (Result.isSuccess(outcome)) return
+    expect(outcome.failure.message).toContain("absent")
+    expect(outcome.failure.message).toContain("none, medium, high")
+    // Le message nomme la **chose** demandée : « le modèle "absent" » serait
+    // illisible.
+    expect(outcome.failure.message).toContain("niveau d'effort")
   })
 
   test("un modèle que l'agent ne propose pas échoue en nommant les valeurs acceptées", async () => {

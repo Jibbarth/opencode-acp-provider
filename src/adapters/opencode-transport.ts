@@ -185,31 +185,66 @@ export const closeCachedAgents = async (): Promise<void> => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Applique le modèle demandé **avant** le prompt (§5.2).
+ * Applique une valeur d'option de session **avant** le prompt (§5.2).
  *
- * ⚠️ Trois cas, trois traitements : l'agent n'a pas d'option `model` (il n'a qu'un
- * modèle, on n'a rien à faire) ; le modèle demandé est déjà le courant (on
- * n'envoie pas un `set_config_option` inutile, qui ferait un aller-retour JSON-RPC
- * par tour) ; le modèle demandé n'est **pas** dans la liste — on échoue avec la
- * liste sous le nez de l'utilisateur plutôt que de laisser l'agent refuser un
- * modèle muet, ou pire, d'en choisir un autre.
+ * ⚠️ Trois cas, trois traitements : l'agent n'a pas d'option de cette catégorie
+ * (il n'a qu'un modèle, ou qu'un effort : on n'a rien à faire) ; la valeur
+ * demandée est déjà la courante (on n'envoie pas un `set_config_option`
+ * inutile, qui ferait un aller-retour JSON-RPC par tour) ; la valeur n'est
+ * **pas** dans la liste — on échoue avec la liste sous le nez de l'utilisateur
+ * plutôt que de laisser l'agent refuser une valeur muette, ou pire, d'en
+ * choisir une autre.
+ *
+ * ⚠️ `label` nomme la chose demandée (« modèle », « niveau d'effort ») : le même
+ * code sert pour les deux, et un message qui dirait « le modèle "high" » serait
+ * pire qu'inexploitable.
  */
-const applyModel = async (
+const applyOption = async (
   session: AcpSession,
-  model: string,
+  category: "model" | "thought_level",
+  label: string,
+  value: string,
   settings: AcpProviderSettings,
 ): Promise<void> => {
-  const option = session.inventory().options.find((entry) => entry.category === "model")
+  const option = session.inventory().options.find((entry) => entry.category === category)
   if (option === undefined) return
-  if (option.currentValue === model) return
-  if (!option.values.includes(model)) {
+  if (option.currentValue === value) return
+  if (!option.values.includes(value)) {
     throw new AcpAgentError(
-      `${labelOf(settings)}: le modèle « ${model} » n'est pas proposé par cet agent ` +
+      `${labelOf(settings)}: ${label} « ${value} » n'est pas proposé par cet agent ` +
         `(valeurs acceptées : ${option.values.join(", ")})`,
       labelOf(settings),
     )
   }
-  await session.setOption(option.id, model)
+  await session.setOption(option.id, value)
+}
+
+/** Applique le modèle demandé (§5.2) — le `Model.ID` vient de la requête. */
+const applyModel = async (
+  session: AcpSession,
+  model: string,
+  settings: AcpProviderSettings,
+): Promise<void> => applyOption(session, "model", "le modèle", model, settings)
+
+/**
+ * Applique le niveau d'effort du `variant` sélectionné (§5.2).
+ *
+ * ⚠️ C'est **après** `applyModel`, jamais avant : la liste des niveaux acceptés
+ * dépend du modèle courant côté agent (`none` disparaît sur `claude-sonnet-5`
+ * pour `copilot --acp`), et `setOption` relaie l'état complet renvoyé par
+ * l'agent — c'est donc la seule façon de valider contre la bonne liste.
+ *
+ * ⚠️ Un effort absent des settings n'envoie rien : l'agent garde la valeur
+ * qu'il annonce dans `session/new`. C'est le comportement correct pour un
+ * `/model` sans variant sélectionné.
+ */
+const applyEffort = async (
+  session: AcpSession,
+  settings: AcpProviderSettings,
+): Promise<void> => {
+  const effort = settings.effort
+  if (effort === undefined) return
+  await applyOption(session, "thought_level", "le niveau d'effort", effort, settings)
 }
 
 /** Ouvre la session, en garantie de fermeture par le `Scope` de la requête. */
@@ -297,6 +332,7 @@ const execute = (
   Effect.gen(function* () {
     const session = yield* openSession(settings)
     yield* attempt(settings, () => applyModel(session, prepared.model, settings))
+    yield* attempt(settings, () => applyEffort(session, settings))
     const frames: Stream.Stream<string, AIError> = Stream.fromAsyncIterable(
       session.prompt(prepared.request),
       // Une exception du générateur devient un échec de flux : mieux vaut une

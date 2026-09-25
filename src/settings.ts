@@ -79,6 +79,20 @@ export type AcpProviderSettings = Readonly<{
    *   `adapters/opencode-transport.ts`).
    */
   allowedTools: readonly string[] | undefined
+  /**
+   * Niveau d'effort demandé — la valeur d'un `variant` de `Model.Info` (§5.2).
+   *
+   * ⚠️ Elle ne vient **pas** de l'utilisateur au clavier mais d'un `variant`
+   * publié par le plugin : `{ settings: { effort: "high" } }`, fusionné par
+   * OpenCode dans les settings du provider. L'adaptateur la traduit en
+   * `set_config_option("reasoning_effort", …)` **avant** le prompt, et **après**
+   * le modèle : l'agent change la liste des niveaux qu'il accepte en changeant
+   * de modèle (`none` n'existe pas pour `claude-sonnet-5` sur `copilot --acp`).
+   *
+   * Absent : aucun `set_config_option` n'est envoyé, et l'agent applique la
+   * valeur qu'il annonce lui-même dans `session/new`.
+   */
+  effort: string | undefined
 }>
 
 /**
@@ -208,6 +222,11 @@ export const parseSettings = (input: unknown): SettingsResult => {
   if (!systemSuffix.ok) return systemSuffix
   const allowedTools = optionalStringArray(input, "allowedTools")
   if (!allowedTools.ok) return allowedTools
+  const effort = optionalString(input, "effort")
+  if (!effort.ok) return effort
+  if (effort.value !== undefined && effort.value.trim() === "") {
+    return invalid("effort", "ne peut pas être une chaîne vide — omets le champ pour ne pas forcer de niveau")
+  }
 
   return {
     ok: true,
@@ -220,6 +239,7 @@ export const parseSettings = (input: unknown): SettingsResult => {
       session: session.value,
       systemSuffix: systemSuffix.value,
       allowedTools: allowedTools.value,
+      effort: effort.value,
     },
   }
 }
@@ -236,7 +256,9 @@ export const parseSettings = (input: unknown): SettingsResult => {
  * écritures que l'utilisateur a interdites**.
  *
  * À l'inverse `session` et `systemSuffix` n'y sont pas : ils ne touchent pas le
- * process, seulement la requête (`AcpPrepared`).
+ * process, seulement la requête (`AcpPrepared`). `effort` non plus, pour la même
+ * raison : c'est une valeur de `variant` appliquée par `set_config_option` sur la
+ * session du tour, pas une propriété de l'agent.
  */
 export const agentKey = (settings: AcpProviderSettings): string =>
   JSON.stringify([
