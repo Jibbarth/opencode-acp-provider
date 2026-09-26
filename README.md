@@ -27,22 +27,28 @@ Le projet suit les phases du `PLAN.md`. Où en est-on, sans arrondir :
 | P1 — `Transport` Effect sur stdio | fait, testé (bout-en-bout contre un faux agent) |
 | P2 — mapping `AcpEvent` → `LLMEvent` | fait, testé séquence par séquence |
 | P2b — l'agent **propose** l'outil, OpenCode l'exécute (§7.3) | fait, testé |
-| **P3a — plugin : provider + `Model.Info`, variantes d'effort** | **fait, testé — pas encore testé dans un vrai OpenCode** |
-| P3b — recette réelle : `acp/<modèle>` visible dans `/model`, un chat complet | **à faire** |
+| **P3a — plugin : provider + `Model.Info`, variantes d'effort** | **fait et testé dans un vrai OpenCode** |
+| **P3b — recette réelle** : `acp/<modèle>` visible dans `/model`, un tour complet | **fait, vérifié** |
 | P4 — permissions fines, `session/cancel`, erreurs §8 | à faire |
 | P6 — variantes par modèle, serveurs MCP versés à l'agent | à faire |
 | P7 — adaptateur HTTP `/v1/chat/completions` | à faire |
 
-**Ce qui a été vérifié pour de vrai** : `src/index.ts` (le point d'entrée
-provider) a tourné contre un `copilot --acp` installé et authentifié
-(`bun run verify:real`), et la suite de tests (211 tests) couvre le client ACP,
-le `Transport`, le réducteur et la publication de l'inventaire.
+**Ce qui a été vérifié pour de vrai, bout en bout.** Dans un vrai `opencode serve`,
+le plugin se charge (`opencode-acp-provider | local | active`), le provider `acp` est
+enregistré avec `package: file://…/src/index.ts`, **19 modèles** paraissent dans
+`/model` avec leurs noms et leurs variantes d'effort, et un tour de conversation via
+`acp/claude-sonnet-5` renvoie la réponse attendue :
 
-**Ce qui ne l'a pas été** : le plugin n'a encore été chargé par **un serveur
-OpenCode**. Toute la logique de publication est pure et testée, mais le contrat
-avec l'API plugin (`ctx.provider.transform`, `ctx.event.subscribe`) n'a été
-vérifié que par lecture des sources de `@opencode/plugin@2.0.16` et du binaire
-`opencode@2.0.16`. C'est la prochaine étape, et elle est courte.
+```
+acp/claude-sonnet-5 | finish=stop | tokens=2/24
+   texte: BONJOUR-ACP
+```
+
+⚠️ **Piège de recette, à connaître.** `opencode models` sort **avant** que les plugins
+aient fini de charger : il affiche zéro modèle `acp/` sans que quoi que ce soit soit faux,
+et le résultat est intermittent d'un run à l'autre. Pour vérifier, il faut un **serveur
+persistant** : `opencode serve --port N`, puis interroger `/api/plugin` et `/api/model`
+en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarrage).
 
 ### Limites connues
 
