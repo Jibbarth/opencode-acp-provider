@@ -1,15 +1,15 @@
 /**
- * Tests de la phase P3a : la publication de l'inventaire ACP.
+ * Publishing the ACP inventory.
  *
- * Tout ce qui est testé ici est **pur** : aucune fonction de ce fichier ne
- * lance de process, n'ouvre de session et n'importe `@opencode/plugin`. C'est
- * le bénéfice du découpage `core/publish.ts` ↔ `src/plugin.ts` : ce qui décide
- * de ce qu'OpenCode voit dans `/model` se vérifie par des appels de fonction,
- * alors qu'un vrai `copilot --acp` ne permet d'observer qu'un catalogue, dans
- * un serveur, avec l'inventaire déjà changé.
+ * Everything tested here is **pure**: no function in this file spawns a process,
+ * opens a session or imports `@opencode/plugin`. That is the benefit of the
+ * `core/publish.ts` / `src/plugin.ts` split: what decides what OpenCode sees in
+ * `/model` is checkable by function calls, whereas a real `copilot --acp` only
+ * lets you observe a catalogue, inside a server, with the inventory already
+ * changed.
  *
- * Le relevé de référence est celui du §5.1 du plan, mesuré sur `copilot --acp`
- * : 20 valeurs de catégorie `model` (dont `auto`), 6 niveaux d'effort, 3 modes.
+ * The reference capture is the one measured on `copilot --acp`: 20 `model`
+ * category values (including `auto`), 6 effort levels, 3 modes.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -35,7 +35,7 @@ import { parseSettings } from "../src/settings.js"
 import type { AcpMode, AcpOption, Inventory } from "../src/core/types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fixtures — le relevé réel du §5.1
+// Fixtures - the real capture
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MODEL_IDS = [
@@ -78,7 +78,7 @@ const option = (id: string, category: string, currentValue: string, values: read
   values,
 })
 
-/** L'inventaire mesuré sur `copilot --acp` (agent `Copilot` v1.0.88). */
+/** The inventory measured on `copilot --acp` (agent `Copilot` v1.0.88). */
 const copilotInventory = (): Inventory => ({
   models: MODEL_IDS.map((id) =>
     id === "claude-sonnet-5"
@@ -106,24 +106,24 @@ const ids = (models: readonly { readonly id: string }[]): readonly string[] => m
 // `inventoryToModels`
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("inventoryToModels (pur)", () => {
-  test("20 valeurs de l'agent donnent 19 modèles : `auto` est filtré", () => {
+describe("inventoryToModels (pure)", () => {
+  test("20 agent values give 19 models: `auto` is filtered out", () => {
     const models = inventoryToModels(copilotInventory())
     expect(MODEL_IDS.length).toBe(20)
     expect(models.length).toBe(19)
     expect(ids(models)).not.toContain("auto")
-    // Tout le reste est conservé, dans l'ordre de l'agent.
+    // Everything else is kept, in the agent's order.
     expect(ids(models)).toEqual(MODEL_IDS.filter((id) => id !== "auto"))
   })
 
-  test("le pseudo-modèle filtré est bien `auto`, et documenté comme tel", () => {
-    // Le test verrouille la *décision*, pas seulement le code : un futur
-    // `PSEUDO_MODEL_IDS` différent doit faire échouer ce test, pour qu'on se
-    // rende compte qu'on change le contrat.
+  test("the filtered pseudo-model really is `auto`, and documented as such", () => {
+    // The test locks the *decision*, not only the code: a different future
+    // `PSEUDO_MODEL_IDS` must make this test fail, so that changing the contract
+    // cannot go unnoticed.
     expect([...PSEUDO_MODEL_IDS]).toEqual(["auto"])
   })
 
-  test("`auto` est filtré quelle que soit sa casse ou son espaces", () => {
+  test("`auto` is filtered whatever its case or surrounding spaces", () => {
     const inventory = copilotInventory()
     const models = inventoryToModels({
       ...inventory,
@@ -132,19 +132,19 @@ describe("inventoryToModels (pur)", () => {
     expect(ids(models)).toEqual(["gpt-5.4"])
   })
 
-  test("le nom affiché est celui de l'agent, l'id reste l'identifiant ACP", () => {
+  test("the display name is the agent's, the id stays the ACP identifier", () => {
     const models = inventoryToModels(copilotInventory())
     const sonnet = models.find((model) => model.id === "claude-sonnet-5")
     expect(sonnet?.name).toBe("Claude Sonnet 5")
-    // Un modèle sans libellé retombe sur son id plutôt que d'être invisible.
+    // A model with no label falls back to its id rather than becoming invisible.
     const bare = models.find((model) => model.id === "gpt-5.4")
     expect(bare?.name).toBe("gpt-5.4")
     expect(models.find((model) => model.id === "gpt-5.4-mini")?.name).toBe("gpt-5.4-mini")
   })
 
-  test("un modèle sans description est publié comme les autres", () => {
-    // `AcpModel.description` est facultatif : son absence ne doit ni supprimer le
-    // modèle ni le distinguer dans le catalogue.
+  test("a model without a description is published like the others", () => {
+    // `AcpModel.description` is optional: its absence must neither drop the model
+    // nor single it out in the catalogue.
     const models = inventoryToModels({
       ...copilotInventory(),
       models: [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }],
@@ -153,59 +153,59 @@ describe("inventoryToModels (pur)", () => {
     expect(models[0]?.id).toBe("claude-sonnet-5")
   })
 
-  test("un nom vide retombe sur l'id", () => {
+  test("an empty name falls back to the id", () => {
     const models = inventoryToModels({ ...emptyInventory(), models: [{ id: "x-1", name: "  " }] })
     expect(models[0]?.name).toBe("x-1")
   })
 
-  test("les capacités sont textuelles, et `tools` est vrai", () => {
+  test("the capabilities are textual, and `tools` is true", () => {
     for (const model of inventoryToModels(copilotInventory())) {
       expect(model.capabilities).toEqual({ tools: true, input: ["text"], output: ["text"] })
     }
   })
 
-  test("les limites sont explicites et par défaut, jamais `undefined`", () => {
-    // Un `limit` absent ferait échouer `Model.Info` ; un `limit` à 0 ferait croire
-    // à une fenêtre nulle. On veut une valeur **déclarée** et constante.
+  test("the limits are explicit and defaulted, never `undefined`", () => {
+    // A missing `limit` would make `Model.Info` fail; a `limit` of 0 would
+    // suggest a null window. A **declared**, constant value is wanted.
     const model = inventoryToModels(copilotInventory())[0]
     expect(model?.limit).toEqual({ context: 200_000, output: 32_000 })
     expect(DEFAULT_LIMITS).toEqual({ context: 200_000, output: 32_000 })
   })
 
-  test("les limites se règlent par agent, et s'appliquent à tous ses modèles", () => {
+  test("the limits are configurable per agent, and apply to all its models", () => {
     const models = inventoryToModels(copilotInventory(), { limits: { context: 32_000, output: 8_000 } })
     expect(models.length).toBe(19)
     for (const model of models) expect(model.limit).toEqual({ context: 32_000, output: 8_000 })
   })
 
-  test("les niveaux d'effort deviennent des variants réglables", () => {
+  test("the effort levels become selectable variants", () => {
     const models = inventoryToModels(copilotInventory())
     expect(models[0]?.variants.map((v) => v.id)).toEqual([...EFFORTS])
-    // Le `settings` du variant est exactement ce que lira `settings.ts`.
+    // The variant's `settings` is exactly what `settings.ts` reads.
     expect(models[0]?.variants[3]).toEqual({ id: "high", settings: { effort: "high" } })
   })
 
-  test("aucun variant ne s'appelle `default` — OpenCode n'en fusionnerait pas les settings", () => {
-    // Cf. `ModelResolver` : l'id `"default"` signifie « aucun variant », ses
-    // `settings` seraient donc ignorées. Un variant `default` porterait un
-    // `effort` silencieusement perdu.
+  test("no variant is called `default` - OpenCode would not merge its settings", () => {
+    // Cf. `ModelResolver`: the id `"default"` means "no variant", so its
+    // `settings` would be ignored. A `default` variant would carry a silently
+    // lost `effort`.
     const models = inventoryToModels(copilotInventory())
     expect(models[0]?.variants.map((v) => v.id)).not.toContain("default")
   })
 
-  test("les variants suivent l'inventaire, y compris quand `none` disparaît", () => {
-    // Mesuré : `copilot --acp` ne propose plus `none` pour `claude-sonnet-5`.
+  test("the variants follow the inventory, including when `none` disappears", () => {
+    // Measured: `copilot --acp` no longer offers `none` for `claude-sonnet-5`.
     const inventory = copilotInventory()
     const models = inventoryToModels({ ...inventory, thoughtLevels: ["low", "medium", "high"] })
     expect(models[0]?.variants.map((v) => v.id)).toEqual(["low", "medium", "high"])
   })
 
-  test("un agent sans niveaux d'effort donne des modèles sans variant", () => {
+  test("an agent with no effort levels gives models with no variant", () => {
     const models = inventoryToModels({ ...copilotInventory(), thoughtLevels: [] })
     expect(models[0]?.variants).toEqual([])
   })
 
-  test("des niveaux d'effort dupliqués ou vides ne produisent pas deux variants", () => {
+  test("duplicate or empty effort levels do not produce two variants", () => {
     const variants = effortVariants({ ...copilotInventory(), thoughtLevels: ["high", "high", " ", "low"] })
     expect(variants).toEqual([
       { id: "high", settings: { effort: "high" } },
@@ -213,11 +213,11 @@ describe("inventoryToModels (pur)", () => {
     ])
   })
 
-  test("un inventaire vide donne une liste vide, pas une erreur", () => {
+  test("an empty inventory gives an empty list, not an error", () => {
     expect(inventoryToModels(emptyInventory())).toEqual([])
   })
 
-  test("des ids de modèles dupliqués n'occupent qu'une place", () => {
+  test("duplicate model ids take only one slot", () => {
     const models = inventoryToModels({
       ...emptyInventory(),
       models: [
@@ -234,10 +234,10 @@ describe("inventoryToModels (pur)", () => {
 // `providerInfo`
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("providerInfo (pur)", () => {
+describe("providerInfo (pure)", () => {
   const PACKAGE = "file:///home/user/projet/src/index.ts"
 
-  test("l'info porte l'id, l'activation et le package", () => {
+  test("the info carries the id, the activation and the package", () => {
     const info = providerInfo({ label: "ACP — Copilot", settings: { command: "copilot" } }, PACKAGE)
     expect(info.id).toBe("acp")
     expect(info.activation).toBe("enabled")
@@ -245,12 +245,12 @@ describe("providerInfo (pur)", () => {
     expect(info.name).toBe("ACP — Copilot")
   })
 
-  test("sans étiquette, le provider s'appelle `ACP`", () => {
+  test("without a label, the provider is called `ACP`", () => {
     expect(providerInfo({}, PACKAGE).name).toBe("ACP")
     expect(providerInfo({ label: "   " }, PACKAGE).name).toBe("ACP")
   })
 
-  test("les settings du provider sont ceux de l'agent, ou un objet vide", () => {
+  test("the provider settings are the agent's, or an empty object", () => {
     expect(providerInfo({ settings: { command: "copilot" } }, PACKAGE).settings).toEqual({
       command: "copilot",
     })
@@ -262,12 +262,12 @@ describe("providerInfo (pur)", () => {
 // `inventorySignature`
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("inventorySignature (pur)", () => {
-  test("deux relevés identiques ont la même empreinte", () => {
+describe("inventorySignature (pure)", () => {
+  test("two identical captures share the same signature", () => {
     expect(inventorySignature(copilotInventory())).toBe(inventorySignature(copilotInventory()))
   })
 
-  test("un modèle ajouté, retiré ou renommé change l'empreinte", () => {
+  test("adding, removing or renaming a model changes the signature", () => {
     const base = inventorySignature(copilotInventory())
     const added = { ...copilotInventory(), models: [...MODEL_IDS.map((id) => ({ id, name: id })), { id: "x", name: "X" }] }
     const removed = { ...copilotInventory(), models: copilotInventory().models.slice(1) }
@@ -280,7 +280,7 @@ describe("inventorySignature (pur)", () => {
     expect(inventorySignature(renamed)).not.toBe(base)
   })
 
-  test("un niveau d'effort ou un modèle courant change l'empreinte", () => {
+  test("an effort level or the current model changes the signature", () => {
     const base = inventorySignature(copilotInventory())
     expect(inventorySignature({ ...copilotInventory(), thoughtLevels: ["low"] })).not.toBe(base)
     expect(inventorySignature({ ...copilotInventory(), currentModel: "gpt-5.4" })).not.toBe(base)
@@ -288,27 +288,27 @@ describe("inventorySignature (pur)", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Options du plugin
+// Plugin options
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("parsePluginConfig (pur)", () => {
+describe("parsePluginConfig (pure)", () => {
   const ok = (input: unknown) => {
     const result = parsePluginConfig(input)
     if (!result.ok) throw new Error(`attendu ok, obtenu : ${result.message}`)
     return result.value
   }
 
-  test("sans options, l'agent par défaut est `copilot --acp`", () => {
+  test("without options, the default agent is `copilot --acp`", () => {
     expect(ok(undefined).agents[0]).toEqual(DEFAULT_AGENT)
     expect(DEFAULT_AGENT.command).toBe("copilot")
     expect(DEFAULT_AGENT.args).toEqual(["--acp"])
   })
 
-  test("`agents: []` retombe aussi sur l'agent par défaut", () => {
+  test("`agents: []` also falls back to the default agent", () => {
     expect(ok({ agents: [] }).agents[0]).toEqual(DEFAULT_AGENT)
   })
 
-  test("un agent déclaré est lu champ par champ", () => {
+  test("a declared agent is read field by field", () => {
     const { agents, refreshMs } = ok({
       agents: [
         {
@@ -335,17 +335,17 @@ describe("parsePluginConfig (pur)", () => {
     expect(refreshMs).toBe(5_000)
   })
 
-  test("l'intervalle de rafraîchissement par défaut est d'une minute", () => {
+  test("the default refresh interval is one minute", () => {
     expect(ok({}).refreshMs).toBe(DEFAULT_REFRESH_MS)
     expect(ok({ refreshMs: 0 }).refreshMs).toBe(0)
   })
 
-  test("sans `id`, l'agent est nommé par sa commande", () => {
-    // Sans ça, aucune ligne de journal ne pourrait nommer l'agent.
+  test("without an `id`, the agent is named by its command", () => {
+    // Without that, no log line could name the agent.
     expect(ok({ agents: [{ command: "gemini" }] }).agents[0]?.id).toBe("gemini")
   })
 
-  test("une commande absente ou vide est une erreur qui nomme le champ", () => {
+  test("a missing or empty command is an error naming the field", () => {
     for (const agents of [[{}], [{ command: "  " }], [{ command: 12 }]]) {
       const result = parsePluginConfig({ agents })
       expect(result.ok).toBe(false)
@@ -354,19 +354,19 @@ describe("parsePluginConfig (pur)", () => {
     }
   })
 
-  test("un `agents` qui n'est pas un tableau est refusé", () => {
+  test("an `agents` that is not an array is refused", () => {
     const result = parsePluginConfig({ agents: { command: "copilot" } })
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.message).toContain("options.agents")
   })
 
-  test("des options qui ne sont pas un objet sont refusées", () => {
+  test("options that are not an object are refused", () => {
     expect(parsePluginConfig("copilot").ok).toBe(false)
     expect(parsePluginConfig([]).ok).toBe(false)
   })
 
-  test("un champ mal typé est nommé, une clé inconnue est ignorée", () => {
+  test("a badly typed field is named, an unknown key is ignored", () => {
     const bad = parsePluginConfig({ agents: [{ command: "copilot", args: "--acp" }] })
     expect(bad.ok).toBe(false)
     if (!bad.ok) expect(bad.message).toContain("options.agents[0].args")
@@ -379,20 +379,20 @@ describe("parsePluginConfig (pur)", () => {
     expect(limits.ok).toBe(false)
     if (!limits.ok) expect(limits.message).toContain("options.agents[0].limits.context")
 
-    // Une clé qu'on ne connaît pas ne doit pas faire tomber tout le plugin.
+    // An unknown key must not bring down the whole plugin.
     expect(ok({ agents: [{ command: "copilot", futureOption: true }] }).agents.length).toBe(1)
   })
 
-  test("un `refreshMs` négatif ou non fini est refusé", () => {
+  test("a negative or non-finite `refreshMs` is refused", () => {
     expect(parsePluginConfig({ refreshMs: -1 }).ok).toBe(false)
     expect(parsePluginConfig({ refreshMs: Number.NaN }).ok).toBe(false)
   })
 
-  test("les settings publiés omettent `id` et `limits`, et les champs absents", () => {
-    // `id` est une étiquette, `limits` une valeur d'affichage : les laisser dans
-    // les settings les enverrait à `parseSettings` à chaque tour, où ils sont
-    // ignorés. Les champs `undefined` sont **omis** pour ne pas écraser, à la
-    // fusion, ce que l'utilisateur a mis dans `opencode.jsonc`.
+  test("the published settings omit `id` and `limits`, and absent fields", () => {
+    // `id` is a label and `limits` a display value: leaving them in the settings
+    // would send them to `parseSettings` on every turn, where they are ignored.
+    // `undefined` fields are **omitted** so as not to overwrite, at merge time,
+    // what the user put in `opencode.jsonc`.
     expect(providerSettingsOf(DEFAULT_AGENT)).toEqual({ command: "copilot", args: ["--acp"] })
     expect(
       providerSettingsOf({
@@ -407,9 +407,9 @@ describe("parsePluginConfig (pur)", () => {
     ).toEqual({ command: "npx", args: ["-y"], cwd: "/srv", env: { A: "1" }, allowedTools: ["*"] })
   })
 
-  test("les settings publiés sont acceptés tels quels par `parseSettings`", () => {
-    // Le contrat qui compte : ce que le plugin publie doit être exactement ce que
-    // `model()` saura lire au premier tour.
+  test("the published settings are accepted as-is by `parseSettings`", () => {
+    // The contract that matters: what the plugin publishes must be exactly what
+    // `model()` will be able to read on the first turn.
     const agent = ok({
       agents: [{ id: "copilot", command: "copilot", args: ["--acp"], env: { A: "1" } }],
     }).agents[0]
@@ -423,24 +423,24 @@ describe("parsePluginConfig (pur)", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Le champ `effort` : le chainon variant → settings → adaptateur
+// The `effort` field: the variant -> settings -> adapter link
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("settings.effort (pur)", () => {
-  test("un effort de variant est lu et conservé", () => {
+describe("settings.effort (pure)", () => {
+  test("a variant effort is read and kept", () => {
     const parsed = parseSettings({ command: "copilot", effort: "xhigh" })
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
     expect(parsed.value.effort).toBe("xhigh")
   })
 
-  test("absent, l'effort reste `undefined` : l'agent garde sa valeur", () => {
+  test("absent, the effort stays `undefined`: the agent keeps its value", () => {
     const parsed = parseSettings({ command: "copilot" })
     if (!parsed.ok) throw new Error("attendu ok")
     expect(parsed.value.effort).toBeUndefined()
   })
 
-  test("un effort vide ou mal typé est une erreur qui nomme le champ", () => {
+  test("an empty or badly typed effort is an error naming the field", () => {
     const empty = parseSettings({ command: "copilot", effort: "" })
     expect(empty.ok).toBe(false)
     if (!empty.ok) expect(empty.message).toContain("settings.effort")
@@ -452,23 +452,19 @@ describe("settings.effort (pur)", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// L'URL `file://` du package provider
+// The `file://` URL of the provider package, and `resolvePackageURL`
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// `resolvePackageURL`
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe("bornes de découverte (§14, R7)", () => {
-  test("les deux bornes valent 10 s par défaut", () => {
-    // 10 s, comme `opencode-acpx` : l'enjeu n'est pas la patience mais le
-    // chargement d'OpenCode, et trente secondes d'écran figé sans message sont
-    // indiscernables d'un plantage.
+describe("discovery bounds", () => {
+  test("both bounds are 10 s by default", () => {
+    // 10 s, like `opencode-acpx`: what is at stake is not patience but
+    // OpenCode's startup, and thirty seconds of frozen screen with no message
+    // are indistinguishable from a crash.
     expect(DEFAULT_DISCOVERY_TIMEOUT_MS).toBe(10_000)
     expect(DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS).toBe(10_000)
   })
 
-  test("absentes, elles reprennent leurs défauts", () => {
+  test("absent, they fall back to their defaults", () => {
     for (const input of [undefined, null, {}, { agents: [] }]) {
       const parsed = parsePluginConfig(input)
       expect(parsed.ok).toBe(true)
@@ -478,13 +474,13 @@ describe("bornes de découverte (§14, R7)", () => {
     }
   })
 
-  test("elles sont réglables, par exemple pour un agent lent au démarrage", () => {
+  test("they are configurable, for instance for an agent slow to start", () => {
     const parsed = parsePluginConfig({ discoveryTimeoutMs: 120_000, discoveryIdleTimeoutMs: 5_000 })
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
     expect(parsed.value.discoveryTimeoutMs).toBe(120_000)
     expect(parsed.value.discoveryIdleTimeoutMs).toBe(5_000)
-    // Le reste de la configuration n'est pas touché.
+    // The rest of the configuration is untouched.
     expect(parsed.value.refreshMs).toBe(DEFAULT_REFRESH_MS)
   })
 
@@ -496,9 +492,9 @@ describe("bornes de découverte (§14, R7)", () => {
     [{ discoveryIdleTimeoutMs: 0 }, "options.discoveryIdleTimeoutMs"],
     [{ discoveryIdleTimeoutMs: Number.NaN }, "options.discoveryIdleTimeoutMs"],
   ])("une borne inutilisable est refusée : %o", (input, fragment) => {
-    // ⚠️ Une borne `0`, négative ou infinie ne borne **rien** : c'est le pire
-    // des cas pour une borne de délai, et il doit être refusé à la lecture de la
-    // configuration, pas constaté au chargement d'OpenCode.
+    // Note: a `0`, negative or infinite bound bounds **nothing**: the worst case
+    // for a timeout, and it must be refused when the configuration is read, not
+    // discovered when OpenCode starts.
     const parsed = parsePluginConfig(input)
     expect(parsed.ok).toBe(false)
     if (parsed.ok) return
@@ -507,20 +503,20 @@ describe("bornes de découverte (§14, R7)", () => {
 })
 
 describe("resolvePackageURL", () => {
-  test("elle pointe sur un fichier qui existe vraiment", () => {
-    // La seule garantie qui compte : OpenCode importe cette URL au premier tour.
-    // Une URL « plausible » mais fausse produirait un `ERR_MODULE_NOT_FOUND`
-    // bien après le chargement du plugin.
+  test("it points at a file that really exists", () => {
+    // The only guarantee that matters: OpenCode imports this URL on the first
+    // turn. A "plausible" but false URL would produce an `ERR_MODULE_NOT_FOUND`
+    // long after the plugin loaded.
     const url = resolvePackageURL(import.meta.url)
     expect(url.startsWith("file://")).toBe(true)
     expect(existsSync(fileURLToPath(url))).toBe(true)
-    // Le point d'entrée provider est bien celui du paquet (celui qui exporte
-    // `model`), pas le plugin lui-même.
+    // The provider entry point really is the package's (the one exporting
+    // `model`), not the plugin itself.
     expect(fileURLToPath(url).endsWith("/index.ts")).toBe(true)
     expect(fileURLToPath(url).endsWith("/plugin.ts")).toBe(false)
   })
 
-  test("un module qui n'a pas de point d'entrée échoue en nommant les candidats", () => {
+  test("a module with no entry point fails naming the candidates", () => {
     expect(() => resolvePackageURL("file:///nonexistent/opencode-acp/plugin.js")).toThrow(
       /index\.js.*index\.ts|index\.ts/,
     )
@@ -528,17 +524,16 @@ describe("resolvePackageURL", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// L'invariant de portabilité, sur le nouveau fichier
+// The portability invariant, on the new file
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("invariant : la publication ne dépend pas de l'hôte", () => {
-  test("core/publish.ts n'importe rien de l'API plugin", async () => {
+describe("invariant: publishing does not depend on the host", () => {
+  test("core/publish.ts imports nothing from the plugin API", async () => {
     const source = await Bun.file(
       fileURLToPath(new URL("../src/core/publish.ts", import.meta.url)),
     ).text()
-    // On cherche des **instructions d'import**, pas le texte : le module
-    // documente précisément cette interdiction, donc en Mentionner le nom est
-    // normal.
+    // **Import statements** are searched for, not the bare text: the module
+    // documents this very prohibition, so mentioning the name is normal.
     expect(source.match(/from\s+"@opencode\/plugin/)).toBeNull()
     expect(source.match(/from\s+"(effect|@opencode\/ai|@opencode\/schema|@agentclientprotocol\/sdk)[^"]*"/)).toBeNull()
   })

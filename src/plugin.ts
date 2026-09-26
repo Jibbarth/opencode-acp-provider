@@ -1,30 +1,28 @@
 /**
- * Le plugin OpenCode — PLAN.md §6 : c'est lui qui rend le provider visible.
+ * The OpenCode plugin - it is what makes the provider visible.
  *
- * Il fait trois choses, et **rien d'autre** :
+ * It does three things, and **nothing else**:
  *
- * 1. lit `ctx.options` (les agents déclarés dans `opencode.jsonc`) ;
- * 2. lance l'agent ACP, lit son inventaire de `configOptions` (§5), et
- *    l'enregistre dans le catalogue : un `Provider.Info` + un `Model.Info` par
- *    modèle ;
- * 3. surveille le flux d'événements d'OpenCode et **republie** quand
- *    l'inventaire a bougé, puis ferme l'agent au déchargement.
+ * 1. reads `ctx.options` (the agents declared in `opencode.jsonc`);
+ * 2. launches the ACP agent, reads its `configOptions` inventory, and registers
+ *    it in the catalogue: one `Provider.Info` plus one `Model.Info` per model;
+ * 3. watches OpenCode's event stream and **republishes** when the inventory has
+ *    moved, then closes the agent on shutdown.
  *
- * ⚠️ **Aucune de ces étapes ne peut faire tomber le chargement d'OpenCode.**
- * Un plugin qui lève dans `setup` n'est pas « un plugin en défaut » : c'est une
- * liste de plugins qui refuse de démarrer, et l'utilisateur perd jusqu'à ses
- * autres plugins. Toute erreur est donc journalisée et ramenée à « rien n'est
- * enregistré » — un provider absent se voit, un serveur mort ne se voit pas.
+ * Note: **none of these steps may bring down OpenCode's startup.** A plugin that
+ * throws in `setup` is not "one plugin in default state": it is a list of
+ * plugins refusing to start, and the user loses every other plugin too. Every
+ * error is therefore logged and reduced to "nothing is registered" - an absent
+ * provider is visible, a dead server is not.
  *
- * ⚠️ Ce fichier est le **seul** du projet à dépendre de `@opencode/plugin` :
- * toute la logique de transformation est dans `core/publish.ts`, qui n'en
- * dépend pas, et se teste donc sans hôte.
+ * Note: this is the **only** file in the project depending on
+ * `@opencode/plugin`. All the transformation logic lives in `core/publish.ts`,
+ * which does not, and is therefore testable without a host.
  *
- * ⚠️ `@opencode/plugin` est en `devDependencies` : au chargement, c'est
- * l'hôte qui le fournit (comme `@opencode/ai` au moment d'un `importPackage`).
- * Sa version suit celle du **CLI** — d'où `2.0.16` et non le `2.0.3` du §0 du
- * plan, dont le `Context` expose un domaine `catalog` que le serveur 2.0.16
- * n'implémente pas.
+ * Note: `@opencode/plugin` is in `devDependencies`: at load time the host
+ * provides it (as it provides `@opencode/ai` at `importPackage` time). Its
+ * version tracks the **CLI**, hence `2.0.16` and not `2.0.3`, whose `Context`
+ * exposes a `catalog` domain the 2.0.16 server does not implement.
  */
 
 import { existsSync } from "node:fs"
@@ -47,87 +45,81 @@ import type { PublishOptions, RawModelInfo, RawProviderInfo } from "./core/publi
 import { parseSettings } from "./settings.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Types de l'API plugin
+// Plugin API types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Le contexte que l'hôte construit et passe à `setup`. */
+/** The context the host builds and hands to `setup`. */
 type Context = Plugin.Context
 
 /**
- * L'éditeur de catalogue, et l'enregistrement qu'un `transform` renvoie.
+ * The catalogue editor, and the registration a `transform` returns.
  *
- * ⚠️ Ni `ProviderEditor` ni `Registration` ne sont réexportés par la racine de
- * `@opencode/plugin` : on les **déduit** du `Context` plutôt que de les
- * recopier. Une recopie serait un second contrat à maintenir, et c'est
- * précisément le genre de dérive qu'un changement de version d'OpenCode doit
- * faire échouer à la compilation.
+ * Note: neither `ProviderEditor` nor `Registration` is re-exported from the root
+ * of `@opencode/plugin`, so they are **deduced** from the `Context` rather than
+ * copied. A copy would be a second contract to maintain, and drift of that kind
+ * is exactly what an OpenCode version bump should break at compile time.
  */
 type ProviderEditor = Parameters<Parameters<Context["provider"]["transform"]>[0]>[0]
 type Registration = Awaited<ReturnType<Context["provider"]["transform"]>>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Journalisation
+// Logging
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PLUGIN_ID = "opencode-acp-provider"
 
 /**
- * Une ligne de journal, préfixée.
+ * A prefixed log line.
  *
- * ⚠️ `ctx.app` ne donne que `{ name, version, channel }` : l'API plugin n'a
- * **pas** de logger. `stderr` est donc le canal — c'est aussi celui qu'utilise
- * déjà l'agent ACP (§8.c), et le seul qui survive à un `setup` qui échoue.
+ * Note: `ctx.app` only gives `{ name, version, channel }`: the plugin API has
+ * **no** logger. `stderr` is therefore the channel - the one the ACP agent
+ * already uses, and the only one that survives a `setup` that fails.
  */
 const log = (message: string): void => {
   process.stderr.write(`[${PLUGIN_ID}] ${message}\n`)
 }
 
-/** Le message d'une erreur quelconque, sans sa pile : c'est un journal, pas un rapport. */
+/** An arbitrary error's message, without its stack: this is a log, not a report. */
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
- * Marqueur « le module a été évalué » — §14, R4.
+ * The "the module was evaluated" marker.
  *
- * ⚠️ **Pourquoi cette ligne est hors de `setup` — et c'est tout l'intérêt.**
- * Un package de plugin qui ne se charge ne produit **aucune** erreur visible :
- * l'hôte journalise « plugin ignoré » et n'insiste pas, et le fichier
- * `opencode.jsonc` pointe peut-être vers le mauvais chemin, ou le module lève
- * pendant son évaluation, ou `Plugin.define` n'est même pas atteint. Toutes ces
- * fins se ressemblent — un plugin absent, silencieusement.
+ * Note: **why this line sits outside `setup` - that is the whole point.** A plugin
+ * package that fails to load produces **no** visible error: the host logs
+ * "plugin skipped" and moves on, and `opencode.jsonc` may point at the wrong
+ * path, or the module may throw while being evaluated, or `Plugin.define` may
+ * not even be reached. All those endings look the same - a plugin silently
+ * absent.
  *
- * Il faut donc distinguer deux situations que rien ne distingue aujourd'hui :
+ * Two situations that nothing distinguishes today must therefore be told apart:
  *
- *   · **le module n'a jamais été évalué** — cette ligne n'est jamais parue ;
- *   · **`setup()` a levé** — le `try/catch` de `setup` l'a journalisé, et cette
- *     ligne **est** parue juste avant.
+ *   - **the module was never evaluated**: this line never appeared;
+ *   - **`setup()` threw**: `setup`'s `try/catch` logged it, and this line
+ *     **did** appear just before.
  *
- * Une seule ligne, écrite au moment exact où le module est évalué, suffit à
- * faire la différence. Elle est volontairement **discrète** : c'est un
- * diagnostic, pas un rapport, et un serveur qui charge cent plugins ne doit pas
- * écrire cent lignes de plus dans son journal.
+ * A single line, written at the exact moment the module is evaluated, is enough
+ * to tell them apart. It is deliberately **discreet**: a diagnostic, not a
+ * report, and a server loading a hundred plugins must not write a hundred extra
+ * lines in its log.
  */
 log(`module évalué : ${import.meta.url}`)
 
-// ─────────────────────────────────────────────────────────────────────────────
-// URL du package provider
-// ─────────────────────────────────────────────────────────────────────────────
-
 /**
- * URL `file://` **absolue** du module exportant `model` (§3.1).
+ * **Absolute** `file://` URL of the module exporting `model`.
  *
- * ⚠️ Elle est calculée **depuis `import.meta.url`**, jamais écrite en dur : c'est
- * la seule façon de marcher à la fois en développement (le plugin est
- * `src/plugin.ts`) et installé (il est `dist/plugin.js` dans `node_modules`). Un
- * chemin figé marche dans un cas sur deux, et échoue dans l'autre avec un
- * `ERR_MODULE_NOT_FOUND` **au premier tour** — très tard, et sans rapport avec la
- * configuration.
+ * Note: it is computed **from `import.meta.url`**, never hardcoded. That is the
+ * only way to work both in development (the plugin is `src/plugin.ts`) and
+ * installed (it is `dist/plugin.js` inside `node_modules`). A frozen path works
+ * in one case out of two and fails in the other with an `ERR_MODULE_NOT_FOUND`
+ * **on the first turn** - very late, and unrelated to the configuration.
  *
- * ⚠️ L'ordre des candidats suit la disposition réelle du paquet : le plugin et le
- * provider sont deux fichiers du **même répertoire** dans les deux layouts (le
- * build écrit tout dans `dist/`, le dépôt vit dans `src/`). On teste donc
- * l'existence au lieu de deviner, et le `.js` compilé passe avant le `.ts` : c'est
- * lui que l'hôte doit importer, et charger les deux ferait vivre deux caches
- * de process agent distincts dans le même serveur.
+ * Note: the candidate order follows the real package layout. The plugin and the
+ * provider are two files of the **same directory** in both layouts (the build
+ * writes everything into `dist/`, the repository lives in `src/`). Existence is
+ * therefore tested instead of guessed, and the compiled `.js` comes before the
+ * `.ts`: that is what the host must import, and loading both would keep two
+ * distinct agent process caches alive in the same server.
  */
 export const resolvePackageURL = (moduleURL: string): string => {
   const here = dirname(fileURLToPath(moduleURL))
@@ -139,10 +131,10 @@ export const resolvePackageURL = (moduleURL: string): string => {
   ]
   const found = candidates.find((candidate) => existsSync(candidate))
   if (found === undefined) {
-    // Un `package` qui ne pointe sur rien ne doit pas être enregistré : le
-    // provider apparaîtrait dans `/model` et échouerait au premier prompt. On
-    // nomme les quatre chemins cherchés, parce que « package introuvable » sans
-    // la liste des candidats est un diagnostic inutilisable.
+    // A `package` pointing at nothing must not be registered: the provider would
+    // show up in `/model` and fail on the first prompt. The four paths searched
+    // are named, because "package not found" without the candidate list is an
+    // unusable diagnostic.
     throw new Error(
       `aucun point d'entrée provider trouvé (cherché : ${candidates.join(", ")}) ; ` +
         "le plugin doit être installé avec ses sources, ou built vers dist/.",
@@ -152,16 +144,16 @@ export const resolvePackageURL = (moduleURL: string): string => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bornes de la découverte — §14, R7
+// Discovery bounds
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Un dépassement de borne, avec la borne fautive et son terme. */
+/** A bound overrun, with the offending bound and its kind. */
 class DiscoveryTimeout extends Error {
   /**
-   * ⚠️ Champs **déclarés explicitement**, comme `AcpAgentError` : la forme
-   * « parameter property » est du TypeScript que l'effacement de types de Node
-   * ne sait pas traiter, et ce fichier est dans le graphe d'import du point
-   * d'entrée plugin — donc dans celui de `npm run verify:package`.
+   * Note: fields **declared explicitly**, as in `AcpAgentError`. The parameter
+   * property form is TypeScript that Node's type stripping cannot handle, and
+   * this file is in the import graph of the plugin entry point, hence in that of
+   * `npm run verify:package`.
    */
   readonly reason: "silence" | "délai"
   readonly limitMs: number
@@ -179,23 +171,22 @@ class DiscoveryTimeout extends Error {
 }
 
 /**
- * Course une promesse contre **deux** bornes : un délai global, et un délai
- * d'inactivité remis à zéro par `beat()`.
+ * Races a promise against **two** bounds: a global delay, and an inactivity
+ * delay reset by `beat()`.
  *
- * ⚠️ **Pourquoi deux, et pas une.** Un agent muet et un agent bavard sont deux
- * pannes différentes. Une seule borne les traite identiquement : elle les laisse
- * tous les deux attendre son terme, alors que la seconde est invisible — elle ne
- * produit aucun message, juste un chargement qui ne finit pas. La borne
- * d'inactivité rend la question utile : **l'agent parle-t-il encore ?** C'est la
- * seule information disponible pendant une découverte, et elle suffit à
- * distinguer « il met quatre-vingt-dix secondes à démarrer » (légitime, et son
- * stderr le dit) de « il est bloqué ».
+ * Note: **why two, not one.** A mute agent and a rambling agent are two
+ * different failures. A single bound treats them identically: it makes both wait
+ * out its term, whereas the second is invisible - it produces no message, just a
+ * load that never finishes. The inactivity bound makes the question useful:
+ * **is the agent still talking?** That is the only information available during a
+ * discovery, and it is enough to tell "it takes ninety seconds to start"
+ * (legitimate, and its stderr says so) from "it is stuck".
  *
- * ⚠️ **Les deux minuteurs sont vidés dès que la course est décidée**, dans les
- * deux sens. Un minuteur laissé armé ne fait pas qu'attendre : il retient le
- * process du serveur OpenCode en vie pendant toute la durée du service, pour
- * rien — et il finirait par rejeter une promesse déjà résolue, donc par produire
- * une rejection orpheline.
+ * Note: **both timers are cleared as soon as the race is decided**, in both
+ * directions. A timer left armed does not merely wait: it keeps the OpenCode
+ * server process alive for the whole service lifetime, for nothing - and it
+ * would eventually reject an already resolved promise, producing an orphan
+ * rejection.
  */
 const withBounds = <A>(
   work: Promise<A>,
@@ -204,7 +195,7 @@ const withBounds = <A>(
 ): { readonly result: Promise<A>; readonly beat: () => void } => {
   let idle: ReturnType<typeof setTimeout> | undefined
   let overall: ReturnType<typeof setTimeout> | undefined
-  /** Une fois la course décidée, `beat` devient neutre : plus rien à réarmer. */
+  /** Once the race is decided, `beat` becomes a no-op: nothing left to rearm. */
   let armed = true
 
   const rearm = (): void => {
@@ -213,7 +204,7 @@ const withBounds = <A>(
     idle = setTimeout(() => {
       if (armed) reject(new DiscoveryTimeout("silence", idleTimeoutMs))
     }, idleTimeoutMs)
-    // Un minuteur ne doit pas, à lui seul, garder le process en vie.
+    // A timer must not, on its own, keep the process alive.
     idle.unref?.()
   }
 
@@ -230,10 +221,9 @@ const withBounds = <A>(
   }, timeoutMs)
   overall.unref?.()
 
-  // ⚠️ Le `finally` est le **seul** endroit où les minuteurs sont vidés : il
-  // s'exécute dans tous les cas de sortie — résolution, rejet du travail, ou
-  // dépassement d'une des deux bornes. C'est exactement ce que le §14 demande,
-  // et c'est invisible dans une écriture qui vide « quand ça marche ».
+  // The `finally` is the **only** place the timers are cleared: it runs on every
+  // exit path - resolution, rejection of the work, or one of the two bounds
+  // firing. It is invisible in a version that clears "when it works".
   void work.then(
     (value) => {
       if (!armed) return
@@ -254,41 +244,40 @@ const withBounds = <A>(
   return { result, beat: rearm }
 }
 
-/** Ce que la découverte borne : l'agent, et son relevé d'inventaire. */
+/** What discovery bounds: the agent, and its inventory capture. */
 interface Discovery {
   readonly agent: AcpAgent
-  /** L'inventaire, lu sous les mêmes bornes et le même compteur d'inactivité. */
+  /** The inventory, read under the same bounds and the same inactivity counter. */
   readonly inventory: () => Promise<Inventory>
 }
 
 /**
- * Lance l'agent, relève son inventaire, le tout **borné**.
+ * Launches the agent, captures its inventory, the whole thing **bounded**.
  *
- * ⚠️ **Le process ne doit jamais survivre à l'abandon.** `createAcpAgent` ne rend
- * la main qu'après `initialize` : si une borne expire avant, sa promesse est
- * encore **en vol**, et l'agent qu'elle produira sera vivant… sans personne pour
- * le fermer. D'où le `pending.then(close)` de chaque sortie en erreur : un agent
- * lent qui finit quand même par démarrer est tué dès qu'il existe, au lieu de
- * laisser un orphelin par chargement de plugin.
+ * Note: **the process must never outlive the abandonment.** `createAcpAgent`
+ * only returns after `initialize`: if a bound fires first, its promise is still
+ * **in flight**, and the agent it will produce will be alive with nobody to
+ * close it. Hence the `pending.then(close)` on every error exit: a slow agent
+ * that does eventually start is killed as soon as it exists, instead of leaving
+ * one orphan per plugin load.
  */
 const discover = async (
   options: Parameters<typeof createAcpAgent>[0],
   timeoutMs: number,
   idleTimeoutMs: number,
 ): Promise<Discovery> => {
-  // Le compteur d'inactivité est alimenté par le **stderr** de l'agent : c'est
-  // le seul flux observable depuis l'extérieur pendant une découverte, et le seul
-  // qui distingue un agent qui travaille d'un agent bloqué. On ne le relaie pas
-  // — un agent bavard au chargement inonderait le journal du serveur —, on ne
-  // fait que le remettre à zéro.
+  // The inactivity counter is fed by the agent's **stderr**: it is the only
+  // stream observable from outside during a discovery, and the only one telling
+  // a working agent from a stuck one. It is not relayed - a chatty agent at
+  // load time would flood the server's log - only used to reset the counter.
   const signals: { beat: () => void } = { beat: () => {} }
   const pending = createAcpAgent({
     ...options,
     stderr: "pipe",
     onStderr: () => signals.beat(),
-    // ⚠️ Le timeout d'`initialize` est aligné sur la borne de découverte : sinon
-    // l'agent dispose de 30 s pour répondre là où le plugin n'en attend que 10,
-    // et la borne de découverte ne bornerait... rien du tout.
+    // The `initialize` timeout is aligned on the discovery bound: otherwise the
+    // agent has 30 s to answer where the plugin only waits 10, and the discovery
+    // bound would bound... nothing at all.
     initializeTimeoutMs: options.initializeTimeoutMs ?? timeoutMs,
   })
 
@@ -310,25 +299,26 @@ const discover = async (
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Formes brutes → formes typées
+// Raw shapes -> typed shapes
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Le `Model.Info` que `/model` affiche, bâti sur les défauts du schéma. */
+/** The `Model.Info` `/model` displays, built on the schema defaults. */
 const toModelInfo = (providerID: Provider.ID, raw: RawModelInfo): Model.Info => {
   const base = Model.Info.default(providerID, Model.ID.make(raw.id))
   return {
     ...base,
     name: raw.name,
-    // ⚠️ `Model.Info.default` annonce `input: ["text", "image"]` : on **écrase**,
-    // parce que le réducteur ne sait rendre que du texte (cf. `core/publish`).
+    // `Model.Info.default` announces `input: ["text", "image"]`: it is
+    // **overwritten**, because the reducer can only render text (see
+    // `core/publish`).
     capabilities: {
       tools: raw.capabilities.tools,
       input: [...raw.capabilities.input],
       output: [...raw.capabilities.output],
     },
     limit: { context: raw.limit.context, output: raw.limit.output },
-    // `cost` reste vide : ACP ne publie aucun tarif. Inventer un prix afficherait
-    // un coût par tour sans rapport avec la facture réelle.
+    // `cost` stays empty: ACP publishes no pricing. Inventing a price would show
+    // a per-turn cost unrelated to the real bill.
     variants: raw.variants.map((variant) => ({
       id: Model.VariantID.make(variant.id),
       settings: { ...variant.settings },
@@ -336,7 +326,7 @@ const toModelInfo = (providerID: Provider.ID, raw: RawModelInfo): Model.Info => 
   }
 }
 
-/** Le `Provider.Info` enregistré, bâti sur `Provider.Info.empty(id)`. */
+/** The registered `Provider.Info`, built on `Provider.Info.empty(id)`. */
 const toProviderInfo = (raw: RawProviderInfo): Provider.Info => ({
   ...Provider.Info.empty(Provider.ID.make(raw.id)),
   name: raw.name,
@@ -345,7 +335,7 @@ const toProviderInfo = (raw: RawProviderInfo): Provider.Info => ({
   settings: { ...raw.settings },
 })
 
-/** Ce qu'on donne à `editor.add()` : le provider et tous ses modèles. */
+/** What is handed to `editor.add()`: the provider and all its models. */
 interface Publication {
   readonly info: Provider.Info
   readonly models: readonly Model.Info[]
@@ -360,43 +350,39 @@ const publish = (options: PublishOptions, packageURL: string, inventory: Invento
 }
 
 /**
- * Enregistre (ou réenregistre) le provider dans le catalogue.
+ * Registers (or re-registers) the provider in the catalogue.
  *
- * ⚠️ `editor.add` **remplace** l'entrée dont l'`id` est `info.id` : réenregistrer
- * est donc idempotent, et c'est ce qui rend le rafraîchissement possible sans
- * jamais dupliquer le provider. `dispose` reste nécessaire pour que la
- * transformation précédente cesse de contribuer au catalogue.
+ * Note: `editor.add` **replaces** the entry whose `id` is `info.id`, so
+ * re-registering is idempotent, and that is what makes refreshing possible
+ * without ever duplicating the provider. `dispose` is still needed so the
+ * previous transformation stops contributing to the catalogue.
  */
 const register = (ctx: Context, publication: Publication): Promise<Registration> =>
   ctx.provider.transform((editor: ProviderEditor) => {
     editor.add({ info: publication.info, models: publication.models })
   })
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Rafraîchissement de l'inventaire
-// ─────────────────────────────────────────────────────────────────────────────
-
 /**
- * Rafraîchit le catalogue quand l'inventaire de l'agent a bougé.
+ * Refreshes the catalogue when the agent's inventory has moved.
  *
- * ⚠️ **Déclenchement par événement, pas par polling.** L'inventaire ACP change
- * quand l'agent change de modèle — donc pendant un tour. Le seul signal
- * d'OpenCode qui suit un tour terminé est `session.idle` : on s'y accroche, et un
- * garde-fou de temps (`refreshMs`) borne le nombre de redécouvertes. Sans ce
- * garde-fou, une session très active ouvrirait une session ACP par tour.
+ * Note: **event-driven, not polled.** The ACP inventory changes when the agent
+ * changes model - that is, during a turn. The only OpenCode signal that follows
+ * a finished turn is `session.idle`: it is hooked, and a time guard
+ * (`refreshMs`) bounds the number of rediscoveries. Without that guard, a very
+ * active session would open one ACP session per turn.
  *
- * ⚠️ Ce que le rafraîchissement **ne** fait pas : observer les `config_option_update` des
- * sessions du transport. Le contrat portable `AcpSession` (§2.1) ne les expose
- * que pendant un `prompt()`, et cette session-ci n'en fait jamais. Rouvrir une
- * session jetable est donc la seule voie honnête aujourd'hui ; P6 branchera le
- * rafraîchissement sur le flux de l'adaptateur, qui les voit déjà.
+ * Note: what refreshing does **not** do: observe the transport sessions'
+ * `config_option_update`. The portable `AcpSession` contract only exposes them
+ * during a `prompt()`, and this session never prompts. Reopening a throwaway
+ * session is therefore the only honest way today; refreshing will eventually be
+ * hooked onto the adapter's stream, which already sees them.
  *
- * ⚠️ `ctx.event.subscribe` **ignore ses options** côté serveur 2.0.16 (le
- * `signal` n'est pas transmis) : l'annulation passe donc aussi par
- * `iterator.return()`, sinon l'itérateur resterait en attente après le
- * déchargement du plugin.
+ * Note: `ctx.event.subscribe` **ignores its options** on the 2.0.16 server (the
+ * `signal` is not forwarded), so cancelling also goes through
+ * `iterator.return()`, otherwise the iterator would stay waiting after the plugin
+ * is unloaded.
  *
- * Renvoie la fonction d'arrêt.
+ * Returns the stop function.
  */
 const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (() => void) => {
   if (refreshMs === 0) {
@@ -410,7 +396,7 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
   let timer: ReturnType<typeof setTimeout> | undefined
   let lastRun = 0
 
-  /** Programme une passe, sans jamais en empiler deux. */
+  /** Schedules a pass, never stacking two. */
   const schedule = (): void => {
     if (stopped || timer !== undefined) return
     const wait = Math.max(0, lastRun + refreshMs - Date.now())
@@ -420,7 +406,7 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
       lastRun = Date.now()
       refresh().catch((error: unknown) => log(`rafraîchissement ignoré : ${reason(error)}`))
     }, wait)
-    // Le timer ne doit pas, à lui seul, garder le process en vie.
+    // The timer must not, on its own, keep the process alive.
     timer.unref?.()
   }
 
@@ -429,8 +415,8 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
       for (;;) {
         const next = await iterator.next()
         if (next.done === true) return
-        // Un tour qui vient de finir est le seul moment où l'agent a pu changer
-        // son inventaire de modèles ou de niveaux d'effort.
+        // A turn that just finished is the only moment the agent could have
+        // changed its model or effort-level inventory.
         if (next.value.type === "session.idle") schedule()
       }
     } catch (error) {
@@ -448,24 +434,24 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Le plugin
+// The plugin
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default Plugin.define({
   id: PLUGIN_ID,
 
   /**
-   * Point d'entrée de l'hôte.
+   * The host's entry point.
    *
-   * ⚠️ Ce `try/catch` est la **seule** garantie de l'invariant affiché en tête
-   * de ce fichier : rien de ce que fait le plugin ne doit faire tomber le
-   * chargement d'OpenCode. Les étapes internes ont chacune leur garde, mais une
-   * exception inattendue — une API de l'hôte qui change, un `Model.Info` rejeté
-   * par `Provider.Info.default` — remonterait sinon jusqu'à l'hôte, qui
-   * abandonnerait le chargement du plugin **et** de tous les suivants.
+   * Note: this `try/catch` is the **only** guarantee of the invariant stated at
+   * the top of this file: nothing the plugin does may bring down OpenCode's
+   * startup. Each internal step has its own guard, but an unexpected exception -
+   * a host API that changed, a `Model.Info` rejected by `Provider.Info.empty` -
+   * would otherwise reach the host, which would abandon loading this plugin
+   * **and** every one after it.
    *
-   * On ne peut rien distinguer d'ici sans le marqueur « module évalué » écrit
-   * plus haut : c'est exactement pour ça qu'il est hors de ce `try`.
+   * Nothing can be told apart from here without the "module evaluated" marker
+   * written above: that is exactly why it sits outside this `try`.
    */
   async setup(ctx) {
     try {
@@ -477,7 +463,7 @@ export default Plugin.define({
   },
 })
 
-/** Le travail de `setup`, sans le filet : c'est `setup` qui le porte. */
+/** `setup`'s work, without the safety net: `setup` is what carries it. */
 async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined> {
     // ── 1. Options ──────────────────────────────────────────────────────────
     const parsed = parsePluginConfig(ctx.options)
@@ -489,24 +475,24 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     const agent = agents[0]
     if (agent === undefined) return
 
-    // ⚠️ Un seul agent est enregistré en P3a, et c'est le **premier** : la route
-    // porte un `provider` fixe (`adapters/opencode-transport.ts`), donc un
-    // second provider porterait le même id. Plutôt que le publier en silence, on
-    // le dit — et on nomme les agents ignorés.
+    // Only one agent is registered, and it is the **first**: the route carries a
+    // fixed `provider` (`adapters/opencode-transport.ts`), so a second provider
+    // would carry the same id. Rather than publishing it silently, it is said
+    // out loud - and the ignored agents are named.
     for (const ignored of agents.slice(1)) {
       log(`agent « ${ignored.id} » ignoré : un seul provider ACP est supporté en P3a`)
     }
 
-    // Les settings sont validés **avant** tout spawn, avec les règles exactes que
-    // `model()` appliquera à chaque tour : un `command` absent doit échouer ici,
-    // avec son chemin, pas au premier prompt.
+    // The settings are validated **before** any spawn, with the exact rules
+    // `model()` will apply on every turn: a missing `command` must fail here,
+    // with its path, not on the first prompt.
     const settings = parseSettings(providerSettingsOf(agent))
     if (!settings.ok) {
       log(`agent « ${agent.id} » ignoré : ${settings.message}`)
       return
     }
 
-    // ── 2. Point d'entrée du package provider ──────────────────────────────
+    // ── 2. Provider package entry point ─────────────────────────────────────
     let packageURL: string
     try {
       packageURL = resolvePackageURL(import.meta.url)
@@ -515,16 +501,17 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       return
     }
 
-    // ── 3. Lancement de l'agent ─────────────────────────────────────────────
-    // ⚠️ C'est un **second** process, distinct de celui que le transport lancera
-    // par `model()`. On ne partage pas le cache de `opencode-transport.ts` : y
-    // emprunter chargerait toute la pile `effect` + `@opencode/ai` dès le
-    // chargement du plugin — dans le process du serveur — pour un simple relevé.
+    // ── 3. Launching the agent ──────────────────────────────────────────────
+    // This is a **second** process, distinct from the one the transport will
+    // spawn through `model()`. The `opencode-transport.ts` cache is deliberately
+    // not shared: borrowing it would load the whole `effect` + `@opencode/ai`
+    // stack as soon as the plugin loads - in the server process - for a single
+    // capture.
     //
-    // ⚠️ Les deux étapes sont **bornées** (`discover`) : c'est le seul endroit du
-    // projet où une attente peut bloquer le chargement d'OpenCode, parce que
-    // l'hôte await `setup` avant de rendre la main. Un agent muet, mort ou bloqué
-    // doit donner « provider non enregistré », pas « OpenCode ne démarre pas ».
+    // Both steps are **bounded** (`discover`): this is the only place in the
+    // project where a wait can block OpenCode's startup, because the host awaits
+    // `setup` before yielding. A mute, dead or stuck agent must produce "provider
+    // not registered", not "OpenCode does not start".
     let discovered: Discovery
     try {
       discovered = await discover(
@@ -533,17 +520,17 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
           ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
           ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
           ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
-          // Pas de `policy` : le défaut de `createAcpAgent` est `denyAllPermissions`
-          // (mode « cerveau brut », §7.4). Le plugin ne fait que de la découverte,
-          // il n'ouvre aucun tour — mais il ne doit pas pouvoir faire mieux.
+          // No `policy`: `createAcpAgent`'s default is `denyAllPermissions`. The
+          // plugin only performs discovery, it opens no turn - but it must not be
+          // able to do better.
         },
         discoveryTimeoutMs,
         discoveryIdleTimeoutMs,
       )
     } catch (error) {
-      // L'erreur nomme **l'agent** : « agent indisponible » sans le nom de
-      // l'agent configuré serait un diagnostic inutilisable quand la liste en
-      // contient plusieurs, ou quand le défaut (`copilot`) n'est pas celui-là.
+      // The error names the **agent**: "agent unavailable" without the
+      // configured agent's name is an unusable diagnostic when the list holds
+      // several, or when the default (`copilot`) is not that one.
       log(`agent « ${agent.id} » indisponible, provider non enregistré : ${reason(error)}`)
       return
     }
@@ -555,10 +542,10 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       ...(agent.limits === undefined ? {} : { limits: agent.limits }),
     }
 
-    // ── 4. Découverte ───────────────────────────────────────────────────────
-    // `AcpAgent.inventory()` ouvre une session jetable, lit, referme : le relevé
-    // est donc toujours frais, ce qui est justement le défaut signalé au §5.2
-    // (19 valeurs au premier `session/new`, 20 après un `set_config_option`).
+    // ── 4. Discovery ────────────────────────────────────────────────────────
+    // `AcpAgent.inventory()` opens a throwaway session, reads, closes: the
+    // capture is therefore always fresh, which is exactly the defect it papers
+    // over (19 values on the first `session/new`, 20 after a `set_config_option`).
     let inventory: Inventory
     try {
       inventory = await discovered.inventory()
@@ -572,19 +559,18 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       log(`« ${agent.id} » ne propose aucun modèle, provider non enregistré`)
       return
     }
-    // On journalise le relevé **brut** : le nombre publié peut être plus petit
-    // (`auto` est filtré), et c'est l'écart entre les deux qui dit si l'agent a
-    // proposé autre chose que des modèles.
+    // The **raw** capture is logged: the published count may be smaller (`auto`
+    // is filtered out), and it is the gap between the two that says whether the
+    // agent proposed anything other than models.
     log(
       `${acp.info.name} v${acp.info.version} (${agent.id}) : ${inventory.models.length} valeur(s) de ` +
         `modèle, ${inventory.thoughtLevels.length} niveau(s) d'effort`,
     )
 
-    // ── 5. Enregistrement ───────────────────────────────────────────────────
-    // ⚠️ Un `transform` rejeté laisserait l'agent ACP vivant sans rien nettoyer
-    // derrière lui : on le ferme avant de rendre la main, et on journalise. Le
-    // principe « jamais faire tomber le chargement d'OpenCode » vaut aussi pour
-    // cette étape.
+    // ── 5. Registration ─────────────────────────────────────────────────────
+    // A rejected `transform` would leave the ACP agent alive with nothing
+    // cleaning up behind it: it is closed before returning, and logged. The
+    // "never bring down OpenCode's startup" principle applies to this step too.
     let registration: Registration
     try {
       registration = await register(ctx, publish(options, packageURL, inventory))
@@ -595,22 +581,22 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     }
     let signature = inventorySignature(inventory)
 
-    // ── 6. Rafraîchissement ─────────────────────────────────────────────────
-    // ⚠️ La passe de rafraîchissement passe par `discovered.inventory()` et non
-    // par `acp.inventory()` : elle est donc **bornée** elle aussi. Une
-    // découverte qui traîne en arrière-plan ne peut pas laisser une session ACP
-    // ouverte pour toujours — et, à la.await, pas de rejet non plus.
+    // ── 6. Refreshing ───────────────────────────────────────────────────────
+    // The refresh pass goes through `discovered.inventory()` and not
+    // `acp.inventory()`, so it is **bounded** too. A discovery dragging on in
+    // the background cannot leave an ACP session open forever - and, awaited,
+    // cannot leak a rejection either.
     const stop = watch(ctx, refreshMs, async () => {
       const next = await discovered.inventory()
       const nextSignature = inventorySignature(next)
-      // ⚠️ Rien n'a changé : on ne touche à rien. `ctx.provider.reload()`
-      // reconstruit tout le catalogue, donc l'appeler sans raison ferait perdre
-      // la sélection en cours dans `/model` pour un inventaire identique.
+      // Nothing changed: nothing is touched. `ctx.provider.reload()` rebuilds
+      // the whole catalogue, so calling it without reason would lose the current
+      // `/model` selection over an identical inventory.
       if (nextSignature === signature) return
       log(`inventaire modifié : ${next.models.length} modèle(s)`)
-      // On n'enregistre le nouveau qu'**avant** de disposer l'ancien : si
-      // l'enregistrement échoue, le catalogue précédent reste en place et `/model`
-      // continue de fonctionner avec un inventaire daté mais valide.
+      // The new one is registered **before** the old one is disposed: if the
+      // registration fails, the previous catalogue stays in place and `/model`
+      // keeps working with a dated but valid inventory.
       const fresh = await register(ctx, publish(options, packageURL, next))
       await registration.dispose()
       registration = fresh
@@ -618,17 +604,42 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       await ctx.provider.reload()
     })
 
-    // ── 7. Déchargement ─────────────────────────────────────────────────────
-    // ⚠️ L'ordre compte : on arrête le watcher **avant** l'agent, sinon une
-    // redécouverte en vol échouerait sur un agent déjà mort — et cette erreur
-    // masquerait la cause réelle, celle de l'arrêt. Le `finally` est la seule
-    // garantie que l'agent est tué, même si `dispose` échoue.
+    // ── 7. Shutdown ─────────────────────────────────────────────────────────
+    // The order matters: the watcher is stopped **before** the agent, otherwise
+    // a rediscovery in flight would fail on an already dead agent - and that
+    // error would mask the real cause, the shutdown. The `finally` is the only
+    // guarantee that the agent is killed, even if `dispose` fails.
     return async () => {
       stop()
       try {
         await registration.dispose()
       } finally {
+        await closeProviderSessions()
         await acp.close()
       }
     }
+}
+
+/**
+ * Closes the ACP sessions retained by the **provider**.
+ *
+ * Note: the `import` is **dynamic**, and deliberately so. A static `import` of
+ * `adapters/opencode-transport.ts` would pull the whole `effect` +
+ * `@opencode/ai` stack into the plugin's process - exactly what discovery avoids
+ * (step "3. Launching the agent" of `runSetup`) - for a module only useful at
+ * exit time. Dynamic, it costs nothing at load, and it cannot fail anyway: the
+ * server has already imported the provider package (its `package` field did
+ * that), so it is a plain module cache hit, in the same process.
+ *
+ * Note: the call must **never** make a shutdown fail: a recalcitrant session
+ * must not keep the other plugins from quitting. Hence the `catch` that logs and
+ * returns.
+ */
+const closeProviderSessions = async (): Promise<void> => {
+  try {
+    const { closeAllSessions } = await import("./adapters/opencode-transport.js")
+    await closeAllSessions()
+  } catch (error) {
+    log(`sessions ACP non fermées au déchargement : ${reason(error)}`)
+  }
 }

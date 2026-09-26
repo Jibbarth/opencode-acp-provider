@@ -18,6 +18,8 @@
     "./core": "./src/core/types.ts",
     "./core/models": "./src/core/models.ts",
     "./core/prompt": "./src/core/prompt.ts",
+    "./core/session-key": "./src/core/session-key.ts",
+    "./core/session-pool": "./src/core/session-pool.ts",
     "./acp": "./src/acp/agent.ts",
     "./settings": "./src/settings.ts",
     "./opencode-transport": "./src/adapters/opencode-transport.ts",

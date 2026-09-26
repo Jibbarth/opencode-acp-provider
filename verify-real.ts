@@ -1,10 +1,10 @@
 /**
- * Sonde manuelle : le provider contre un VRAI agent ACP (`copilot --acp`).
+ * Manual probe: the provider against a REAL ACP agent (`copilot --acp`).
  *
- * Volontairement hors de `bun test` : la suite ne doit pas dépendre d'un agent
- * installé et authentifié. Cette sonde sert de preuve que la chaîne complète
- * fonctionne — OpenCode → `LLMRequest` → `Transport` Effect → JSON-RPC stdio →
- * agent → `AcpEvent` → `LLMEvent` — et pas seulement le chemin vers `fake-acp`.
+ * Deliberately outside `bun test`: the suite must not depend on an installed,
+ * authenticated agent. This probe is the evidence that the whole chain works -
+ * OpenCode -> `LLMRequest` -> Effect `Transport` -> stdio JSON-RPC -> agent ->
+ * `AcpEvent` -> `LLMEvent` - and not only the path to `fake-acp`.
  *
  *   bun verify-real.ts copilot --acp
  *   bun verify-real.ts gemini --experimental-acp
@@ -38,9 +38,9 @@ const route = languageModel.route
 console.log(`# agent    : ${command} ${settings.args.join(" ")}`)
 console.log(`# route    : id=${route.id} protocol=${route.protocol} transport=${route.transport.id}`)
 
-// Par défaut on exige le contrat : sans cette consigne, l'agent répond
-// simplement « pong » et l'analyse échoue — ce qui testerait la constance de
-// l'agent plutôt que notre code.
+// The contract is required by default: without that instruction the agent simply
+// answers "pong" and the analysis fails, which would test the agent's
+// consistency rather than our code.
 const DEFAULT_TEXT =
   'Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"pong"}'
 
@@ -62,8 +62,8 @@ const request = new LLMRequest({
   generation: GenerationOptions.make({ maxTokens: 200 }),
 })
 
-// Le transport ACP ne fait pas de HTTP : on fournit un exécuteur qui meurt
-// s'il est appelé, pour que toute régression soit immédiatement visible.
+// The ACP transport does no HTTP: an executor that dies if called is supplied,
+// so any regression is immediately visible.
 const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
 
 const outcome = await Effect.runPromise(
@@ -106,9 +106,8 @@ for (const e of events) {
     case "finish": {
       console.log(`\n[${e.type}] reason=${e.reason.normalized}`)
       if (e.usage) {
-        // `Usage` est une classe de schéma : un objet littéral ferait
-        // échouer le flux avec un message trompeur, donc on le vérifie
-        // pour de vrai plutôt que sur son nom.
+        // `Usage` is a schema class: a plain object would fail the stream with
+        // a misleading message, so it is checked for real rather than by name.
         const u = e.usage
         console.log(
           `  usage: ${u.constructor.name} input=${u.inputTokens} output=${u.outputTokens} cacheWrite=${u.cacheWriteInputTokens}`,

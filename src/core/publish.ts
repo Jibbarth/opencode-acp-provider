@@ -1,69 +1,68 @@
 /**
- * Publication de l'inventaire ACP dans le catalogue d'OpenCode — PLAN.md §5, §6.
+ * Publishing the ACP inventory into OpenCode's catalogue.
  *
- * ⚠️ Ce module est **pur** : il n'importe ni `@opencode/plugin`, ni
- * `@opencode/schema`, ni `effect`, ni le SDK ACP. Il ne produit donc **pas** des
- * `Model.Info` / `Provider.Info` : ce sont des types d'un paquet versionné au
- * même rythme que l'hôte, et les faire apparaître ici transformerait le cœur
- * portable (§2.1) en extension d'OpenCode.
+ * Note: this module is **pure**: it imports neither `@opencode/plugin`, nor
+ * `@opencode/schema`, nor `effect`, nor the ACP SDK. It therefore does **not**
+ * produce `Model.Info` / `Provider.Info` - those are types of a package versioned
+ * in lockstep with the host, and letting them appear here would turn the
+ * portable core into an OpenCode extension.
  *
- * On travaille donc sur des **formes brutes** (`RawModelInfo`, `RawProviderInfo`),
- * construites à partir du contrat portable `Inventory` — lui-même déjà vérifié
- * par `core/models.ts`. La conversion typée (`Model.Info.default`,
- * `Provider.Info.empty`, `Model.ID.make`…) se fait dans `src/plugin.ts`, qui est
- * le seul fichier à dépendre de l'API plugin.
+ * Work is therefore done on **raw shapes** (`RawModelInfo`, `RawProviderInfo`)
+ * built from the portable `Inventory` contract, itself already validated by
+ * `core/models.ts`. The typed conversion (`Model.Info.default`,
+ * `Provider.Info.empty`, `Model.ID.make`...) happens in `src/plugin.ts`, the
+ * only file that depends on the plugin API.
  *
- * Le découpage a un bénéfice de testabilité direct : tout ce qui décide *ce
- * qu'OpenCode voit* — les limites, le filtrage de `auto`, la forme des variants
- * d'effort — se teste sans process, sans import et sans serveur.
+ * The split has a direct testability benefit: everything that decides *what
+ * OpenCode sees* - the limits, the filtering of `auto`, the shape of effort
+ * variants - is testable with no process, no import and no server.
  */
 
 import type { AcpModel, Inventory } from "./types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Identité
+// Identity
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Identifiant du provider publié.
+ * The published provider id.
  *
- * ⚠️ Il doit rester **égal** à `PROVIDER` (`adapters/opencode-transport.ts`) :
- * c'est cet identifiant que la route déclare, et OpenCode apparie le modèle au
- * provider par `(providerID, modelID)`. Deux valeurs divergentes ne casseraient
- * pas à la compilation — les deux fichiers n'ont rien en commun — mais
- * produiraient un modèle invisible dans `/model`, ce qui est pire qu'une erreur.
+ * Note: it must stay **equal** to `PROVIDER` in `adapters/opencode-transport.ts`.
+ * That is the id the route declares, and OpenCode matches a model to its
+ * provider by `(providerID, modelID)`. Two diverging values would not break
+ * compilation - the two files have nothing in common - but would make the model
+ * invisible in `/model`, which is worse than an error.
  */
 export const PROVIDER_ID = "acp"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Limites et capacités annoncées
+// Announced limits and capabilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Fenêtre de contexte et sortie maximale, telles qu'annoncées à OpenCode. */
+/** Context window and maximum output, as announced to OpenCode. */
 export interface ModelLimits {
   readonly context: number
   readonly output: number
 }
 
 /**
- * Limites par défaut — **des valeurs déclarées, pas des valeurs connues**.
+ * Default limits - **declared values, not known values**.
  *
- * ⚠️ ACP ne publie aucune capacité de modèle : il n'y a donc rien à lire, et
- * `Model.Info` exige `limit.context` et `limit.output`. On annonce donc
- * 200 000 / 32 000, les valeurs que `@opencode/schema` lui-même retient par
- * défaut, plutôt que `0` (qui ferait croire à une fenêtre nulle) ou
- * `Number.MAX_SAFE_INTEGER` (qui empêcherait toute compaction).
+ * Note: ACP publishes no model capability, so there is nothing to read, and
+ * `Model.Info` requires `limit.context` and `limit.output`. 200 000 / 32 000 -
+ * the values `@opencode/schema` itself falls back to - are announced instead of
+ * `0` (which would suggest a null window) or `Number.MAX_SAFE_INTEGER` (which
+ * would prevent any compaction).
  *
- * Le seul endroit où une erreur se paie cher est `limit.context` : il sert de
- * seuil de compaction. Une valeur **trop grande** ne fait que retarder la
- * compaction, que l'agent ACP décide de son côté ; une valeur trop petite
- * tronquerait des conversations bien avant que l'agent ne le souhaite. D'où le
- * choix d'une valeur haute et prudente, et d'un point de réglage par agent
- * (`options.limits`).
+ * `limit.context` is the only place an error is expensive: it is the compaction
+ * threshold. A value that is **too large** merely delays compaction, which the
+ * ACP agent decides on its own side; too small a value would truncate
+ * conversations long before the agent wants it. Hence a high, prudent value and
+ * a per-agent setting (`options.limits`).
  */
 export const DEFAULT_LIMITS: ModelLimits = { context: 200_000, output: 32_000 }
 
-/** Ce que le transport sait réellement rendre en entrée et en sortie. */
+/** What the transport can actually render on input and output. */
 export interface RawCapabilities {
   readonly tools: boolean
   readonly input: readonly string[]
@@ -71,39 +70,39 @@ export interface RawCapabilities {
 }
 
 /**
- * ⚠️ `input: ["text"]` alors que `copilot --acp` déclare `promptCapabilities.image`
- * et `embeddedContext: true` : c'est un choix, pas un oubli. Le réducteur
- * (`adapters/opencode-protocol.ts`) ne sait rendre que du texte — une image
- * annoncée ici ferait croire à OpenCode qu'il peut en envoyer une, et l'agent
- * recevrait un message vide. Mentir ici produirait un échec **muet** ;
- * annoncer `["text"]` produit un refus, au bon endroit.
+ * Note: `input: ["text"]` even though `copilot --acp` declares
+ * `promptCapabilities.image` and `embeddedContext: true` is a deliberate choice,
+ * not an oversight. The reducer (`adapters/opencode-protocol.ts`) can only
+ * render text - an image announced here would make OpenCode believe it can send
+ * one, and the agent would receive an empty message. Lying here produces a
+ * **silent** failure; announcing `["text"]` produces a refusal, in the right
+ * place.
  *
- * `tools: true` est exact : c'est le cœur du mécanisme §7.3 — l'agent propose,
- * OpenCode exécute.
+ * `tools: true` is exact: the agent proposes, OpenCode executes.
  */
 export const DEFAULT_CAPABILITIES: RawCapabilities = { tools: true, input: ["text"], output: ["text"] }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Formes brutes publiées
+// Published raw shapes
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Un `variant` de `Model.Info`, en forme brute.
+ * A `Model.Info` variant, in raw form.
  *
- * ⚠️ Il n'y a **pas** de variant `"default"`, et c'est délibéré : OpenCode
- * interprète l'id `"default"` comme « aucun variant » et **n'en fusionne pas les
- * `settings`** (cf. `ModelResolver`). Un variant `default` portant
- * `{ effort: … }` serait donc silencieusement ignoré. Sans variant sélectionné,
- * aucun `effort` n'est envoyé et l'agent applique son propre `currentValue` :
- * c'est le comportement correct, et il n'a pas besoin d'être publié.
+ * Note: there is deliberately **no** `"default"` variant: OpenCode reads the id
+ * `"default"` as "no variant" and does **not** merge its `settings` (see
+ * `ModelResolver`). A `default` variant carrying `{ effort: ... }` would
+ * therefore be silently ignored. With no variant selected, no `effort` is sent
+ * and the agent applies its own `currentValue`: that is the correct behaviour
+ * and it does not need to be published.
  */
 export interface RawVariant {
   readonly id: string
-  /** Valeurs fusionnées par OpenCode dans les settings du provider (§3.1). */
+  /** Values merged by OpenCode into the provider settings. */
   readonly settings: Readonly<Record<string, string>>
 }
 
-/** Un `Model.Info` en forme brute : ce que `/model` doit pouvoir afficher. */
+/** A `Model.Info` in raw form: what `/model` must be able to display. */
 export interface RawModelInfo {
   readonly id: string
   readonly name: string
@@ -112,58 +111,55 @@ export interface RawModelInfo {
   readonly variants: readonly RawVariant[]
 }
 
-/** Un `Provider.Info` en forme brute. */
+/** A `Provider.Info` in raw form. */
 export interface RawProviderInfo {
   readonly id: string
   readonly name: string
   /**
-   * Toujours `"enabled"` : à cet instant du `setup`, l'agent a déjà répondu à
-   * `initialize`, donc le provider est joignable. `"auto"` — la valeur de
-   * `Provider.Info.empty` — ne le prouverait pas ; et sur un transport stdio il
-   * n'y a aucun identifiant à demander, donc rien à différer.
+   * Always `"enabled"`: at this point of `setup` the agent has already answered
+   * `initialize`, so the provider is reachable. `"auto"` - the value of
+   * `Provider.Info.empty` - would not prove that; and on a stdio transport there
+   * is no identifier to ask for, so nothing is deferred.
    */
   readonly activation: "enabled"
-  /** URL `file://` **absolue** du module exportant `model` (§3.1). */
+  /** **Absolute** `file://` URL of the module exporting `model`. */
   readonly package: string
-  /** Réglages repris tels quels par `model(modelID, settings)` (§3.1). */
+  /** Settings handed back as-is to `model(modelID, settings)`. */
   readonly settings: Readonly<Record<string, unknown>>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Options de publication
+// Publish options
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Ce que le plugin sait de l'agent, et qui n'est pas dans l'inventaire. */
+/** What the plugin knows about the agent and the inventory does not. */
 export interface PublishOptions {
-  /** Étiquette lisible du provider, p. ex. `"ACP — Copilot"`. */
+  /** Readable provider label, e.g. `"ACP - Copilot"`. */
   readonly label?: string
-  /** Réglages du provider, repris par `model()` (§3.1). */
+  /** Provider settings, handed back to `model()`. */
   readonly settings?: Readonly<Record<string, unknown>>
-  /** Limites annoncées ; `DEFAULT_LIMITS` sinon. */
+  /** Announced limits; `DEFAULT_LIMITS` otherwise. */
   readonly limits?: ModelLimits
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// `Inventory` → formes brutes
+// `Inventory` -> raw shapes
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Valeurs de la catégorie `model` qui ne sont **pas** des modèles.
+ * Values of the `model` category that are **not** models.
  *
- * ⚠️ `auto` est une **pseudo-valeur** : c'est l'agent qui choisit le modèle à
- * chaque tour, et il ne le dit pas. On la filtre donc, pour trois raisons :
+ * Note: `auto` is a **pseudo-value**: the agent picks the model on every turn
+ * and does not say which. It is therefore filtered out, for three reasons:
  *
- * 1. un `Model.Info` promet un modèle *déterministe* — c'est ce qui permet à
- *    OpenCode d'afficher des limites, un coût, et à l'adaptateur d'envoyer
- *    `set_config_option("model", …)` avec une valeur stable. Sous `auto`, les
- *    trois seraient faux sans jamais le dire ;
- * 2. les limites varieraient d'un tour à l'autre ; annoncer celles du modèle
- *    courant serait une information fausse ;
- * 3. la garder donnerait à l'utilisateur l'impression d'un modèle supplémentaire
- *    alors qu'il n'en contrôle pas le choix.
- *
- * Le §5.2 laissait le choix ouvert ; on le tranche ici, et l'inventaire reste
- * lisible dans `/model` sans elle.
+ * 1. a `Model.Info` promises a *deterministic* model - that is what lets
+ *    OpenCode display limits and a cost, and lets the adapter send
+ *    `set_config_option("model", ...)` with a stable value. Under `auto` all
+ *    three would be wrong without ever saying so;
+ * 2. the limits would vary from turn to turn; announcing the current model's
+ *    would be false information;
+ * 3. keeping it would give the user the impression of an extra model whose
+ *    choice they do not control.
  */
 export const PSEUDO_MODEL_IDS: readonly string[] = ["auto"]
 
@@ -173,25 +169,25 @@ const isPseudoModel = (id: string): boolean => {
 }
 
 /**
- * Libellé d'un modèle.
+ * A model's display name.
  *
- * `AcpModel.name` vient de l'agent (un `name` ACP, ou à défaut la valeur), donc
- * il est déjà lisible. On ne le « embellit » pas : capitaliser un identifiant
- * selon une règle de notre invention produirait `Gpt 5.6 Terra` là où l'agent
- * affiche `GPT-5.6 Terra`, et le modèle dans `/model` ne ressemblerait plus à
- * celui de `/model` côté agent.
+ * `AcpModel.name` comes from the agent (an ACP `name`, or the value as a
+ * fallback), so it is already readable. It is deliberately not "prettified":
+ * capitalising an identifier by a rule of our own invention would produce
+ * `Gpt 5.6 Terra` where the agent shows `GPT-5.6 Terra`, and the model in
+ * `/model` would no longer look like the agent's.
  */
 const displayName = (model: AcpModel): string => (model.name.trim() === "" ? model.id : model.name)
 
 /**
- * Les niveaux d'effort ACP deviennent des `variants` (§5).
+ * ACP effort levels become `variants`.
  *
- * ⚠️ Le `settings` de chaque variant est exactement `{ effort: <niveau> }`, le
- * champ que lit `src/settings.ts` ; l'adaptateur le traduit en
- * `set_config_option("reasoning_effort", …)` avant le prompt. Les niveaux sont
- * **dédupliqués et filtrés** : un agent qui répète une valeur donnerait deux
- * variants de même id, et OpenCode rejette alors le modèle entier au moment de
- * résoudre le variant.
+ * Note: each variant's `settings` is exactly `{ effort: <level> }`, the field
+ * `src/settings.ts` reads; the adapter turns it into
+ * `set_config_option("reasoning_effort", ...)` before the prompt. Levels are
+ * **deduplicated and filtered**: an agent repeating a value would produce two
+ * variants with the same id, and OpenCode then rejects the whole model when
+ * resolving the variant.
  */
 export const effortVariants = (inventory: Inventory): readonly RawVariant[] => {
   const variants: RawVariant[] = []
@@ -205,14 +201,13 @@ export const effortVariants = (inventory: Inventory): readonly RawVariant[] => {
 }
 
 /**
- * Un `Model.Info` par valeur de la catégorie `model` (§5).
+ * One `Model.Info` per value of the `model` category.
  *
- * ⚠️ L'ordre de l'agent est **conservé** : c'est l'ordre d'affichage qu'il a
- * choisi, et le réordonner par famille ou par date imposerait ici une
- * nomenclature qu'on ne maîtrise pas. Seules les pseudo-valeurs sont retirées,
- * et les doublons d'id sont ignorés (premier exemplaire gagnant) : OpenCode
- * refuse un catalogue contenant deux modèles de même id, et le signalement ici
- * vaut mieux qu'un identifiant inventé pour les distinguer.
+ * Note: the agent's **order is preserved**: it is the display order it chose,
+ * and reordering by family or by date would impose a nomenclature we do not
+ * control. Only pseudo-values are removed, and duplicate ids are ignored (first
+ * one wins): OpenCode refuses a catalogue containing two models with the same
+ * id, and warning here beats inventing an identifier to tell them apart.
  */
 export const inventoryToModels = (
   inventory: Inventory,
@@ -238,13 +233,13 @@ export const inventoryToModels = (
 }
 
 /**
- * Le `Provider.Info` à enregistrer (§6).
+ * The `Provider.Info` to register.
  *
- * `Provider.Info.empty(id)` ne fournit qu'un `id`, un `name` égal à l'id et une
- * `activation` à `"auto"` : il manque `package` (obligatoire) et notre `name`.
- * On construit donc la forme brute ici, et `src/plugin.ts` l'applique sur le
- * `empty` — c'est le seul moyen d'hériter des champs qu'OpenCode ajoutera au
- * `Provider.Info` sans les réinventer.
+ * `Provider.Info.empty(id)` only provides an `id`, a `name` equal to that id
+ * and an `activation` of `"auto"`: `package` (mandatory) and our `name` are
+ * missing. The raw shape is therefore built here, and `src/plugin.ts` applies it
+ * on top of `empty` - the only way to inherit the fields OpenCode may add to
+ * `Provider.Info` without reinventing them.
  */
 export const providerInfo = (options: PublishOptions, packageURL: string): RawProviderInfo => ({
   id: PROVIDER_ID,
@@ -255,14 +250,14 @@ export const providerInfo = (options: PublishOptions, packageURL: string): RawPr
 })
 
 /**
- * Empreinte d'un inventaire, pour ne **republier** que ce qui a changé.
+ * A signature of an inventory, so only what changed is **republished**.
  *
- * ⚠️ `ctx.provider.reload()` reconstruit tout le catalogue : l'appeler sans
- * raison ferait recharger `/model` et perdre la sélection en cours. Cette
- * signature — ids, noms, niveaux d'effort, modèle courant — est le plus petit
- * résumé qui distingue « l'inventaire a bougé » de « l'agent a simplement
- * répondu pareil ». Elle n'est pas cryptographique : son seul job est de
- * distinguer deux relevés, pas de les authentifier.
+ * Note: `ctx.provider.reload()` rebuilds the whole catalogue: calling it
+ * without reason would make `/model` reload and lose the current selection.
+ * This signature - ids, names, effort levels, current model - is the smallest
+ * summary that tells "the inventory moved" from "the agent simply answered the
+ * same". It is not cryptographic: its only job is to tell two captures apart,
+ * not to authenticate them.
  */
 export const inventorySignature = (inventory: Inventory): string =>
   JSON.stringify([
@@ -273,63 +268,62 @@ export const inventorySignature = (inventory: Inventory): string =>
   ])
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Options du plugin (`opencode.jsonc` → `plugins[].options`)
+// Plugin options (`opencode.jsonc` -> `plugins[].options`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Un agent déclaré dans les options du plugin, avant validation par `settings.ts`. */
+/** An agent declared in the plugin options, before validation by `settings.ts`. */
 export interface RawAgent {
-  /** Étiquette choisie par l'utilisateur ; sert aux messages, pas au provider. */
+  /** Label chosen by the user; used for messages, not for the provider. */
   readonly id: string
   readonly command: string
   readonly args: readonly string[] | undefined
   readonly cwd: string | undefined
   readonly env: Readonly<Record<string, string>> | undefined
-  /** ⚠️ ne sert aujourd'hui qu'à un interrupteur tout-ou-rien, cf. `settings.allowedTools`. */
+  /** Note: only drives an all-or-nothing switch today, cf. `settings.allowedTools`. */
   readonly allowedTools: readonly string[] | undefined
-  /** Limites annoncées pour les modèles de cet agent. */
+  /** Limits announced for this agent's models. */
   readonly limits: ModelLimits | undefined
 }
 
-/** Options du plugin, normalisées. */
+/** Normalised plugin options. */
 export interface PluginConfig {
   readonly agents: readonly RawAgent[]
   /**
-   * Délai minimum entre deux redécouvertes, en ms. `0` désactive le rafraîchissement.
+   * Minimum delay between two rediscoveries, in ms. `0` disables refreshing.
    *
-   * ⚠️ Ce n'est **pas** une période de polling : le plugin ne réexamine
-   * l'inventaire que lorsqu'OpenCode signale un tour terminé (`session.idle`),
-   * et au plus une fois par `refreshMs`. Chaque passe coûte un aller-retour
-   * `session/new` — d'où une minute par défaut, et non une seconde.
+   * Note: this is **not** a polling period. The plugin only re-examines the
+   * inventory when OpenCode signals a finished turn (`session.idle`), and at
+   * most once per `refreshMs`. Each pass costs a `session/new` round trip -
+   * hence a minute by default rather than a second.
    */
   readonly refreshMs: number
   /**
-   * Bornes de la **découverte** : lancement de l'agent, `initialize`, relevé de
-   * l'inventaire.
+   * Bounds on the **discovery**: agent launch, `initialize`, inventory capture.
    *
-   * ⚠️ C'est le seul endroit du projet où une attente peut bloquer le
-   * chargement d'OpenCode : `setup()` est awaited par l'hôte avant de rendre la
-   * main, donc un agent muet ne fait pas « ne pas enregistrer de provider »,
-   * il fait « OpenCode ne démarre pas ». D'où deux bornes, pas une.
+   * Note: this is the only place in the project where a wait can block
+   * OpenCode's startup: `setup()` is awaited by the host before it yields, so a
+   * mute agent does not cause "no provider registered", it causes "OpenCode does
+   * not start". Hence two bounds, not one.
    */
   readonly discoveryTimeoutMs: number
   /**
-   * Borne d'**inactivité** : délai maximal sans signe de vie de l'agent.
+   * **Inactivity** bound: maximum delay without any sign of life from the agent.
    *
-   * ⚠️ Elle attrape ce que la borne globale n'attrape pas — un agent qui
-   * bavarde sans jamais finir (authentification en boucle, reconnexion réseau
-   * permanente) ne s'arrête jamais, mais il n'est plus muet : sans cette borne,
-   * `setup` l'attendrait jusqu'à la borne globale, et l'utilisateur verrait le
-   * chargement d'OpenCode s'arrêter « pour une raison » sans voir d'erreur.
+   * Note: it catches what the global bound does not - an agent that rambles
+   * without ever finishing (authentication loop, permanent network
+   * reconnection) never stops, but it is no longer mute: without this bound
+   * `setup` would wait it out until the global bound, and the user would see
+   * OpenCode's startup stop "for a reason" with no error shown.
    */
   readonly discoveryIdleTimeoutMs: number
 }
 
-/** Résultat de `parsePluginConfig` : jamais une exception, toujours un diagnostic. */
+/** Result of `parsePluginConfig`: never an exception, always a diagnostic. */
 export type PluginConfigResult =
   | { readonly ok: true; readonly value: PluginConfig }
   | { readonly ok: false; readonly message: string }
 
-/** Agent retenu quand le plugin est configuré sans `agents`. */
+/** Agent used when the plugin is configured without `agents`. */
 export const DEFAULT_AGENT: RawAgent = {
   id: "copilot",
   command: "copilot",
@@ -340,24 +334,24 @@ export const DEFAULT_AGENT: RawAgent = {
   limits: undefined,
 }
 
-/** Délai minimum par défaut entre deux redécouvertes. */
+/** Default minimum delay between two rediscoveries. */
 export const DEFAULT_REFRESH_MS = 60_000
 
 /**
- * Bornes par défaut de la découverte, en ms — 10 s, comme `opencode-acpx`.
+ * Default discovery bounds, in ms - 10 s, matching `opencode-acpx`.
  *
- * ⚠️ Pourquoi 10 s et pas 30 s (le timeout d'`initialize` de `createAcpAgent`) :
- * parce que l'enjeu n'est pas la patience mais le **chargement d'OpenCode**.
- * Trente secondes d'écran figé au démarrage, sans message, sont indiscernables
- * d'un plantage ; dix secondes le sont encore. Un agent réellement lent se règle
- * avec `discoveryTimeoutMs` — c'est une option, pas un figement.
+ * Note: 10 s rather than the 30 s `initialize` timeout of `createAcpAgent`,
+ * because what is at stake is not patience but **OpenCode's startup**. Thirty
+ * seconds of frozen screen at boot, with no message, are indistinguishable
+ * from a crash; ten seconds still are not. A genuinely slow agent is handled
+ * with `discoveryTimeoutMs` - that is an option, not a freeze.
  */
 export const DEFAULT_DISCOVERY_TIMEOUT_MS = 10_000
 
-/** Borne d'inactivité par défaut, en ms : même ordre de grandeur que le global. */
+/** Default inactivity bound, in ms: same order of magnitude as the global one. */
 export const DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS = 10_000
 
-/** Les bornes de découverte par défaut, prêtes à étaler dans une `PluginConfig`. */
+/** The default discovery bounds, ready to spread into a `PluginConfig`. */
 const DEFAULT_BOUNDS = {
   refreshMs: DEFAULT_REFRESH_MS,
   discoveryTimeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS,
@@ -367,7 +361,7 @@ const DEFAULT_BOUNDS = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
-/** Message d'erreur homogène, avec le chemin du champ fautif — comme `settings.ts`. */
+/** Uniform error message, carrying the path of the offending field. */
 const invalid = (path: string, expected: string): { readonly ok: false; readonly message: string } => ({
   ok: false,
   message: `options.${path} ${expected}`,
@@ -381,9 +375,9 @@ const readStringArray = (
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
   if (!Array.isArray(raw)) return invalid(`${path}.${key}`, "doit être un tableau de chaînes")
-  // On **recopie** plutôt que de rendre le tableau reçu : `Array.isArray` ne
-  // prouve rien sur le type de ses éléments, et une copie construite ici est
-  // nécessairement un `string[]` — sans avoir à mentir sur le typage.
+  // **Copy** rather than returning the received array: `Array.isArray` proves
+  // nothing about its element type, and a copy built here is necessarily a
+  // `string[]`, with no need to lie about the typing.
   const values: string[] = []
   for (const item of raw) {
     if (typeof item !== "string") return invalid(`${path}.${key}`, "doit être un tableau de chaînes")
@@ -427,14 +421,13 @@ const readLimits = (
 }
 
 /**
- * Valide une entrée d'agent.
+ * Validates an agent entry.
  *
- * ⚠️ `command` est le **seul** champ obligatoire, et une commande vide est une
- * erreur franche : sans elle, le plugin tenterait de lancer une commande vide et
- * l'échec remonterait dans le journal d'OpenCode sous la forme d'un `ENOENT`
- * mystérieux. Tout le reste est facultatif, et une clé inconnue est ignorée
- * plutôt que rejetée (même raisonnement que `parseSettings` : OpenCode peut
- * ajouter les siennes).
+ * Note: `command` is the **only** mandatory field, and an empty command is a
+ * flat error: without it the plugin would try to spawn an empty command and the
+ * failure would surface in OpenCode's log as a mysterious `ENOENT`. Everything
+ * else is optional, and an unknown key is ignored rather than rejected (same
+ * reasoning as `parseSettings`: OpenCode may add its own).
  */
 const readAgent = (
   raw: unknown,
@@ -461,9 +454,8 @@ const readAgent = (
   return {
     ok: true,
     value: {
-      // L'`id` est une étiquette : le retomber sur la commande garantit que
-      // chaque ligne de journal peut nommer l'agent, même si l'utilisateur n'en
-      // a pas donné.
+      // The `id` is a label: falling back to the command guarantees that every
+      // log line can name the agent, even if the user gave none.
       id: id === undefined || id.trim() === "" ? command : id,
       command,
       args: args.value,
@@ -476,14 +468,14 @@ const readAgent = (
 }
 
 /**
- * Lit les options du plugin (`opencode.jsonc` → `plugins[].options`).
+ * Reads the plugin options (`opencode.jsonc` -> `plugins[].options`).
  *
- * ⚠️ `agents` absent ou vide donne `DEFAULT_AGENT` (`copilot --acp`) plutôt
- * qu'une erreur : un plugin qui ne se charge pas entraîne toute la liste de
- * plugins avec lui, et « rien de configuré » signifie presque toujours
- * « l'agent par défaut » — c'est ce que §5.1 relève sur `copilot --acp`.
+ * Note: an absent or empty `agents` yields `DEFAULT_AGENT` (`copilot --acp`)
+ * rather than an error: a plugin that fails to load takes the whole plugin list
+ * down with it, and "nothing configured" almost always means "the default
+ * agent".
  *
- * ⚠️ Les clés inconnues du plugin sont ignorées, jamais rejetées (cf. `readAgent`).
+ * Note: unknown plugin keys are ignored, never rejected (cf. `readAgent`).
  */
 export const parsePluginConfig = (input: unknown): PluginConfigResult => {
   if (input === undefined || input === null) {
@@ -505,9 +497,9 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     return invalid("refreshMs", "doit être un nombre de millisecondes ≥ 0 (0 désactive le rafraîchissement)")
   }
 
-  // ⚠️ Les deux bornes de découverte sont validées **ici**, et non lues
-  // telles quelles : une borne négative ou non finie ne bornerait rien, et le
-  // pire des cas pour une borne de délai est qu'elle soit infinie.
+  // The two discovery bounds are validated **here** rather than read as-is: a
+  // negative or non-finite bound would not bound anything, and the worst case
+  // for a timeout is to be infinite.
   const discoveryTimeoutMs = input["discoveryTimeoutMs"]
   if (
     discoveryTimeoutMs !== undefined &&
@@ -560,16 +552,16 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
 }
 
 /**
- * Réglages publiés pour l'agent, et redonnés à `model()` par OpenCode (§3.1).
+ * Settings published for the agent, handed back to `model()` by OpenCode.
  *
- * ⚠️ Deux choses sont volontairement écartées : `id` (une étiquette, sans
- * sens pour le provider) et `limits` (une valeur d'affichage du catalogue, pas
- * un paramètre de requête — la laisser dans les settings enverrait une clé
- * `limits` que `parseSettings` ignorerait à chaque tour). Les champs
- * indéfinis sont **omis** plutôt que posés : ils écraseraient sinon, à la
- * fusion, la valeur que l'utilisateur a mise dans `opencode.jsonc` sous
+ * Note: two things are deliberately left out: `id` (a label, meaningless to the
+ * provider) and `limits` (a catalogue display value, not a request parameter -
+ * keeping it would send a `limits` key that `parseSettings` ignores on every
+ * turn). Undefined fields are **omitted** rather than set: they would otherwise
+ * overwrite, at merge time, the value the user put in `opencode.jsonc` under
  * `providers.acp.settings`.
- */export const providerSettingsOf = (agent: RawAgent): Readonly<Record<string, unknown>> => ({
+ */
+export const providerSettingsOf = (agent: RawAgent): Readonly<Record<string, unknown>> => ({
   command: agent.command,
   ...(agent.args === undefined ? {} : { args: [...agent.args] }),
   ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),

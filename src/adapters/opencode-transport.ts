@@ -1,26 +1,37 @@
 /**
- * Le `Transport` ACP sur stdio — PLAN.md §3.3.
+ * The ACP `Transport` over stdio.
  *
- * C'est **la seule** coquille du projet qui dépende à la fois d'`@opencode/ai`
- * et d'`effect` (§2.2 : ~150 lignes à jeter si les internels bougent). Elle ne
- * contient aucune logique métier : tout ce qu'elle fait, c'est
+ * This is the **only** shell of the project that depends on both
+ * `@opencode/ai` and `effect` - roughly 150 lines to throw away if those
+ * internals move. It holds no business logic; all it does is
  *
- *   1. obtenir un `AcpAgent` (**mis en cache au niveau module**),
- *   2. ouvrir une session, y brancher le `Scope` de la requête,
- *   3. transformer le flux `AcpEvent` en trames, sans jamais s'arrêter avant le
- *      `finally` du `Scope`.
+ *   1. obtain an `AcpAgent` (**cached at module level**),
+ *   2. obtain the turn's ACP session - fresh (`fresh`) or taken from a session
+ *      pool (`reuse`),
+ *   3. turn the `AcpEvent` stream into frames, never stopping before the
+ *      `Scope` closes.
  *
- * ⚠️ Le cache de processus n'est pas une optimisation facultative : un
- * `initialize` ACP coûte une poignée de secondes, et le provider est appelé
- * **à chaque tour** d'une conversation. Sans cache, une session de chat
- * ganhou un `spawn` par message.
+ * Note: the process cache is not an optional optimisation. An ACP `initialize`
+ * costs a few seconds and the provider is called on **every turn** of a
+ * conversation; without the cache a chat session would gain a `spawn` per
+ * message.
  *
- * ⚠️ `TransportExecution.http` est volontairement **absent** : il n'y a pas de
- * requête HTTP, et le fournir ferait croire au core qu'un contexte réseau existe
- * (URL, statut) alors que la seule chose qui peut échouer, c'est un pipe.
- * C'est aussi pourquoi une panne de pipe est rapportée en `ProviderInternalError`
- * et non en `TransportError` : le champ `transport` de ce dernier est un union
- * **fermé** à `["http","websocket"]`, sans valeur `stdio` (§8.a).
+ * Note: `session: "reuse"` does not make that cache shareable. An ACP session
+ * **retains the conversation**, so it can only be resumed if the history
+ * received is exactly an extension of what it already received. The decision
+ * belongs to `core/session-key.ts` (pure) and its state to
+ * `core/session-pool.ts` (bounded LRU, serialisation queue); here the two are
+ * merely **wired** together: open the session when the pool asks for it, give
+ * the queue back at the end of the turn, and "poison" the session if the turn
+ * ended badly. The default stays `fresh` - reuse only activates on explicit
+ * request.
+ *
+ * Note: `TransportExecution.http` is deliberately **absent**. There is no HTTP
+ * request, and providing one would make the core believe a network context
+ * exists (URL, status) when the only thing that can fail is a pipe. That is
+ * also why a pipe failure is reported as `ProviderInternalError` rather than
+ * `TransportError`: the latter's `transport` field is a **closed** union over
+ * `["http","websocket"]`, with no `stdio` value.
  */
 
 import { Effect, Scope, Stream } from "effect"
@@ -31,63 +42,71 @@ import { AIError, InvalidRequestError, ProviderID, ProviderInternalError } from 
 import type { LLMRequest } from "@opencode/ai/schema/index"
 
 import { AcpAgentError, createAcpAgent } from "../acp/agent.js"
-import type { AcpAgent, AcpEvent, AcpPermissionPolicy, AcpSession, NormalizedRequest } from "../core/types.js"
+import type {
+  AcpAgent,
+  AcpEvent,
+  AcpPermissionPolicy,
+  AcpSession,
+  NormalizedMessage,
+  NormalizedRequest,
+} from "../core/types.js"
 import { allowAllPermissions, denyAllPermissions } from "../core/types.js"
+import { SessionPool } from "../core/session-pool.js"
+import type { TurnLease } from "../core/session-pool.js"
 import { agentKey, agentLabel, allowsEveryTool } from "../settings.js"
 import type { AcpProviderSettings } from "../settings.js"
 import { makeProtocol } from "./opencode-protocol.js"
 import type { AcpBody, AcpFrame, ReducerState } from "./opencode-protocol.js"
 
-/** Identifiant de la route : stable, et lisible dans un diagnostic. */
+/** The route's id: stable, and readable in a diagnostic. */
 export const ROUTE_ID = "acp-stdio"
 
-/** Valeur de `route.provider` : l'identité du provider telle que rapportée par OpenCode. */
+/** The value of `route.provider`: the provider identity as OpenCode reports it. */
 export const PROVIDER = ProviderID.make("acp")
 
 /**
- * URL **factice** mais valide.
+ * A **fake** but valid URL.
  *
- * ⚠️ Elle n'est jamais appelée : le transport ACP ne fait pas de HTTP. Mais
- * `compileRequest` rend l'endpoint **avant** de choisir le transport, et
- * `Route.model` refuse une route sans `baseURL`. Un placeholder non valide
- * (`"acp"`) ferait échouer la route pour une raison qui n'a rien à voir avec le
- * fonctionnement réel.
+ * Note: it is never called, since the ACP transport does no HTTP. But
+ * `compileRequest` renders the endpoint **before** choosing the transport, and
+ * `Route.model` refuses a route without a `baseURL`; an invalid placeholder
+ * (`"acp"`) would fail the route for a reason unrelated to real behaviour.
  */
 const PLACEHOLDER_BASE_URL = "http://acp.local"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Requête préparée
+// Prepared request
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Ce que `prepare` produit : exactement ce dont `execute` a besoin. */
+/** What `prepare` produces: exactly what `execute` needs. */
 export interface AcpPrepared {
-  /** Valeur d'option de modèle à appliquer avant le prompt (§5.2). */
+  /** Model option value to apply before the prompt. */
   readonly model: string
-  /** La requête normalisée, déjà rendue par le protocole. */
+  /** The normalised request, already rendered by the protocol. */
   readonly request: NormalizedRequest
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Erreurs
+// Errors
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Étiquette commune à tous les messages : sans elle, « ACP connection closed » ne dit rien. */
+/** Label common to every message: without it, "ACP connection closed" says nothing. */
 const labelOf = (settings: AcpProviderSettings): string => agentLabel(settings)
 
 /**
- * Traduit n'importe quelle exception en `AIError`.
+ * Turns any exception into an `AIError`.
  *
- * §8.a : pas de `TransportError.transport: "stdio"`, donc on reste dans
- * `ProviderInternalError` — qui reste dans l'union `AIError`, donc dans le
- * `retry` hook d'OpenCode, mais **sans** `status`. C'est une limite assumée :
- * `RateLimitError` et `QuotaExceededError` restent atteignables pour l'erreur
- * *signalée par l'agent* (§8.b), pas pour la mort du pipe.
+ * Note: there is no `TransportError.transport: "stdio"`, so this stays in
+ * `ProviderInternalError` - which remains in the `AIError` union, hence in
+ * OpenCode's `retry` hook, but **without** a `status`. That is a deliberate
+ * limitation: `RateLimitError` and `QuotaExceededError` remain reachable for an
+ * error *reported by the agent*, not for the death of the pipe.
  */
 export const toAiError = (error: unknown, settings: AcpProviderSettings): AIError => {
   if (error instanceof AIError) return error
   const label = labelOf(settings)
-  // `AcpAgentError` porte déjà la commande et la queue de stderr : ne pas
-  // l'entourer d'un second message qui la noierait dans du jargon Effect.
+  // `AcpAgentError` already carries the command and the stderr queue: do not
+  // wrap it in a second message that would drown it in Effect jargon.
   const detail =
     error instanceof AcpAgentError
       ? error.message
@@ -97,7 +116,7 @@ export const toAiError = (error: unknown, settings: AcpProviderSettings): AIErro
   })
 }
 
-/** `Effect.tryPromise` qui ne peut rien laisser fuir hors de l'union `AIError`. */
+/** An `Effect.tryPromise` that cannot let anything escape the `AIError` union. */
 const attempt = <A>(settings: AcpProviderSettings, run: () => Promise<A>): Effect.Effect<A, AIError> =>
   Effect.tryPromise({
     try: run,
@@ -105,39 +124,38 @@ const attempt = <A>(settings: AcpProviderSettings, run: () => Promise<A>): Effec
   })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cache de processus
+// Process cache
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Politique de permissions appliquée à l'agent.
+ * The permission policy applied to the agent.
  *
- * ⚠️ `allowedTools` n'est appliqué que comme un **interrupteur** : tout ou rien.
- * Une liste blanche de noms exigerait de connaître le nom de l'outil au moment de
- * la demande de permission — or `PermissionRequest` (contrat portable, P0) n'a
- * pas de champ `name`, parce que la spec ACP rend `toolCallUpdate.name`
- * optionnel. Dégrader une liste blanche en « tout refuser » est le choix
- * **fail-safe** : qui whiteliste des outils attend une restriction, il n'en
- * obtient pas. P4 ajoutera `name` au contrat portable, et donc la liste blanche.
+ * Note: `allowedTools` is only applied as an **all-or-nothing switch**. A
+ * whitelist of names would require knowing the tool's name at the moment of the
+ * permission request - and `PermissionRequest` has no `name` field, because the
+ * ACP spec makes `toolCallUpdate.name` optional. Degrading a whitelist to "refuse
+ * everything" is the **fail-safe** choice: someone who whitelists tools expects
+ * a restriction, and gets none.
  */
 const policyOf = (settings: AcpProviderSettings): AcpPermissionPolicy =>
   allowsEveryTool(settings) ? allowAllPermissions : denyAllPermissions
 
 /**
- * Agents ACP vivants, indexés par `agentKey`.
+ * Live ACP agents, indexed by `agentKey`.
  *
- * ⚠️ La clé de `Map` est conservée **en plus** de la promesse : sans elle, deux
- * providers qui veulent exactement le même agent ne partageraient rien, puisque
- * la clé n'est pas dérivable de la valeur.
+ * Note: the `Map` key is kept **in addition to** the promise: without it, two
+ * providers wanting exactly the same agent would share nothing, since the key
+ * cannot be derived from the value.
  */
 const agents = new Map<string, Promise<AcpAgent>>()
 
 /**
- * Agent ACP correspondant aux settings, lancé si besoin.
+ * The ACP agent matching the settings, launched if needed.
  *
- * ⚠️ Une promesse **rejetée** est retirée du cache : sans ça, une commande
- * inexistante resterait en échec « pour l'éternité » dans ce processus, et le
- * message d'erreur de la **première** tentative (installation incomplète ?)
- * continuerait d'être renvoyé après que l'utilisateur a corrigé sa configuration.
+ * Note: a **rejected** promise is removed from the cache. Otherwise a
+ * non-existent command would fail "forever" in this process, and the error
+ * message of the **first** attempt (incomplete install?) would keep being
+ * returned long after the user fixed their configuration.
  */
 export const acquireAgent = (settings: AcpProviderSettings): Promise<AcpAgent> => {
   const key = agentKey(settings)
@@ -148,14 +166,14 @@ export const acquireAgent = (settings: AcpProviderSettings): Promise<AcpAgent> =
     ...(settings.args === undefined ? {} : { args: settings.args }),
     ...(settings.cwd === undefined ? {} : { cwd: settings.cwd }),
     ...(settings.env === undefined ? {} : { env: settings.env }),
-    // La politique est une **valeur** de settings, pas une fonction : un package
-    // provider ne reçoit que du JSON (§3.2).
+    // The policy is a settings **value**, not a function: a provider package
+    // only receives JSON.
     policy: policyOf(settings),
     stderr: settings.stderr ?? "pipe",
-    // Le stderr de l'agent est **toujours** capté, mais il n'est relayé que si
-    // quelqu'un l'écoute : en « provider », personne n'a fourni de `onStderr`, et
-    // perdre ces lignes reviendrait à perdre la seule source qui dit pourquoi
-    // l'agent est mort (§8.c). Le mode `"inherit"` écrit déjà sur notre stderr.
+    // The agent's stderr is **always** captured but only relayed if someone
+    // listens: as a provider nobody supplied an `onStderr`, and dropping those
+    // lines would mean losing the only source that says why the agent died. The
+    // `"inherit"` mode already writes to our own stderr.
     onStderr:
       settings.stderr === "inherit"
         ? undefined
@@ -170,8 +188,13 @@ export const acquireAgent = (settings: AcpProviderSettings): Promise<AcpAgent> =
   return started
 }
 
-/** Ferme tous les agents en cache et vide le cache (tests, arrêt du serveur). */
+/** Closes every cached agent and empties the cache (tests, server shutdown). */
 export const closeCachedAgents = async (): Promise<void> => {
+  // Sessions **before** agents: a still-open session references the agent it
+  // uses, and closing the agent first would send `session/close` to an already
+  // killed process. Harmless - the pool swallows close errors - but needlessly
+  // late.
+  await closeAllSessions()
   const pending = [...agents.values()]
   agents.clear()
   await Promise.all(pending.map(async (started) => {
@@ -181,23 +204,180 @@ export const closeCachedAgents = async (): Promise<void> => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Persistent sessions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ACP session pools, **one per agent process**.
+ *
+ * Note: the key is `agentKey`, exactly the process cache's: two providers
+ * launching the same command share one agent, hence its sessions, and two
+ * different commands share no memory. A different key here would produce either
+ * an unusable session or - worse - a delta sent to the wrong agent.
+ */
+const pools = new Map<string, SessionPool<AcpSession>>()
+
+/** The session pool of the agent process matching the settings, created if needed. */
+const poolFor = (settings: AcpProviderSettings): SessionPool<AcpSession> => {
+  const key = agentKey(settings)
+  const existing = pools.get(key)
+  if (existing !== undefined) return existing
+  const created = new SessionPool<AcpSession>()
+  pools.set(key, created)
+  return created
+}
+
+/**
+ * Closes **every** retained ACP session, all agents alike.
+ *
+ * This is the shutdown entry point: the plugin calls it on exit, and the tests at
+ * the end of a run. Without it, a stopping OpenCode server would leave sessions
+ * open on agents it kills immediately after - the agent would see
+ * `session/close` on turns still in flight, and the pool would keep orphan
+ * promises.
+ */
+export const closeAllSessions = async (): Promise<void> => {
+  const pending = [...pools.values()]
+  pools.clear()
+  await Promise.all(pending.map((pool) => pool.closeAll()))
+}
+
+/** Number of retained ACP sessions, all agents alike (tests, diagnostics). */
+export const countRetainedSessions = (): number =>
+  [...pools.values()].reduce((total, pool) => total + pool.size, 0)
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Session
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Applique une valeur d'option de session **avant** le prompt (§5.2).
+ * The working directory of an ACP session.
  *
- * ⚠️ Trois cas, trois traitements : l'agent n'a pas d'option de cette catégorie
- * (il n'a qu'un modèle, ou qu'un effort : on n'a rien à faire) ; la valeur
- * demandée est déjà la courante (on n'envoie pas un `set_config_option`
- * inutile, qui ferait un aller-retour JSON-RPC par tour) ; la valeur n'est
- * **pas** dans la liste — on échoue avec la liste sous le nez de l'utilisateur
- * plutôt que de laisser l'agent refuser une valeur muette, ou pire, d'en
- * choisir une autre.
+ * Note: it is the user's `settings.cwd` when there is one, and the server's
+ * directory otherwise (`LLMRequest` carries none). The resolved value goes into
+ * the session identity (`core/session-key.ts`): two projects must never share
+ * agent memory.
+ */
+const sessionCwd = (settings: AcpProviderSettings): string => settings.cwd ?? process.cwd()
+
+/** Opens a fresh ACP session, attached to nothing. */
+const openSessionPromise = (settings: AcpProviderSettings): Promise<AcpSession> =>
+  acquireAgent(settings).then((agent) => agent.open({ cwd: sessionCwd(settings) }))
+
+/** Opens the session, with closure guaranteed by the request's `Scope`. */
+const openSession = (settings: AcpProviderSettings): Effect.Effect<
+  AcpSession,
+  AIError,
+  Scope.Scope
+> =>
+  Effect.acquireRelease(
+    attempt(settings, () => openSessionPromise(settings)),
+    (session) =>
+      // A session that does not close leaves a turn in flight agent-side and
+      // blocks the following turns on `turnInFlight`: a close error is
+      // **never** allowed to surface.
+      Effect.promise(() => session.close()).pipe(Effect.ignore),
+  )
+
+/**
+ * What a turn holds, in both modes.
  *
- * ⚠️ `label` nomme la chose demandée (« modèle », « niveau d'effort ») : le même
- * code sert pour les deux, et un message qui dirait « le modèle "high" » serait
- * pire qu'inexploitable.
+ * Note: `fresh` and `reuse` share this shape so that `execute` is written
+ * **once**. The mode is no longer an `if` scattered through the turn mechanics;
+ * it is decided **before**, and everything after (model, effort, cancellation,
+ * frames) is identical. That is what makes the `fresh` fallback genuinely safe:
+ * there is no path "half in reuse".
+ */
+interface TurnSession {
+  readonly session: AcpSession
+  /** `true` if the session came from the pool: it only receives the delta. */
+  readonly reused: boolean
+  /** What to send: the delta when resumed, the whole history otherwise. */
+  readonly messages: readonly NormalizedMessage[]
+  /** Marks the session unusable (cancelled turn, dead agent). */
+  poison(): void
+  /** Gives the serialisation queue back, and closes the session if poisoned. */
+  release(): void
+}
+
+/** `fresh` mode (the default): one session per request, closed at end of turn. */
+const beginFresh = (
+  settings: AcpProviderSettings,
+  prepared: AcpPrepared,
+): Effect.Effect<TurnSession, AIError, Scope.Scope> =>
+  Effect.map(openSession(settings), (session) => ({
+    session,
+    reused: false,
+    messages: prepared.request.messages,
+    // The session is closed by `openSession`'s finaliser: there is nothing to
+    // release here, and "poisoning" a session that is about to die is meaningless.
+    poison: () => {},
+    release: () => {},
+  }))
+
+/** `reuse` mode: one durable session per conversation, delta on every turn. */
+const beginReuse = (
+  settings: AcpProviderSettings,
+  prepared: AcpPrepared,
+): Effect.Effect<TurnSession, AIError, Scope.Scope> =>
+  Effect.acquireRelease(
+    attempt(settings, () =>
+      poolFor(settings).acquire(
+        {
+          agent: agentKey(settings),
+          cwd: sessionCwd(settings),
+          // The model goes into the key: a session applied its own via
+          // `set_config_option` before its first turn, and its memory is worth
+          // nothing to another.
+          model: prepared.model,
+        },
+        prepared.request.messages,
+        () => openSessionPromise(settings),
+      ),
+    ),
+    (turn) => Effect.sync(turn.release),
+  ).pipe(
+    Effect.map(
+      (lease: TurnLease<AcpSession>): TurnSession => ({
+        session: lease.session,
+        reused: lease.reused,
+        messages: lease.delta,
+        // Both functions are **arrows** in the pool: detaching them changes
+        // nothing about what they close over.
+        poison: lease.poison,
+        release: lease.release,
+      }),
+    ),
+  )
+
+/**
+ * The switch: `session: "reuse"` reuses, `session: "fresh"` (and the absence of
+ * the field) opens a fresh session.
+ *
+ * Note: the default is **explicit**: only the literal `"reuse"` arms reuse. An
+ * absent, invalid, or older `settings.session` therefore falls back to `fresh` -
+ * the slowest mode, but the only one whose correctness can be guaranteed. Reuse
+ * remains a heuristic: it must only activate when it was asked for.
+ */
+const beginTurn = (
+  settings: AcpProviderSettings,
+  prepared: AcpPrepared,
+): Effect.Effect<TurnSession, AIError, Scope.Scope> =>
+  settings.session === "reuse" ? beginReuse(settings, prepared) : beginFresh(settings, prepared)
+
+/**
+ * Applies a session option value **before** the prompt.
+ *
+ * Note: three cases, three treatments. The agent has no option in that category
+ * (it has only a model, or only an effort: there is nothing to do). The
+ * requested value is already the current one (no useless `set_config_option` is
+ * sent, which would cost a JSON-RPC round trip per turn). The value is **not**
+ * in the list: it fails with the list in front of the user rather than letting
+ * the agent silently refuse a value, or worse, pick another one.
+ *
+ * Note: `label` names the thing requested ("model", "effort level"). The same
+ * code serves both, and a message reading 'model "high"' would be worse than
+ * unusable.
  */
 const applyOption = async (
   session: AcpSession,
@@ -219,7 +399,7 @@ const applyOption = async (
   await session.setOption(option.id, value)
 }
 
-/** Applique le modèle demandé (§5.2) — le `Model.ID` vient de la requête. */
+/** Applies the requested model - the `Model.ID` comes from the request. */
 const applyModel = async (
   session: AcpSession,
   model: string,
@@ -227,16 +407,17 @@ const applyModel = async (
 ): Promise<void> => applyOption(session, "model", "le modèle", model, settings)
 
 /**
- * Applique le niveau d'effort du `variant` sélectionné (§5.2).
+ * Applies the effort level of the selected variant.
  *
- * ⚠️ C'est **après** `applyModel`, jamais avant : la liste des niveaux acceptés
- * dépend du modèle courant côté agent (`none` disparaît sur `claude-sonnet-5`
- * pour `copilot --acp`), et `setOption` relaie l'état complet renvoyé par
- * l'agent — c'est donc la seule façon de valider contre la bonne liste.
+ * Note: this happens **after** `applyModel`, never before. The list of accepted
+ * levels depends on the current model agent-side (`none` disappears on
+ * `claude-sonnet-5` for `copilot --acp`), and `setOption` relays the complete
+ * state returned by the agent - so this is the only way to validate against the
+ * right list.
  *
- * ⚠️ Un effort absent des settings n'envoie rien : l'agent garde la valeur
- * qu'il annonce dans `session/new`. C'est le comportement correct pour un
- * `/model` sans variant sélectionné.
+ * Note: an effort absent from the settings sends nothing: the agent keeps the
+ * value it announces in `session/new`. That is the correct behaviour for a
+ * `/model` with no variant selected.
  */
 const applyEffort = async (
   session: AcpSession,
@@ -247,41 +428,24 @@ const applyEffort = async (
   await applyOption(session, "thought_level", "le niveau d'effort", effort, settings)
 }
 
-/** Ouvre la session, en garantie de fermeture par le `Scope` de la requête. */
-const openSession = (settings: AcpProviderSettings): Effect.Effect<
-  AcpSession,
-  AIError,
-  Scope.Scope
-> =>
-  Effect.acquireRelease(
-    Effect.flatMap(
-      attempt(settings, () => acquireAgent(settings)),
-      (agent) => attempt(settings, () => agent.open(settings.cwd === undefined ? {} : { cwd: settings.cwd })),
-    ),
-    (session) =>
-      // Une session qui ne se ferme pas laisse un tour en vol côté agent et
-      // bloque les tours suivants sur `turnInFlight` : on ne laisse **jamais**
-      // remonter une erreur de fermeture.
-      Effect.promise(() => session.close()).pipe(Effect.ignore),
-  )
 
 /**
- * Signal d'annulation du tour, armé par la fermeture du `Scope`.
+ * Turn cancellation signal, armed by the closing of the `Scope`.
  *
- * ⚠️ **Pourquoi ne pas se contenter d'abandonner l'itérateur.** Le `TransportRuntime`
- * d'`@opencode/ai` ne porte **aucun** signal d'interruption : quand OpenCode
- * abandonne le stream, le `Scope` se ferme et… rien d'autre ne se passe. Or le
- * générateur ACP est alors **suspendu** dans `await session.nextUpdate()`, et
- * l'agent, lui, continue de travailler. Renderer la main ne suffit donc pas :
- * il faut *dire* à l'agent d'arrêter, sinon il brûle un tour complet dans notre
- * dos et garde sa session occupée.
+ * Note: **why merely abandoning the iterator is not enough.** `@opencode/ai`'s
+ * `TransportRuntime` carries **no** interruption signal: when OpenCode
+ * abandons the stream, the `Scope` closes and... nothing else happens. The ACP
+ * generator is then left **suspended** in `await session.nextUpdate()` while the
+ * agent goes on working. Yielding is therefore not enough: the agent has to be
+ * *told* to stop, or it burns a full turn behind our back and keeps its session
+ * busy.
  *
- * D'où ce contrôleur : il est armé par un finalizer du **même** `Scope` que la
- * session, donc il se déclenche exactement quand la requête est interrompue.
- * Et comme les finalizers d'un `Scope` s'exécutent en **ordre inverse** de leur
- * enregistrement, celui-ci (enregistré après `openSession`) passe **avant** la
- * fermeture de la session : l'ordre sur le fil est donc
- * `session/cancel` puis `session/close`, comme le veut la spécification.
+ * Hence this controller: it is armed by a finaliser of the **same** `Scope` as
+ * the session, so it fires exactly when the request is interrupted. And since a
+ * `Scope`'s finalisers run in **reverse** registration order, this one
+ * (registered after `openSession`) runs **before** the session is closed: the
+ * wire order is therefore `session/cancel` then `session/close`, as the
+ * specification requires.
  */
 const turnCancellation = Effect.acquireRelease(
   Effect.sync(() => new AbortController()),
@@ -292,44 +456,44 @@ const turnCancellation = Effect.acquireRelease(
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trames
+// Frames
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Une trame = une chaîne JSON.
+ * A frame = a JSON string.
  *
- * ⚠️ Sérialiser, plutôt qu'émettre l'objet, n'est pas un caprice : le `Protocol`
- * décode chaque trame par `Schema.decodeUnknownEffect`, et `jsonEvent` est le seul
- * codec `string → Event` de l'API publique. Le gain — une trame inspectable dans
- * un log — vaut le round-trip JSON sur quelques centaines d'octets.
+ * Note: serialising rather than emitting the object is not a whim. The
+ * `Protocol` decodes every frame with `Schema.decodeUnknownEffect`, and
+ * `jsonEvent` is the only `string -> Event` codec in the public API. The gain - a
+ * frame inspectable in a log - is worth the JSON round trip over a few hundred
+ * bytes.
  *
- * ⚠️ `input` est normalisé à `{}` quand l'agent n'en a pas envoyé. La raison est
- * technique et sans exception possible : `JSON.stringify` **supprime** les clés
- * `undefined`, le décodeur du core exige la présence de la clé, et une
- * `tool_call_update` d'ACP qui ne fait qu'un changement de statut n'a pas
- * d'`rawInput`. Sans cette normalisation, le tour échouerait avec « Invalid
- * acp/acp-stdio stream event » — un message qui ne mentionne ni l'outil ni
- * l'agent.
+ * Note: `input` is normalised to `{}` when the agent sent none. The reason is
+ * technical and admits no exception: `JSON.stringify` **drops** `undefined` keys,
+ * the core decoder requires the key to be present, and an ACP `tool_call_update`
+ * that only changes a status has no `rawInput`. Without this normalisation the
+ * turn would fail with "Invalid acp/acp-stdio stream event" - a message
+ * mentioning neither the tool nor the agent.
  */
 const toFrame = (event: AcpEvent): string =>
   JSON.stringify(
     event.type === "tool" ? { ev: { ...event, input: event.input ?? {} } } satisfies AcpFrame : { ev: event } satisfies AcpFrame,
   )
 
-/** Traduit l'exception du générateur ACP en `AIError` (une trame avortée, pas une trame muette). */
+/** Turns an exception of the ACP generator into an `AIError` (an aborted frame, not a silent one). */
 const toFrameError = (error: unknown, settings: AcpProviderSettings): AIError => toAiError(error, settings)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Le transport
+// The transport
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** `prepare` : le corps déjà rendu par le protocole, validé avant tout spawn. */
+/** `prepare`: the body already rendered by the protocol, validated before any spawn. */
 const prepare = (input: TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepared, AIError> => {
   const body = input.body
   if (body.request.messages.length === 0) {
-    // Un tour sans message est un bug en amont, pas une réponse vide : l'agent
-    // répondrait « ACK: » et l'utilisateur verrait un tour vide se terminer sans
-    // comprendre pourquoi.
+    // A turn with no message is an upstream bug, not an empty answer: the agent
+    // would reply "ACK:" and the user would watch an empty turn end without
+    // understanding why.
     return Effect.fail(
       new AIError({
         reason: new InvalidRequestError({
@@ -342,13 +506,16 @@ const prepare = (input: TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepar
 }
 
 /**
- * `execute` : un `Scope` par requête, une session par `Scope`.
+ * `execute`: one `Scope` per request, one ACP session per conversation (`reuse`
+ * mode) or per request (`fresh` mode).
  *
- * Le `Scope` est ce qui rend l'annulation propre : quand OpenCode interrompt le
- * stream (ou que le TUI abandonne le tour), le `Scope` se ferme, le contrôleur
- * d'annulation part — donc l'agent reçoit `session/cancel` — puis la session se
- * ferme (`session/close`). C'est aussi le filet qui garantit qu'un stream oublié
- * ne laisse ni session ni processus vivant.
+ * The `Scope` is what makes cancellation clean: when OpenCode interrupts the
+ * stream (or the TUI abandons the turn), the `Scope` closes, the cancellation
+ * controller fires - so the agent receives `session/cancel` - and then the
+ * session is released. In `fresh` mode that release **closes** it; in `reuse`
+ * mode it returns it to the pool, **unless** the turn was poisoned, in which
+ * case the close happens anyway. That is exactly the net guaranteeing that a
+ * forgotten stream leaves neither a corrupted session nor a live process.
  */
 const execute = (
   prepared: AcpPrepared,
@@ -357,29 +524,59 @@ const execute = (
   settings: AcpProviderSettings,
 ): Effect.Effect<TransportExecution<string>, AIError, Scope.Scope> =>
   Effect.gen(function* () {
-    const session = yield* openSession(settings)
-    // ⚠️ Enregistré **après** `openSession` : les finalizers d'un `Scope` sont
-    // exécutés en ordre inverse, donc l'annulation part avant la fermeture.
+    // The mode is decided **before** everything else: `beginTurn` always
+    // returns a `TurnSession`, and nothing after it knows (nor should know) which
+    // mode produced the session.
+    const turn = yield* beginTurn(settings, prepared)
+    // Registered **after** `beginTurn`: a `Scope`'s finalisers run in reverse
+    // order, so cancellation fires before the release - and the poisoning before
+    // the cancellation, since it is what decides whether the session is closed.
     const cancellation = yield* turnCancellation
-    yield* attempt(settings, () => applyModel(session, prepared.model, settings))
-    yield* attempt(settings, () => applyEffort(session, settings))
+    yield* Effect.acquireRelease(
+      Effect.succeed(undefined),
+      // Interrupted turn: the session's memory can no longer be considered
+      // reliable. Marking it here - rather than closing on the spot - lets the
+      // cancellation controller send `session/cancel` **before** the close, in
+      // the order the specification requires.
+      () =>
+        Effect.sync(() => {
+          if (cancellation.signal.aborted) turn.poison()
+        }),
+    )
+    yield* attempt(settings, () => applyModel(turn.session, prepared.model, settings))
+    yield* attempt(settings, () => applyEffort(turn.session, settings))
+    // The delta replaces the transcript only if the session was **actually**
+    // resumed. In `fresh` mode, and on the first turn of a conversation, the
+    // request is sent as-is: the prompt stays byte for byte the one before.
+    const request: NormalizedRequest = turn.reused
+      ? { ...prepared.request, messages: turn.messages, resume: true }
+      : prepared.request
     const frames: Stream.Stream<string, AIError> = Stream.fromAsyncIterable(
-      // Le signal est passé **et** l'itérateur reste abandonnable : les deux
-      // chemins d'annulation (interruption du stream, signal armé par le Scope)
-      // convergent vers le même `session/cancel`, et l'agent est arrêté même si
-      // le générateur reste suspendu dans `nextUpdate()`.
-      session.prompt(prepared.request, { signal: cancellation.signal }),
-      // Une exception du générateur devient un échec de flux : mieux vaut une
-      // `AIError` qui nomme la commande qu'une trame avortée en silence.
+      // The signal is passed **and** the iterator stays abandonable: both
+      // cancellation paths (stream interruption, signal armed by the Scope)
+      // converge on the same `session/cancel`, and the agent is stopped even if
+      // the generator remains suspended in `nextUpdate()`.
+      turn.session.prompt(request, { signal: cancellation.signal }),
+      // An exception from the generator becomes a stream failure: an `AIError`
+      // naming the command is better than a frame aborted in silence.
       (error: unknown) => toFrameError(error, settings),
-    ).pipe(Stream.map(toFrame))
-    // ⚠️ Pas de `complete` : le core l'appelle après avoir consommé le flux *et*
-    // l'avoir fermé, ce qui est trop tard pour une session ACP. La fermeture est
-    // portée par le `Scope`, qui se ferme exactement au même moment.
+    ).pipe(
+      Stream.map((event) => {
+        // An `error` mid-turn leaves the agent's memory in a state whose
+        // continuity can no longer be guaranteed: the session is marked, so it is
+        // closed on release, and the next turn starts from a fresh session with
+        // the whole history.
+        if (event.type === "error") turn.poison()
+        return toFrame(event)
+      }),
+    )
+    // No `complete`: the core calls it after consuming the stream *and* closing
+    // it, which is too late for an ACP session. Closure is carried by the
+    // `Scope`, which closes at exactly the same moment.
     return { frames }
   })
 
-/** Le transport, clos sur ses settings (la route est reconstruite pour chacun). */
+/** The transport, closed over its settings (the route is rebuilt for each). */
 export const makeTransport = (
   settings: AcpProviderSettings,
 ): TransportDef<AcpBody, AcpPrepared, string> => ({
@@ -389,25 +586,25 @@ export const makeTransport = (
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// La route
+// The route
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** La route complète, prête à produire un `LanguageModel`. */
+/** The complete route, ready to produce a `LanguageModel`. */
 export const makeRoute = (settings: AcpProviderSettings): Route<AcpBody, AcpPrepared> =>
   Route.make({
     id: ROUTE_ID,
     provider: PROVIDER,
-    // Le protocole est construit **ici**, donc avec les settings : c'est ce qui
-    // permet au `systemSuffix` d'atteindre `body.from` sans état global.
+    // The protocol is built **here**, hence with the settings: that is what
+    // lets `systemSuffix` reach `body.from` with no global state.
     protocol: makeProtocol(settings),
-    // Placeholder obligatoire — voir `PLACEHOLDER_BASE_URL`.
+    // Mandatory placeholder - see `PLACEHOLDER_BASE_URL`.
     endpoint: Endpoint.path("/", { baseURL: PLACEHOLDER_BASE_URL }),
-    // stdio : ni token ni en-tête. `Auth.none` dit explicitement « pas
-    // d'authentification HTTP » au lieu de laisser croire qu'il en manque une.
+    // stdio: neither token nor header. `Auth.none` explicitly says "no HTTP
+    // authentication" rather than leaving it looking missing.
     auth: Auth.none,
     compact: undefined,
     transport: makeTransport(settings),
   })
 
-/** L'état du réducteur, réexporté pour que les tests n'importent que l'adaptateur. */
+/** The reducer's state, re-exported so the tests only import the adapter. */
 export type { ReducerState }

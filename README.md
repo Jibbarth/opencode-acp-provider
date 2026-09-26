@@ -30,6 +30,7 @@ Le projet suit les phases du `PLAN.md`. Où en est-on, sans arrondir :
 | **P3a — plugin : provider + `Model.Info`, variantes d'effort** | **fait et testé dans un vrai OpenCode** |
 | **P3b — recette réelle** : `acp/<modèle>` visible dans `/model`, un tour complet | **fait, vérifié** |
 | P4 — permissions fines, erreurs §8 | à faire (`session/cancel` fait, voir « Annulation ») |
+| R1 — sessions ACP persistantes (`PLAN.md` §10) | fait, testé (voir « Sessions persistantes ») |
 | P6 — variantes par modèle, serveurs MCP versés à l'agent | à faire |
 | P7 — adaptateur HTTP `/v1/chat/completions` | à faire |
 
@@ -62,8 +63,11 @@ en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarr
   toute autre liste se comporte comme « tout refuser » : la demande de
   permission ACP ne porte pas toujours le nom de l'outil. C'est le choix
   *fail-safe* du §7.4, pas un oubli.
-- **`session: "reuse"` n'est pas implémenté.** Le défaut est `"fresh"` : une
-  session ACP par requête (`PLAN.md` §10).
+- **`session: "reuse"` est une heuristique, pas une garantie.** Voir
+  « Sessions persistantes » : la reprise ne vaut que si l'historique reçu est
+  exactement une extension de celui déjà envoyé, et toute divergence (édition,
+  fork, `/compact`, changement de modèle) retombe sur une session neuve. Le
+  défaut reste `"fresh"`.
 - **Le rafraîchissement est déclenché, pas continu.** L'inventaire est relu au
   plus une fois par `refreshMs` (60 s par défaut), et seulement après un
   `session.idle`. Le `config_option_update` des sessions du transport n'est pas
@@ -113,6 +117,75 @@ vérifiées par `test/cancel.test.ts` :
 3. **rien ne fuit.** Un tour annulé ne rend ni la session ni l'agent
    inutilisables, et le processus n'est pas tué (il est mis en cache et réutilisé,
    c'est voulu) — mais il n'est jamais laissé sans propriétaire.
+
+⚠️ En `session: "reuse"`, un tour **annulé** abandonne en plus la session ACP
+elle-même : sa mémoire ne peut plus être considérée comme fiable (l'agent a pu
+s'arrêter au milieu d'un tour), donc elle est fermée et le tour suivant repart
+d'une session neuve avec tout l'historique. C'est le repli `fail-safe` : perdre
+une session coûte un `session/new`, reprendre une session incohérente corrompt
+le contexte de l'agent sans aucun signe.
+
+## Sessions persistantes
+
+Par défaut (`session: "fresh"`), chaque tour ouvre une session ACP neuve et
+renvoie **tout** l'historique dans le prompt. C'est correct, et c'est lent : un
+agent est stateful, et il oublie tout entre deux tours.
+
+Avec `session: "reuse"`, une **session ACP durable par conversation** est
+réutilisée d'un tour à l'autre, et **seul le delta** — les messages ajoutés
+depuis le dernier tour — est envoyé. L'agent garde ainsi sa propre mémoire, et le
+prompt cesse de grossir linéairement.
+
+```jsonc
+{ "command": "copilot", "args": ["--acp"], "session": "reuse" }
+```
+
+### Comment une conversation est reconnue
+
+`LLMRequest` ne porte **ni `sessionID` ni `cwd`** (§9bis), donc il n'existe aucun
+identifiant à opposer à une session ACP. La reconnaissance repose sur deux
+niveaux, et c'est cette séparation qui rend la reprise sûre :
+
+1. **une clé d'indexation** — `sha256(agent + cwd + modèle + premier message)`.
+   Stable malgré la croissance de la conversation : c'est elle qui permet de
+   retrouver « la session vivante de cette conversation » en O(1).
+2. **une preuve de continuité** — la session retenue a reçu `N` messages ; le tour
+   n'est repris que si l'historique reçu est **exactement** une extension de
+   ceux-là, message par message. Au moindre écart, la session est fermée et on
+   repart d'une session neuve avec tout l'historique.
+
+La clé est une **astuce d'indexation** ; la continuité est une **garantie**. La
+preuve porte sur l'historique *entier*, pas sur un préfixe : deux conversations
+qui partagent leurs N premiers messages et divergent ensuite ne peuvent donc pas
+se voler une session — c'est précisément le cas qu'une empreinte de préfixe ne
+détecterait pas.
+
+| Cas | Ce qui se passe |
+| --- | --- |
+| Tour suivant normal | Delta envoyé, session réutilisée |
+| Message **édité** | Empreinte différente à ce rang → session neuve, tout l'historique |
+| **Fork**, prépend | Idem |
+| `/compact` (historique raccourci) | Idem |
+| **Changement de modèle** | Clé différente → session neuve (une session a appliqué son modèle par `set_config_option`) |
+| `cwd` ou agent différent | Clé différente → session neuve |
+| Rejeu du même tour | Delta vide refusé → session neuve (un prompt sans message produirait un `ACK:` muet) |
+| Tour annulé, agent mort | Session **empoisonnée** → fermée, tour suivant sur une session neuve |
+| Hors LRU (8 sessions) | La moins récemment utilisée est fermée, **sauf** si elle porte un tour |
+
+⚠️ Ce que la reprise **ne** fait pas : le système, le catalogue d'outils et le
+contrat de sortie sont **renvoyés en entier à chaque tour**. Seule l'historique
+est deltaïsé — c'est l'historique qui double, pas les instructions. La section
+transcript est alors titrée « Conversation — suite », avec une ligne qui dit à
+l'agent que la suite a déjà été échangée et qu'il ne doit pas la répéter.
+
+⚠️ Deux requêtes **sur la même conversation** sont mises en file FIFO : ACP
+refuse deux `session/prompt` concurrents sur une session, et les notifications
+des deux tours seraient indiscernables. Deux conversations différentes ont deux
+clés, donc deux files : elles tournent en parallèle.
+
+Les sessions retenues sont fermées au déchargement du plugin et par
+`closeAllSessions()` ; le LRU est borné à 8 sessions par agent, et n'évince
+jamais une session qui porte un tour en cours.
 
 ## Installation
 

@@ -1,33 +1,33 @@
 #!/usr/bin/env node
 /**
- * `verify:package` — **exécuter** le paquet pour vérifier son contrat (§14, R5).
+ * `verify:package` - **run** the package to check its contract.
  *
- * Inspiration : le `prepack` de `opencode-acpx` (MIT), qui importe réellement ses
- * points d'entrée au lieu de lire leur code. L'idée est simple et redoutable :
+ * Inspired by `opencode-acpx`'s `prepack` (MIT), which really imports its entry
+ * points instead of reading their code. The idea is simple and daunting:
  *
- *   · un point d'entrée qui n'exporte pas ce qu'OpenCode appelle ne produit
- *     **aucune** erreur au chargement — le serveur importe le module, ne trouve
- *     pas `model` (ou `setup`), et le premier chat échoue ;
- *   · un champ `package` qui pointe sur un `file://` relatif, ou sur un fichier
- *     qui n'existe pas, ne produit **aucune** erreur non plus — le provider
- *     apparaît dans `/model`, et c'est au premier tour qu'on découvre un
- *     `ERR_MODULE_NOT_FOUND` sans rapport avec la configuration.
+ *   - an entry point that does not export what OpenCode calls produces **no**
+ *     error at load time - the server imports the module, does not find `model`
+ *     (or `setup`), and the first chat fails;
+ *   - a `package` field pointing at a relative `file://`, or at a file that does
+ *     not exist, produces **no** error either - the provider shows up in
+ *     `/model`, and it is on the first turn that an `ERR_MODULE_NOT_FOUND`
+ *     unrelated to the configuration is discovered.
  *
- * Ni l'un ni l'autre n'est rattrapable à l'exécution : il faut les vérifier
- * **avant** la publication, en exécutant le module.
+ * Neither is catchable at runtime: they have to be checked **before**
+ * publication, by executing the module.
  *
- * ⚠️ **Node, pas Bun**, et c'est délibéré : ce script est branché sur `prepack`,
- * donc il tourne chez qui publie le paquet, dans une CI qui n'a pas Bun
- * d'installé. Pour importer des sources TypeScript sans bundler, il lui faut
- * deux choses que Bun fait nativement et Node non :
+ * Note: **Node, not Bun**, and deliberately so: this script is wired to
+ * `prepack`, so it runs wherever the package is published, in a CI that has no
+ * Bun installed. To import TypeScript sources without a bundler, it needs two
+ * things Bun does natively and Node does not:
  *
- *   1. effacer les types — Node le fait depuis la 22.6 ;
- *   2. résoudre `./x.js` vers `./x.ts` — c'est le rôle du crochet
- *      `scripts/resolve-ts-extensions.mjs`, enregistré ci-dessous.
+ *   1. stripping types - Node has done that since 22.6;
+ *   2. resolving `./x.js` to `./x.ts` - that is the role of the
+ *      `scripts/resolve-ts-extensions.mjs` hook, registered below.
  *
- * Le contrat de `ProviderPackage.Definition` reste vérifié **à la compilation**
- * (`src/index.ts`) ; ce script ne fait que le vérifier **à l'exécution**, ce que
- * `tsc` ne peut pas faire.
+ * The `ProviderPackage.Definition` contract stays checked **at compile time**
+ * (`src/index.ts`); this script only checks it **at runtime**, which `tsc`
+ * cannot do.
  */
 
 import { existsSync } from "node:fs"
@@ -40,14 +40,15 @@ register("./resolve-ts-extensions.mjs", import.meta.url)
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 
-/** Les contrôles rattrapés, pour en rapporter **tous** les champs d'un coup. */
+/** The checks that failed, so that **all** their fields can be reported at once. */
 const failures = []
 
 /**
- * Note un échec en nommant le **champ** fautif.
+ * Records a failure, naming the offending **field**.
  *
- * ⚠️ Le nom du champ est l'essentiel du message : « contract violation » sans
- * le nom ne dit pas où regarder, et l'utilisateur ne va pas lire le script.
+ * Note: the field name is the essential part of the message. "contract
+ * violation" without it says nothing about where to look, and the user is not
+ * going to read the script.
  */
 const fail = (field, message) => {
   failures.push({ field, message })
@@ -63,15 +64,15 @@ const check = (field, ok, message) => {
   return false
 }
 
-/** Le `package.json` du paquet, lu depuis la racine du dépôt. */
+/** The package's `package.json`, read from the repository root. */
 const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"))
 
 /**
- * Le chemin d'entrée **réellement publié** d'un sous-chemin d'`exports`.
+ * The **actually published** entry path of an `exports` subpath.
  *
- * On lit `exports` et non une constante codée en dur : c'est le contrat que
- * l'hôte va résoudre, donc le seul qui compte. Un chemin valide ici mais absent
- * de `exports` ne sera jamais chargé par OpenCode.
+ * `exports` is read rather than a hardcoded constant: it is the contract the
+ * host will resolve, hence the only one that counts. A path that is valid here
+ * but absent from `exports` will never be loaded by OpenCode.
  */
 const entryOf = (subpath) => {
   const value = manifest.exports?.[subpath]
@@ -101,7 +102,7 @@ if (pluginURL === undefined || providerURL === undefined) {
   process.exit(1)
 }
 
-// ── 1. Le point d'entrée plugin exporte un `setup` ───────────────────────────
+// ── 1. The plugin entry point exports a `setup` ───────────────────────────────
 
 console.log(`\n# point d'entrée plugin : ${pluginURL}`)
 let plugin
@@ -126,7 +127,7 @@ if (plugin !== undefined) {
   )
 }
 
-// ── 2. Le point d'entrée provider exporte un `model` ─────────────────────────
+// ── 2. The provider entry point exports a `model` ────────────────────────────
 
 console.log(`\n# point d'entrée provider : ${providerURL}`)
 let provider
@@ -146,13 +147,13 @@ if (provider !== undefined) {
   )
 }
 
-// ── 3. L'URL du champ `package` est absolue, en `file://`, et existe ─────────
+// ── 3. The `package` field's URL is absolute, `file://`, and exists ──────────
 
 console.log("\n# champ Provider.Info.package")
 if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
-  // On appelle la **fonction du plugin**, avec l'URL du **module du plugin** :
-  // c'est littéralement le calcul que fait `setup`, pas une re-dérivation qui
-  // pourrait diverger de lui.
+  // The plugin's **function** is called, with the **plugin module's** URL: that
+  // is literally the computation `setup` performs, not a re-derivation that
+  // could drift from it.
   let computed
   try {
     computed = plugin.resolvePackageURL(pluginURL)
@@ -177,11 +178,11 @@ if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
         existsSync(target),
         `le fichier existe : ${target}`,
       )
-      // ⚠️ **L'instance unique.** Si l'URL calculée ne désigne pas le même fichier
-      // que `exports["."]`, l'hôte charge **deux** modules : deux `LanguageModel`,
-      // deux classes `Usage`, et le `instanceof` du §4.0 qui échoue avec un
-      // message indiscernable d'une troncature de flux. C'est le risque de
-      // « double instance » du §14 (R3), et il se voit ici, en une comparaison.
+      // Note: **the single instance.** If the computed URL does not designate the
+      // same file as `exports["."]`, the host loads **two** modules: two
+      // `LanguageModel`s, two `Usage` classes, and an `instanceof` that fails
+      // with a message indistinguishable from a stream truncation. That is the
+      // "double instance" risk, and it shows up here, in one comparison.
       check(
         "Provider.Info.package",
         target === fileURLToPath(providerURL),

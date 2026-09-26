@@ -1,23 +1,22 @@
 /**
- * Extraction de l'inventaire à partir des `configOptions` ACP — PLAN.md §5.
+ * Inventory extraction from raw ACP `configOptions`.
  *
- * Fonction **pure** : aucun import du SDK, aucun process, aucun effet de bord.
- * On travaille sur des types structurels locaux (`unknown` au départ) parce que
- * le format vient d'agents tierces et peut évoluer : tout ce qui ne ressemble
- * pas à ce qu'on attend est ignoré plutôt que de faire exploser la découverte
- * de modèles.
+ * Pure: no SDK import, no process, no side effect. Everything starts from
+ * `unknown` and is read through local structural types, because the format
+ * comes from third-party agents and may evolve. Anything that does not look
+ * like what we expect is ignored rather than blowing up model discovery.
  *
- * Relevé de référence sur `copilot --acp` :
+ * Reference capture on `copilot --acp`:
  *   [mode]          id=mode              current=#agent    values=[#agent, #plan, #autopilot]
- *   [model]         id=model             current=gpt-5.6   values=[auto, gpt-5.6, …] (20)
- *   [thought_level] id=reasoning_effort  current=medium    values=[none … max]
+ *   [model]         id=model             current=gpt-5.6   values=[auto, gpt-5.6, ...] (20)
+ *   [thought_level] id=reasoning_effort  current=medium    values=[none ... max]
  *   [permissions]   id=allow_all         current=off       values=[on, off]
  */
 
 import type { AcpMode, AcpModel, AcpOption, Inventory } from "./types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Catégories attendues
+// Expected categories
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CATEGORY_MODEL = "model"
@@ -26,9 +25,9 @@ const CATEGORY_MODE = "mode"
 const CATEGORY_PERMISSIONS = "permissions"
 
 /**
- * Repli sur l'`id` quand la catégorie est absente : c'est le cas de la plupart
- * des agents, qui n'envoient qu'un `id` (`reasoning_effort`, `allow_all`…).
- * On couvre les trois noms rencontrés dans la nature.
+ * Fallback on `id` when the category is absent, which is the case for most
+ * agents: they only send an `id` (`reasoning_effort`, `allow_all`...). These are
+ * the names encountered in the wild.
  */
 const CATEGORY_BY_ID: Readonly<Record<string, string>> = {
   model: CATEGORY_MODEL,
@@ -40,7 +39,7 @@ const CATEGORY_BY_ID: Readonly<Record<string, string>> = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lecture défensive
+// Defensive reading
 // ─────────────────────────────────────────────────────────────────────────────
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -49,20 +48,20 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined
 
-/** Une valeur de `select` avec son libellé, prête à indexer. */
+/** A `select` value with its label, ready to be indexed. */
 interface RawValue {
   value: string
   name: string
   description?: string
 }
 
-/** Un `select` ACP expose `options` : liste de valeurs **ou** liste de groupes. */
+/** An ACP `select` exposes `options`: a list of values **or** a list of groups. */
 const readSelectValues = (raw: unknown): RawValue[] => {
   if (!Array.isArray(raw)) return []
   const out: RawValue[] = []
   for (const entry of raw) {
     if (!isRecord(entry)) continue
-    // Format groupé : `{ group, name, options: [...] }` → on aplatit.
+    // Grouped shape: `{ group, name, options: [...] }` is flattened.
     if (Array.isArray(entry["options"])) {
       out.push(...readSelectValues(entry["options"]))
       continue
@@ -76,15 +75,15 @@ const readSelectValues = (raw: unknown): RawValue[] => {
   return out
 }
 
-/** `AcpOption` enrichie du libellé de chaque valeur. */
+/** An `AcpOption` enriched with each value's label. */
 interface ParsedOption {
   option: AcpOption
   values: RawValue[]
 }
 
 /**
- * Aplatit une `ConfigOption` brute. Renvoie `undefined` si elle n'est pas
- * exploitable (pas d'`id`) — un agent bruyant ne doit pas casser la découverte.
+ * Flattens a raw `ConfigOption`. Returns `undefined` when it is unusable (no
+ * `id`): a noisy agent must not break discovery.
  */
 const readOption = (raw: unknown): ParsedOption | undefined => {
   if (!isRecord(raw)) return undefined
@@ -96,8 +95,8 @@ const readOption = (raw: unknown): ParsedOption | undefined => {
   const category = asString(raw["category"]) ?? CATEGORY_BY_ID[id] ?? ""
 
   if (raw["type"] === "boolean") {
-    // Un booléen n'expose pas de liste : on synthétise `["false", "true"]` pour
-    // que `setOption` puisse round-tripper une valeur textuelle.
+    // A boolean exposes no list: synthesise `["false", "true"]` so `setOption`
+    // can round-trip a textual value.
     return {
       option: {
         id,
@@ -129,15 +128,15 @@ const readOption = (raw: unknown): ParsedOption | undefined => {
 }
 
 /**
- * Aplatit une `ConfigOption` brute en `AcpOption`, ou renvoie `undefined`.
- * Point d'entrée public pour qui veut lire une seule option.
+ * Flattens a raw `ConfigOption` into an `AcpOption`, or returns `undefined`.
+ * Public entry point for reading a single option.
  */
 export const parseOption = (raw: unknown): AcpOption | undefined => readOption(raw)?.option
 
 /**
- * Raccourcit un identifiant de mode, qui est souvent une URL
- * (`https://agentclientprotocol.com/…#agent`). On garde le fragment `#…` s'il
- * existe, sinon le dernier segment du chemin, sinon l'identifiant brut.
+ * Shortens a mode id, which is often a URL
+ * (`https://agentclientprotocol.com/...#agent`): keeps the `#...` fragment if
+ * there is one, else the last path segment, else the raw id.
  */
 export const shortenModeId = (rawId: string): string => {
   const hash = rawId.lastIndexOf("#")
@@ -149,13 +148,13 @@ export const shortenModeId = (rawId: string): string => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fonction principale
+// Main function
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * `ConfigOption[]` (brut, tel que renvoyé par l'agent) → `Inventory`.
- * Ne lève jamais : un agent qui n'envoie pas de `configOptions` donne un
- * inventaire vide, ce qui laisse le cœur fonctionner avec un modèle unique.
+ * `ConfigOption[]` (raw, as returned by the agent) to `Inventory`. Never throws:
+ * an agent sending no `configOptions` yields an empty inventory, which lets the
+ * core run on a single model.
  */
 export const parseInventory = (raw: readonly unknown[]): Inventory => {
   const parsed: ParsedOption[] = []
@@ -169,7 +168,7 @@ export const parseInventory = (raw: readonly unknown[]): Inventory => {
   const find = (category: string): ParsedOption | undefined =>
     parsed.find((p) => p.option.category === category)
 
-  // ── Modèles : un modèle OpenCode par valeur de la catégorie `model` ─────────
+  // Models: one OpenCode model per value of the `model` category.
   const modelEntry = find(CATEGORY_MODEL)
   const models: AcpModel[] = (modelEntry?.values ?? []).map((value) =>
     value.description === undefined
@@ -177,10 +176,10 @@ export const parseInventory = (raw: readonly unknown[]): Inventory => {
       : { id: value.value, name: value.name, description: value.description },
   )
 
-  // ── Niveaux d'effort : variants du modèle ────────────────────────────────
+  // Thought levels: variants of the model.
   const thoughtEntry = find(CATEGORY_THOUGHT)
 
-  // ── Modes : agents OpenCode, identifiants raccourcis ─────────────────────
+  // Modes: OpenCode agents, with shortened ids.
   const modeEntry = find(CATEGORY_MODE)
   const modes: AcpMode[] = (modeEntry?.values ?? []).map((value) => ({
     id: shortenModeId(value.value),
@@ -189,13 +188,13 @@ export const parseInventory = (raw: readonly unknown[]): Inventory => {
     ...(value.description === undefined ? {} : { description: value.description }),
   }))
 
-  // ── Permissions : épinglées à `off` en mode « cerveau brut » (§7.4) ───────
+  // Permissions, reported as-is; the default policy pins them to `off`.
   const permissionEntry = find(CATEGORY_PERMISSIONS)
 
   const currentMode = (() => {
     if (modeEntry === undefined || modeEntry.option.currentValue === "") return undefined
     const current = modeEntry.option.currentValue
-    // L'`id` court est celui qu'on expose ; l'agent reste adressé par `rawId`.
+    // The short id is what we expose; the agent is still addressed by `rawId`.
     return modes.find((m) => m.rawId === current)?.id ?? shortenModeId(current)
   })()
 

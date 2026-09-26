@@ -1,39 +1,39 @@
 /**
- * A.1 — Fidélité de la reconstruction du prompt (§14.2).
+ * Fidelity of the prompt reconstruction.
  *
- * Le tour de recette rapporte `tokens=2/24` là où l'agent, appelé directement,
- * déclare ~15 000 tokens d'entrée. Deux explications sont possibles, et le plan
- * tranche pour la seconde : « l'agent ne compte que le non mis en cache »
- * (explication bénigne) **ou** « notre reconstruction de `LLMRequest` perd le
- * system prompt, les outils ou le transcript » (bug grave, invisible sur une
- * réponse courte).
+ * A real run reports `tokens=2/24` where the agent, called directly, declares
+ * ~15 000 input tokens. Two explanations are possible: "the agent only counts
+ * what is not cached" (benign) **or** "our `LLMRequest` reconstruction loses the
+ * system prompt, the tools or the transcript" (a serious bug, invisible on a
+ * short answer).
  *
- * **Verdict, mesuré sur `copilot --acp` v1.0.88** : aucune perte. Le relevé
- * réel est `input=25811 cacheWrite=25809 nonCached=2` avec un prompt minimal, et
- * `input=36002 cacheWrite=22434 nonCached=2` avec ~4 000 tokens de plus dans le
- * système : `input` **croît** exactement de ce qu'on ajoute au prompt, et le
- * `2` ne bouge pas. C'est donc `2` qu'OpenCode affiche comme entrée — le reste
- * est du `cacheWrite`, que l'agent paie une fois et qu'OpenCode ne compte pas
- * comme tokens d'entrée du tour. Voir `describe("usage")` plus bas, qui verrouille
- * ce décodage.
+ * **Verdict, measured on `copilot --acp` v1.0.88**: no loss. The real capture is
+ * `input=25811 cacheWrite=25809 nonCached=2` with a minimal prompt, and
+ * `input=36002 cacheWrite=22434 nonCached=2` with ~4 000 more tokens in the
+ * system: `input` **grows** by exactly what is added to the prompt, and the `2`
+ * does not move. So it is `2` that OpenCode displays as input - the rest is
+ * `cacheWrite`, which the agent pays once and which OpenCode does not count as
+ * the turn's input tokens. See the `usage` describe below, which locks that
+ * decoding down.
  *
- * Ce fichier ne se contente pas du raisonnement : il apporte la **preuve**.
+ * This file does not rest on reasoning: it brings the **proof**.
  *
- * 1. `renderRequest` est **pure** : on peut comparer son résultat caractère par
- *    caractère, sans agent. C'est ce qui prouve l'ordre, l'unicité et l'absence
- *    de troncature.
- * 2. `FAKE_PROMPT_FILE` fait déposer au faux agent le prompt **exactement tel
- *    qu'il l'a reçu sur le fil** (`test/fake-acp.ts`). On rejoue une requête
- *    `LLMRequest` réaliste — système multi-parties, trois outils avec schémas
- *    JSON, transcript avec appel et résultat d'outil — et on vérifie que ce qui
- *    est arrivé à l'agent est exactement ce que `fromRequest` + `renderRequest`
- *    ont produit. Rien de plus, rien de moins.
+ * 1. `renderRequest` is **pure**: its result can be compared character by
+ *    character, with no agent. That is what proves the order, the uniqueness and
+ *    the absence of truncation.
+ * 2. `FAKE_PROMPT_FILE` makes the fake agent deposit the prompt **exactly as it
+ *    received it on the wire**. A realistic `LLMRequest` is replayed - a
+ *    multi-part system prompt, three tools with JSON schemas, a transcript with
+ *    a tool call and its result - and what reached the agent is checked to be
+ *    exactly what `fromRequest` + `renderRequest` produced. Nothing more,
+ *    nothing less.
  *
- * ⚠️ Pourquoi ne pas se contenter de l'écho « ACK: <prompt> » du faux agent,
- * déjà couvert ailleurs : cet écho passe par le **contrat de sortie** et son
- * extracteur tolérant. Un prompt tronqué au milieu d'une accolade resterait
- * « valide » côté extraction, et le test passerait sur une régression réelle.
- * Ici on compare au niveau des octets, avant toute interprétation.
+ * Note: why not settle for the fake agent's "ACK: <prompt>" echo, already
+ * covered elsewhere. That echo goes through the **output contract** and its
+ * tolerant extractor: a prompt truncated in the middle of a brace would still
+ * be "valid" on the extraction side, and the test would pass on a real
+ * regression. Here the comparison is at the byte level, before any
+ * interpretation.
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
@@ -66,7 +66,7 @@ import type { AcpProviderSettings } from "../src/settings.js"
 
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 
-/** Doit rester synchronisé avec `PROMPT_SEPARATOR` de `test/fake-acp.ts`. */
+/** Must stay in sync with `PROMPT_SEPARATOR` in `test/fake-acp.ts`. */
 const SEPARATOR = "-----8<-- PROMPT REÇU --8<-----"
 
 afterAll(async () => {
@@ -74,13 +74,13 @@ afterAll(async () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
+// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Le transport ACP ne fait jamais de HTTP : l'exécuteur doit donc mourir bruyamment. */
+/** The ACP transport never does HTTP: the executor must therefore die loudly. */
 const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
 
-/** Settings du faux agent ; échoue bruyamment si la validation se trompe. */
+/** The fake agent's settings; fails loudly if the validation goes wrong. */
 function fakeSettings(env: Record<string, string> = {}): AcpProviderSettings {
   const parsed = parseSettings({
     command: process.execPath,
@@ -93,7 +93,7 @@ function fakeSettings(env: Record<string, string> = {}): AcpProviderSettings {
   return parsed.value
 }
 
-/** Nombre d'occurrences **non chevauchantes** de `needle` dans `haystack`. */
+/** Number of **non-overlapping** occurrences of `needle` in `haystack`. */
 const countOf = (haystack: string, needle: string): number => {
   if (needle === "") return 0
   let count = 0
@@ -105,7 +105,7 @@ const countOf = (haystack: string, needle: string): number => {
   return count
 }
 
-/** Index de la première occurrence, ou une erreur nommant l'extrait manquant. */
+/** Index of the first occurrence, or an error naming the missing excerpt. */
 const indexOfOrFail = (prompt: string, needle: string, what: string): number => {
   const at = prompt.indexOf(needle)
   if (at === -1) {
@@ -115,16 +115,16 @@ const indexOfOrFail = (prompt: string, needle: string, what: string): number => 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Le jeu de données de référence
+// The reference dataset
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Trois outils aux formes volontairement différentes.
+ * Three tools with deliberately different shapes.
  *
- * ⚠️ Un `enum` dans le deuxième et un objet imbriqué dans le troisième : ce sont
- * les deux formes dont la sérialisation casse le plus facilement (un `enum` mal
- * fermé, une clé `undefined` supprimée par `JSON.stringify`), donc les deux
- * premières choses à vérifier.
+ * Note: an `enum` in the second and a nested object in the third: those are the
+ * two shapes whose serialisation breaks most easily (a badly closed `enum`, an
+ * `undefined` key dropped by `JSON.stringify`), hence the first two things to
+ * check.
  */
 const TOOLS: readonly NormalizedTool[] = [
   {
@@ -170,7 +170,7 @@ const TOOLS: readonly NormalizedTool[] = [
   },
 ]
 
-/** Les mêmes trois outils en `ToolEntry` : c'est la forme que reçoit l'adaptateur. */
+/** The same three tools as `ToolEntry`: the shape the adapter receives. */
 const TOOL_ENTRIES = [
   ToolEntry.make({
     name: "read",
@@ -189,14 +189,14 @@ const TOOL_ENTRIES = [
   }),
 ]
 
-/** Les parties système, volontairement **multiples** : c'est le cas réel d'OpenCode. */
+/** The system parts, deliberately **multiple**: OpenCode's real case. */
 const SYSTEM_PARTS = [
   "Tu es un assistant de programmation.",
   "AGENTS.md : on ne modifie jamais un fichier généré.",
   "Réponds en français, sans préambule.",
 ]
 
-/** Le transcript de référence : un appel d'outil, son résultat, puis une relance. */
+/** The reference transcript: a tool call, its result, then a follow-up. */
 const MESSAGES: readonly NormalizedMessage[] = [
   { role: "user", text: "révise le fichier config.json" },
   { role: "assistant", text: 'Appel d\'outil read : {"filePath":"config.json"}' },
@@ -205,12 +205,12 @@ const MESSAGES: readonly NormalizedMessage[] = [
 ]
 
 /**
- * La requête normalisée de référence.
+ * The reference normalised request.
  *
- * ⚠️ Elle est écrite **à la main**, indépendamment de `fromRequest` : c'est ce qui
- * donne tout son sens à l'égalité de caractères plus bas. Si l'adaptateur
- * invente, perd ou déplace quoi que ce soit, l'égalité échoue — et l'échec nomme
- * la section concernée.
+ * Note: it is written **by hand**, independently of `fromRequest`: that is what
+ * gives the character equality below all its meaning. If the adapter invents,
+ * loses or moves anything, the equality fails - and the failure names the
+ * section concerned.
  */
 const NORMALIZED: NormalizedRequest = {
   system: SYSTEM_PARTS,
@@ -219,7 +219,7 @@ const NORMALIZED: NormalizedRequest = {
   maxOutputTokens: 512,
 }
 
-/** Construit la `LLMRequest` réaliste qui sert de référence. */
+/** Builds the realistic `LLMRequest` used as the reference. */
 const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] = TOOL_ENTRIES): LLMRequest =>
   new LLMRequest({
     model: languageModel,
@@ -243,20 +243,21 @@ const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] =
   })
 
 /**
- * La requête normalisée produite par l'adaptateur, sans passer par le réseau.
+ * The normalised request produced by the adapter, without going through the
+ * network.
  *
- * ⚠️ Le `LanguageModel` n'est **pas** un paramètre : `fromRequest` n'a besoin que
- * de la requête, et l'y lier rendrait chaque appel inutilement dépendant d'une
- * route construite pour l'occasion.
+ * Note: the `LanguageModel` is **not** a parameter. `fromRequest` only needs the
+ * request, and binding it here would make every call needlessly depend on a
+ * route built for the occasion.
  */
 const normalizedOf = (request: LLMRequest): NormalizedRequest =>
   Effect.runSync(fromRequest(request, fakeSettings())).request
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Les invariants de rendu
+// The rendering invariants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Les cinq sections attendues, dans cet ordre (§7.3). */
+/** The five expected sections, in this order. */
 const SECTION_ORDER = [
   "## Rôle",
   "## Instructions système",
@@ -265,19 +266,19 @@ const SECTION_ORDER = [
   "## Format de sortie — impératif",
 ] as const
 
-/** La dernière ligne du contrat : le prompt doit s'y terminer. */
+/** The contract's last line: the prompt must end with it. */
 const LAST_RULE =
   "- N'appelle aucun outil natif : tu n'en as aucun, et toute tentative serait rejetée."
 
 /**
- * Les invariants de rendu, appliqués à n'importe quel prompt.
+ * The rendering invariants, applied to any prompt.
  *
- * Fonction **pure** : c'est ce qui permet de la faire tourner aussi bien sur le
- * rendu local que sur le prompt réellement reçu par l'agent. Une régression qui
- * perdrait le système, dupliquerait un outil ou tronquerait la fin échouerait ici.
+ * **Pure** function: that is what lets it run on the local rendering as well as
+ * on the prompt the agent actually received. A regression losing the system
+ * prompt, duplicating a tool or truncating the end fails here.
  */
 const assertIntact = (prompt: string): void => {
-  // 1. Les cinq sections sont présentes, une fois chacune, **dans l'ordre**.
+  // 1. The five sections are present, once each, **in order**.
   const positions = SECTION_ORDER.map((header) =>
     indexOfOrFail(prompt, header, `la section « ${header} »`),
   )
@@ -294,7 +295,7 @@ const assertIntact = (prompt: string): void => {
     expect(countOf(prompt, header)).toBe(1)
   }
 
-  // 2. Chaque partie système est là, **une fois**, et dans l'ordre de la requête.
+  // 2. Every system part is there, **once**, in the request's order.
   let previous = -1
   for (const part of SYSTEM_PARTS) {
     const at = indexOfOrFail(prompt, part, "une partie système")
@@ -303,8 +304,8 @@ const assertIntact = (prompt: string): void => {
     expect(countOf(prompt, part)).toBe(1)
   }
 
-  // 3. Chaque outil est là avec son **schéma sérialisé** — la preuve qu'aucun
-  //    outil n'a été réduit à son nom, ni à un `{}` de repli.
+  // 3. Every tool is there with its **serialised schema** - the proof that no
+  //    tool was reduced to its name, nor to a fallback `{}`.
   const toolsAt = positions[2] ?? 0
   const conversationAt = positions[3] ?? Number.MAX_SAFE_INTEGER
   for (const tool of TOOLS) {
@@ -315,11 +316,11 @@ const assertIntact = (prompt: string): void => {
     expect(prompt).toContain(tool.description)
     const schema = JSON.stringify(tool.schema)
     expect(prompt).toContain(schema)
-    // Le schéma est rendu **une seule** fois : ni perdu, ni dupliqué.
+    // The schema is rendered **exactly once**: neither lost nor duplicated.
     expect(countOf(prompt, schema)).toBe(1)
   }
 
-  // 4. Chaque message est là avec son rôle, une fois, dans l'ordre.
+  // 4. Every message is there with its role, once, in order.
   const lines: readonly string[] = [
     "Utilisateur : révise le fichier config.json",
     'Assistant : Appel d\'outil read : {"filePath":"config.json"}',
@@ -334,31 +335,31 @@ const assertIntact = (prompt: string): void => {
     expect(countOf(prompt, line)).toBe(1)
   }
 
-  // 5. Rien n'est tronqué : le contrat de sortie **ferme** le prompt, et sa
-  //    dernière ligne est bien la dernière du prompt.
+  // 5. Nothing is truncated: the output contract **closes** the prompt, and its
+  //    last line really is the prompt's last line.
   expect(prompt.endsWith(LAST_RULE)).toBe(true)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Le rendu pur
+// 1. The pure rendering
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("renderRequest : rien ne se perd, rien ne se duplique", () => {
+describe("renderRequest: nothing lost, nothing duplicated", () => {
   const prompt = renderRequest(NORMALIZED)
 
-  test("système, outils, transcript et contrat sont intacts et ordonnés", () => {
+  test("system, tools, transcript and contract are intact and ordered", () => {
     assertIntact(prompt)
   })
 
-  test("le rendu est déterministe", () => {
-    // Une fonction pure rend le test reproductible : deux rendus de la même
-    // requête sont identiques, caractère pour caractère.
+  test("the rendering is deterministic", () => {
+    // A pure function makes the test reproducible: two renderings of the same
+    // request are identical, character for character.
     expect(renderRequest(NORMALIZED)).toBe(prompt)
   })
 
-  test("un outil sans schéma n'invente pas de JSON", () => {
-    // Le repli doit rester **lisible** : « undefined » ou une exception
-    // construiraient un prompt qui ne dit rien à l'agent.
+  test("a tool without a schema invents no JSON", () => {
+    // The fallback must stay **readable**: "undefined" or an exception would
+    // build a prompt telling the agent nothing.
     const rendered = renderRequest({
       system: [],
       tools: [{ name: "mystere", description: "", schema: undefined }],
@@ -369,7 +370,7 @@ describe("renderRequest : rien ne se perd, rien ne se duplique", () => {
     expect(rendered).not.toContain("undefined")
   })
 
-  test("un transcript vide et un catalogue vide ne mentent pas", () => {
+  test("an empty transcript and an empty catalogue do not lie", () => {
     const rendered = renderRequest({ system: [], tools: [], messages: [] })
     expect(rendered).toContain("(aucun outil n'est disponible pour cette requête)")
     expect(rendered).toContain("(aucun message précédent)")
@@ -377,11 +378,11 @@ describe("renderRequest : rien ne se perd, rien ne se duplique", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. `fromRequest` : la reconstruction depuis la vraie `LLMRequest`
+// 2. `fromRequest`: the reconstruction from a real `LLMRequest`
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("fromRequest : la reconstruction est complète", () => {
-  test("système, outils et transcript sont intégralement repris", () => {
+describe("fromRequest: the reconstruction is complete", () => {
+  test("system, tools and transcript are taken over entirely", () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const normalized = normalizedOf(buildRequest(languageModel))
@@ -389,35 +390,35 @@ describe("fromRequest : la reconstruction est complète", () => {
     expect(normalized.system).toEqual(SYSTEM_PARTS)
     expect(normalized.messages).toEqual(MESSAGES)
     expect(normalized.maxOutputTokens).toBe(512)
-    // Les trois outils, et **seulement** eux : un outil perdu ici est un outil
-    // que l'agent ne pourra jamais proposer (§7.3).
+    // The three tools, and **only** them: a tool lost here is a tool the agent
+    // will never be able to propose.
     expect(normalized.tools.map((t) => t.name)).toEqual(["read", "grep", "edit"])
     for (const tool of normalized.tools) {
       const reference = TOOLS.find((entry) => entry.name === tool.name)
       if (reference === undefined) throw new Error(`outil inattendu : ${tool.name}`)
       expect(tool.description).toBe(reference.description)
-      // ⚠️ Le schéma est comparé **après re-sérialisation** : c'est la forme qui
-      // part sur le fil, et c'est elle que l'agent va lire.
+      // Note: the schema is compared **after re-serialisation**: that is the
+      // shape that goes on the wire, and the one the agent will read.
       expect(JSON.stringify(tool.schema)).toBe(JSON.stringify(reference.schema))
     }
-    // Un outil de premier niveau n'a pas d'namespace : en inventer un ferait
-    // porter un `namespace` vide au `tool-call`.
+    // A top-level tool has no namespace: inventing one would put an empty
+    // `namespace` on the `tool-call`.
     expect(normalized.tools.every((tool) => tool.namespace === undefined)).toBe(true)
   })
 
-  test("le prompt de bout en bout est exactement celui du rendu pur", () => {
-    // ⚠️ Le test qui tranche la question du §14.2. Si `fromRequest` perdait une
-    // partie système, un outil, un message ou son rôle, l'égalité échouerait ici.
+  test("the end-to-end prompt is exactly the one of the pure rendering", () => {
+    // Note: the test that settles the question. If `fromRequest` lost a system
+    // part, a tool, a message or its role, the equality would fail here.
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const normalized = normalizedOf(buildRequest(languageModel))
     assertIntact(renderRequest(normalized))
   })
 
-  test("une instruction opérateur en cours de conversation rejoint le système", () => {
-    // `Message.system` est une instruction d'opérateur : ACP n'a pas de champ
-    // « system », donc elle doit atterrir dans la section système, pas dans le
-    // transcript — sinon l'agent la prendrait pour une phrase d'un tour passé.
+  test("an operator instruction mid-conversation joins the system prompt", () => {
+    // A `Message.system` is an operator instruction: ACP has no "system" field,
+    // so it must land in the system section, not in the transcript - otherwise
+    // the agent would take it for a line from a past turn.
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const request = new LLMRequest({
       model: languageModel,
@@ -442,10 +443,10 @@ describe("fromRequest : la reconstruction est complète", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Le prompt **réellement reçu** par l'agent
+// 3. The prompt **actually received** by the agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("le prompt reçu sur le fil est byte pour byte le prompt rendu", () => {
+describe("the prompt received on the wire is byte for byte the rendered prompt", () => {
   const temporary: string[] = []
 
   const temporaryDirectory = async (label: string): Promise<string> => {
@@ -458,7 +459,7 @@ describe("le prompt reçu sur le fil est byte pour byte le prompt rendu", () => 
     await Promise.all(temporary.map((dir) => rm(dir, { recursive: true, force: true })))
   })
 
-  test("un tour complet ne perd ni système, ni outil, ni transcript", async () => {
+  test("a full turn loses neither system, nor tool, nor transcript", async () => {
     const promptFile = await temporaryDirectory("full")
     const settings = fakeSettings({ FAKE_PROMPT_FILE: promptFile })
     const languageModel = model("gpt-5.6-terra", settings)
@@ -477,22 +478,22 @@ describe("le prompt reçu sur le fil est byte pour byte le prompt rendu", () => 
     expect(Result.isSuccess(outcome)).toBe(true)
     if (Result.isFailure(outcome)) return
 
-    // On lit **le fichier** : c'est la seule source qui dit ce qui est vraiment
-    // arrivé au sous-processus, et non ce que notre code croit lui avoir envoyé.
+    // The **file** is read: it is the only source saying what really reached the
+    // subprocess, not what our code believes it sent.
     const raw = await readFile(promptFile, "utf8")
     expect(raw.startsWith(`${SEPARATOR}\n`)).toBe(true)
     const received = raw.slice(`${SEPARATOR}\n`.length).replace(/\n$/, "")
 
-    // 1. L'agent a reçu un prompt exploitable, section par section.
+    // 1. The agent received a usable prompt, section by section.
     assertIntact(received)
 
-    // 2. Et il est **identique** à ce que le cœur produit pour cette requête :
-    //    aucune perte, aucun ajout, aucun déplacement.
+    // 2. And it is **identical** to what the core produces for this request:
+    //    no loss, no addition, no displacement.
     const normalized = normalizedOf(buildRequest(languageModel))
     expect(received).toBe(renderRequest(normalized))
 
-    // 3. Le tour, lui, s'est bien terminé normalement : la capture ne doit pas
-    //    avoir perturbé le protocole.
+    // 3. The turn itself ended normally: the capture must not have disturbed the
+    //    protocol.
     const events: readonly LLMEvent[] = outcome.success
     expect(events.map((e) => e.type)).toEqual([
       "step-start",
@@ -504,10 +505,10 @@ describe("le prompt reçu sur le fil est byte pour byte le prompt rendu", () => 
     ])
   })
 
-  test("le prompt est plus long quand la requête est plus riche", async () => {
-    // Le contre-sens de la question « perd-il des choses ? » : un prompt qui
-    // rétrécit quand on ajoute une instruction serait la preuve d'une
-    // troncature. On mesure donc **la taille** du fichier déposé par l'agent.
+  test("the prompt is longer when the request is richer", async () => {
+    // The opposite of asking "does it lose things?": a prompt that shrinks when
+    // an instruction is added would prove a truncation. So the **size** of the
+    // file the agent deposited is measured.
     const rich = await temporaryDirectory("rich")
     const poor = await temporaryDirectory("poor")
     const extra = "Règle supplémentaire : ne cite jamais un fichier que tu n'as pas lu."
@@ -539,23 +540,23 @@ describe("le prompt reçu sur le fil est byte pour byte le prompt rendu", () => 
 
     const richPrompt = await readFile(rich, "utf8")
     const poorPrompt = await readFile(poor, "utf8")
-    // L'écart vaut exactement la ligne ajoutée : rien n'a été normalisé, rien n'a
-    // été absorbé, et le prompt n'est pas plafonné.
+    // The gap is exactly the added line: nothing was normalised, nothing was
+    // absorbed, and the prompt is not capped.
     expect(richPrompt.length).toBe(poorPrompt.length + extra.length + 2)
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Le `tokens=2/24` de la recette : le décodage des compteurs
+// 4. The `tokens=2/24` of the real run: decoding the counters
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("usage : pourquoi la recette affiche 2/24", () => {
+describe("usage: why the recipe shows 2/24", () => {
   /**
-   * Rejoue le réducteur et renvoie l'`usage` de fin de tour.
+   * Replays the reducer and returns the end-of-turn `usage`.
    *
-   * On passe par le réducteur — et non par un objet littéral — parce que c'est
-   * lui qui construit la classe `Usage` du core (§4.0), et c'est donc lui que
-   * OpenCode lit pour afficher ses compteurs.
+   * It goes through the reducer - rather than a plain object - because that is
+   * what builds the core's `Usage` class, and therefore what OpenCode reads to
+   * display its counters.
    */
   const usageOf = (input: number, output: number, cacheWrite: number, cacheRead = 0) => {
     const events: LLMEvent[] = []
@@ -573,38 +574,38 @@ describe("usage : pourquoi la recette affiche 2/24", () => {
     return finish.usage
   }
 
-  test("les ~26 000 tokens entrants ne sont pas perdus : ils sont du cacheWrite", () => {
-    // ⚠️ **Relevé réel sur `copilot --acp`** (sonde `verify-real`, §14.2) :
-    //   `input=25811 output=50 cacheWrite=25809` avec un prompt minimal, et
-    //   `input=36002 cacheWrite=22434` avec ~4 000 tokens de système en plus.
-    // Deux constats, et c'est le second qui tranche la question du §14.2 :
+  test("the ~26 000 incoming tokens are not lost: they are cacheWrite", () => {
+    // Note: **real capture on `copilot --acp`** (the `verify-real` probe):
+    //   `input=25811 output=50 cacheWrite=25809` with a minimal prompt, and
+    //   `input=36002 cacheWrite=22434` with ~4 000 more system tokens.
+    // Two findings, and the second settles the question:
     //
-    //   1. `inputTokens` porte bien la totalité des tokens reçus — il **croît**
-    //      de ce qu'on ajoute au prompt, donc le prompt n'est pas perdu ;
-    //   2. le `2` affiché par l'interface est `nonCachedInputTokens`, le reste
-    //      étant du `cacheWrite` que l'agent paie une fois.
+    //   1. `inputTokens` really does carry the whole of the received tokens - it
+    //      **grows** by what is added to the prompt, so the prompt is not lost;
+    //   2. the `2` the interface displays is `nonCachedInputTokens`, the rest
+    //      being `cacheWrite` that the agent pays once.
     const usage = usageOf(25_811, 50, 25_809)
     expect(usage?.inputTokens).toBe(25_811)
     expect(usage?.cacheWriteInputTokens).toBe(25_809)
     expect(usage?.outputTokens).toBe(50)
-    // Le « 2 » de `tokens=2/24` : l'input non mis en cache.
+    // The "2" of `tokens=2/24`: the uncached input.
     expect(usage?.nonCachedInputTokens).toBe(2)
   })
 
-  test("un agent qui ne déclare aucun cache n'est pas touché par le décodage", () => {
-    // Le calcul ne doit rien changer pour un agent qui ne fait pas de cache :
-    // c'est le cas de la plupart des agents ACP locaux.
+  test("an agent declaring no cache is unaffected by the decoding", () => {
+    // The computation must change nothing for an agent that does no caching:
+    // that is the case of most local ACP agents.
     const usage = usageOf(1_500, 24, 0)
     expect(usage?.nonCachedInputTokens).toBe(1_500)
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Outils namespacés : la seule perte trouvée (§A.1)
+// 5. Namespaced tools: the only loss found
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("outils namespacés : le nom aplati ne suffit pas à l'exécution", () => {
-  /** Deux outils dans un namespace, plus un outil de premier niveau. */
+describe("namespaced tools: the flat name is not enough to execute", () => {
+  /** Two tools in a namespace, plus one top-level tool. */
   const namespaced = [
     ToolEntry.make({ name: "read", description: "Lit", inputSchema: { type: "object" } }),
     ToolNamespace.make({
@@ -620,23 +621,23 @@ describe("outils namespacés : le nom aplati ne suffit pas à l'exécution", () 
     }),
   ]
 
-  test("le prompt demande le nom aplati, convention de @opencode/ai", () => {
+  test("the prompt asks for the flat name, per @opencode/ai's convention", () => {
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const normalized = normalizedOf(buildRequest(languageModel, namespaced))
     expect(normalized.tools.map((t) => t.name)).toEqual(["read", "search_grep"])
-    // Le point serait plus lisible, mais `@opencode/ai` refuse `.` dans les noms
-    // d'outils chez la plupart des fournisseurs (« not broadly accepted in
-    // provider tool names ») : c'est donc `_`, partout, sans exception.
+    // A dot would be more readable, but `@opencode/ai` refuses `.` in tool names
+    // with most providers ("not broadly accepted in provider tool names"), so it
+    // is `_` everywhere, without exception.
     expect(renderRequest(normalized)).toContain("### search_grep")
   })
 
-  test("le tool-call porte le namespace, sinon le runtime ne retrouve pas l'outil", () => {
-    // ⚠️ **La perte trouvée par l'enquête.** `ToolRuntime.dispatch` de
-    // `@opencode/ai` indexe son registre par `namespace.nom` ; le cœur
-    // d'OpenCode fait de même (`tools.set(nom_avec_points, outil)`). Un
-    // `tool-call` qui ne porterait que `search_grep` échouerait avec « No tool
-    // named "search_grep" is currently available » — l'appel serait perdu, et
-    // « l'agent aurait **proposé** un outil inexistant »
+  test("the tool-call carries the namespace, otherwise the runtime cannot find the tool", () => {
+    // Note: **the loss the investigation found.** `@opencode/ai`'s
+    // `ToolRuntime.dispatch` indexes its registry by `namespace.name`, and
+    // OpenCode's core does the same (`tools.set(dotted_name, tool)`). A
+    // `tool-call` carrying only `search_grep` would fail with "No tool named
+    // "search_grep" is currently available" - the call would be lost, and "the
+    // agent **proposed** a non-existent tool" would be the only visible sign.
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const normalized = normalizedOf(buildRequest(languageModel, namespaced))
 
@@ -654,13 +655,13 @@ describe("outils namespacés : le nom aplati ne suffit pas à l'exécution", () 
     const call = events.find((e) => e.type === "tool-call")
     expect(call?.name).toBe("search_grep")
     expect(call?.namespace).toBe("search")
-    // Et `halt` reste sans effet : le `tool-call` est déjà sorti, exactement une fois.
+    // And `halt` remains a no-op: the `tool-call` already went out, exactly once.
     expect(halt(state).events).toEqual([])
   })
 
-  test("un outil de premier niveau n'invente pas de namespace", () => {
-    // Sans ce test, ajouter `namespace: ""` par défaut ferait porter un namespace
-    // vide au `tool-call` — et le runtime chercherait `"." + nom`.
+  test("a top-level tool invents no namespace", () => {
+    // Without this test, defaulting `namespace` to `""` would put an empty
+    // namespace on the `tool-call`, and the runtime would look up `"." + name`.
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const normalized = normalizedOf(buildRequest(languageModel, namespaced))
 

@@ -1,24 +1,22 @@
 /**
- * A.5 — Annulation : `session/cancel` de bout en bout (§14, R6 / §8).
+ * Cancellation: `session/cancel` end to end.
  *
- * C'est la condition de « `Esc` interrompt proprement ». Ce qui la rend
- * difficile à prouver, c'est qu'un retour rapide ne prouve **rien** : un client
- * qui cesse simplement d'attendre rend la main tout aussi vite, tout en
- * laissant l'agent travailler dans notre dos jusqu'au bout du tour — et en
- * gardant sa session occupée pour le tour suivant.
+ * This is the condition for "Esc interrupts cleanly". What makes it hard to
+ * prove is that a fast return proves **nothing**: a client that simply stops
+ * waiting returns just as fast, while leaving the agent working behind our back
+ * until the end of the turn - and keeping its session busy for the next one.
  *
- * Chaque test ci-dessous porte donc **deux** assertions distinctes :
+ * Each test below therefore carries **two** distinct assertions:
  *
- *   1. le temps — l'interruption se termine en quelques centaines de ms, pas à la
- *      durée du tour ;
- *   2. la **preuve** — `FAKE_CANCEL_FILE` note chaque `session/cancel` réellement
- *      reçu par l'agent, donc on ne peut pas passer en abandonnant en silence.
+ *   1. the timing - the interruption ends within a few hundred ms, not after the
+ *      full turn;
+ *   2. the **proof** - `FAKE_CANCEL_FILE` records every `session/cancel` the
+ *      agent actually received, so silently abandoning cannot pass.
  *
- * ⚠️ Ce que la voie d'annulation n'est **pas** : un `finish`. Une annulation
- * n'est pas un tour réussi, et émettre un événement terminal après que le
- * consumer a abandonné produirait un `finish` orphelin — exactement la
- * troncature que `@opencode/ai` signale par « The provider response ended
- * unexpectedly. » (§4.0).
+ * Note: what the cancellation path is **not**: a `finish`. A cancellation is not
+ * a successful turn, and emitting a terminal event after the consumer abandoned
+ * would produce an orphan `finish` - exactly the truncation `@opencode/ai`
+ * reports as "The provider response ended unexpectedly."
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
@@ -47,7 +45,7 @@ import type { AcpProviderSettings } from "../src/settings.js"
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 
-/** Le transport ACP ne fait jamais de HTTP : l'exécuteur doit mourir bruyamment. */
+/** The ACP transport never does HTTP: the executor must die loudly. */
 const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
 
 afterAll(async () => {
@@ -55,7 +53,7 @@ afterAll(async () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
+// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
 const temporary: string[] = []
@@ -91,14 +89,14 @@ const requestFor = (languageModel: LanguageModel, text: string): LLMRequest =>
     generation: GenerationOptions.make({ maxTokens: 100 }),
   })
 
-/** Les `session/cancel` reçus par l'agent, avec leur horodatage. */
+/** The `session/cancel` the agent received, with their timestamps. */
 const cancelsOf = async (file: string): Promise<number[]> =>
   (await readFile(file, "utf8"))
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => Number(line.split(" ")[0] ?? "NaN"))
 
-/** Attend qu'une lecture atteigne une taille, ou le délai. */
+/** Waits until a read reaches a size, or the delay elapses. */
 const waitFor = async <A>(read: () => Promise<A>, size: (value: A) => number, expected: number, timeoutMs = 5_000): Promise<A> => {
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -110,14 +108,14 @@ const waitFor = async <A>(read: () => Promise<A>, size: (value: A) => number, ex
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Les tests
+// The tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("annulation d'un tour lent, à travers la vraie route", () => {
-  test("interrompre le stream annule le tour en quelques centaines de ms, et l'agent le voit", async () => {
-    // `TICK` : un `thought` immédiat, puis **30 s** de latence interruptible.
-    // C'est le `thought` qui reste streamé en direct (le texte est tamponné
-    // jusqu'au `done`), donc c'est lui qu'on attend — puis on coupe.
+describe("cancelling a slow turn, through the real route", () => {
+  test("interrupting the stream cancels the turn within a few hundred ms, and the agent sees it", async () => {
+    // `TICK`: an immediate `thought`, then **30 s** of interruptible latency.
+    // The `thought` is what keeps streaming live (the text is buffered until the
+    // `done`), so it is what we wait for - and then we cut.
     const directory = await temporaryDirectory("slow")
     const cancelFile = join(directory, "cancels.log")
     const settings = settingsOf({ FAKE_SLOW_MS: "30000", FAKE_CANCEL_FILE: cancelFile })
@@ -131,8 +129,8 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
           const route = languageModel.route
           const body = yield* route.body.from(request)
           const prepared: AcpPrepared = yield* route.prepareTransport(body, request)
-          // `Stream.take(2)` : on consomme le `step-start` et le `reasoning-start`,
-          // puis on abandonne — c'est exactement ce que fait le TUI sur `Esc`.
+          // `Stream.take(2)`: the `step-start` and the `reasoning-start` are
+          // consumed, then we abandon - exactly what the TUI does on `Esc`.
           return yield* Stream.runCollect(
             route.streamPrepared(prepared, request, NO_HTTP).pipe(Stream.take(2)),
           )
@@ -141,11 +139,12 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
     )
     const elapsed = Date.now() - started
 
-    // 1. Le temps. 30 s de latence côté agent : sans annulation, ce test durait
-    //    30 s. On tolère 2 s pour absorber le faux départ et la fermeture.
+    // 1. The timing. 30 s of agent-side latency: without cancellation this test
+    //    would take 30 s. 2 s is allowed to absorb the fake's startup and the
+    //    shutdown.
     expect(elapsed).toBeLessThan(2_000)
 
-    // 2. Le flux s'arrête proprement, sans événement terminal orphelin.
+    // 2. The stream stops cleanly, with no orphan terminal event.
     expect(Result.isSuccess(outcome)).toBe(true)
     if (Result.isFailure(outcome)) return
     const seen: readonly LLMEvent[] = outcome.success
@@ -153,23 +152,23 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
     expect(seen.some((event) => event.type === "finish")).toBe(false)
     expect(seen.some((event) => event.type === "provider-error")).toBe(false)
 
-    // 3. Et surtout : `session/cancel` est **parti**. C'est l'assertion qui
-    //    distingue une annulation d'un abandon.
+    // 3. And above all: `session/cancel` **went out**. That is the assertion
+    //    telling a cancellation apart from an abandonment.
     const cancels = await waitFor(async () => cancelsOf(cancelFile), (c: number[]) => c.length, 1)
     expect(cancels.length).toBeGreaterThanOrEqual(1)
-    // L'annulation est postérieure au début du tour, évidemment.
+    // The cancellation is after the start of the turn, obviously.
     expect(cancels[0] ?? 0).toBeGreaterThanOrEqual(started)
   })
 
-  test("un tour annulé ne rend pas l'agent inutilisable", async () => {
-    // ⚠️ L'annulation ne doit pas seulement être rapide : elle doit être
-    // **propre**. Une session ou un agent empoisonnés par l'annulation ferait
-    // échouer tous les tours suivants, ce qui est pire qu'un tour non annulé.
+  test("a cancelled turn does not render the agent unusable", async () => {
+    // Note: a cancellation must not only be fast, it must be **clean**. A
+    // session or an agent poisoned by the cancellation would make every
+    // following turn fail, which is worse than an uncancelled turn.
     const directory = await temporaryDirectory("reuse")
     const cancelFile = join(directory, "cancels.log")
-    // 1 500 ms de latence : assez pour que l'interruption soit **mesurable**
-    // (sans elle, le tour prendrait 1 500 ms au lieu de ~300), assez court pour
-    // que le tour nominal de vérification tienne dans le délai du test.
+    // 1500 ms of latency: enough for the interruption to be **measurable**
+    // (without it the turn would take 1500 ms instead of ~300), short enough
+    // for the nominal verification turn to fit in the test's timeout.
     const settings = settingsOf({ FAKE_SLOW_MS: "1500", FAKE_CANCEL_FILE: cancelFile })
     const languageModel = model("gpt-5.6-terra", settings)
 
@@ -192,13 +191,13 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
     const started = Date.now()
     await interrupt("TICK")
     await interrupt("TICK")
-    // Chaque interruption a bien coûté la latence du tour, et pas plus.
+    // Each interruption did cost the turn's latency, and no more.
     expect(Date.now() - started).toBeLessThan(3_000)
     const cancels = await waitFor(async () => cancelsOf(cancelFile), (c: number[]) => c.length, 2)
     expect(cancels.length).toBeGreaterThanOrEqual(2)
 
-    // Le même agent sert ensuite un tour normal : le cache de processus n'a pas
-    // été corrompu, et la latence du faux ne gêne pas un tour sans `TICK`.
+    // The same agent then serves a normal turn: the process cache was not
+    // corrupted, and the fake's latency does not hinder a turn without `TICK`.
     const request = requestFor(languageModel, "PING")
     const outcome = await Effect.runPromise(
       Effect.scoped(
@@ -219,10 +218,10 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
     expect(text).toBe("PONG")
   }, 15_000)
 
-  test("un tour nominal n'envoie aucun `session/cancel`", async () => {
-    // Le contre-sens : armer l'annulation dès l'ouverture, ou trop tôt,
-    // produirait des annulations sur des tours parfaitement terminés — et
-    // l'agent s'interromprait lui-même en cours de route.
+  test("a nominal turn sends no `session/cancel`", async () => {
+    // The opposite mistake: arming the cancellation at open time, or too early,
+    // would produce cancellations on perfectly finished turns - and the agent
+    // would interrupt itself mid-way.
     const directory = await temporaryDirectory("nominal")
     const cancelFile = join(directory, "cancels.log")
     const settings = settingsOf({ FAKE_SLOW_MS: "50", FAKE_CANCEL_FILE: cancelFile })
@@ -249,19 +248,19 @@ describe("annulation d'un tour lent, à travers la vraie route", () => {
       "step-finish",
       "finish",
     ])
-    // Le fichier n'existe que si une annulation a été reçue : on donne un tour
-    // de délai au faux pour cela, puis on vérifie qu'il est **absent**.
+    // The file only exists if a cancellation was received: the fake is given a
+    // moment for that, and it is then verified to be **absent**.
     await Bun.sleep(200)
     const cancels = await cancelsOf(cancelFile).catch(() => [])
     expect(cancels).toEqual([])
   })
 })
 
-describe("annulation d'un tour lent, à travers la session ACP", () => {
-  test("un `AbortSignal` atteint la session, sans passer par la route", async () => {
-    // Le niveau en dessous du transport : c'est là qu'est le `finally` qui envoie
-    // `session/cancel`, et c'est donc le niveau où une régression du câblage
-    // se verrait en premier.
+describe("cancelling a slow turn, through the ACP session", () => {
+  test("an `AbortSignal` reaches the session, bypassing the route", async () => {
+    // The level below the transport: that is where the `finally` sending
+    // `session/cancel` lives, and therefore the level where a wiring regression
+    // shows up first.
     const directory = await temporaryDirectory("session")
     const cancelFile = join(directory, "cancels.log")
     const { createAcpAgent } = await import("../src/acp/agent.js")
@@ -284,7 +283,7 @@ describe("annulation d'un tour lent, à travers la session ACP", () => {
         if (event.type === "thought") controller.abort()
       }
       expect(Date.now() - started).toBeLessThan(2_000)
-      // Le tour se termine par un `done` explicite : jamais par une troncature.
+      // The turn ends with an explicit `done`: never with a truncation.
       expect(events.at(-1)).toEqual({ type: "done", stopReason: "cancelled" })
       const cancels = await waitFor(async () => cancelsOf(cancelFile), (c: number[]) => c.length, 1)
       expect(cancels.length).toBeGreaterThanOrEqual(1)

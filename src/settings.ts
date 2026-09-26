@@ -1,111 +1,110 @@
 /**
- * Settings du provider — PLAN.md §3.2.
+ * Provider settings.
  *
- * ⚠️ Ces données sont **plates et sérialisables** : OpenCode les lit dans
- * `providers.<id>.settings` (ou `models.<id>.settings`) et les passe telles
- * quelles à `model(modelID, settings)`. Il n'y a donc **aucun callback**
- * possible ici — c'est la contrainte qui a écarté l'hôte d'`effect` comme
- * source de configuration (§3.2), et la raison pour laquelle la politique de
- * permissions est une *valeur* (`allowedTools`) et non une fonction.
+ * Note: this data is **flat and serialisable**. OpenCode reads it in
+ * `providers.<id>.settings` (or `models.<id>.settings`) and hands it as-is to
+ * `model(modelID, settings)`. No **callback** is therefore possible here - which
+ * is why the permission policy is a *value* (`allowedTools`) rather than a
+ * function.
  *
- * La validation est séparée de l'utilisation : `parseSettings` est une fonction
- * **pure** (aucun process, aucun effet), testable seule, qui renvoie soit les
- * settings normalisées, soit un message d'erreur en français. C'est
- * `src/index.ts` qui décide du sort : un `ProviderConfigurationError`, ce qui est
- * exactement le contrat d'`@opencode/ai` pour une erreur de configuration
- * survenue **avant** toute requête.
+ * Validation is kept apart from use: `parseSettings` is a **pure** function (no
+ * process, no effect), testable on its own, returning either the normalised
+ * settings or an error message in French. `src/index.ts` decides what to do with
+ * it: a `ProviderConfigurationError`, which is exactly `@opencode/ai`'s contract
+ * for a configuration error occurring **before** any request.
  */
 
-/** Redirection du stderr de l'agent ACP. */
+/** Redirection of the ACP agent's stderr. */
 export type StderrMode = "inherit" | "ignore" | "pipe"
 
-/** Stratégie de session ACP par requête (PLAN.md §10). */
+/** ACP session strategy per request. */
 export type SessionMode = "reuse" | "fresh"
 
 /**
- * Settings validées et normalisées.
+ * Validated, normalised settings.
  *
- * ⚠️ C'est un alias de type et **pas** une interface : un alias de type sur un
- * littéral objet reçoit un *index signature* implicite, ce qui le rend
- * assignable à `ProviderPackage.Settings` (`Readonly<Record<string, unknown>>`).
- * Une interface n'en aurait pas, et le contrat du §3.1 ne serait pas
- * vérifiable — donc pas respecté.
+ * Note: this is a type alias and **not** an interface. A type alias over an
+ * object literal gets an implicit *index signature*, which makes it assignable
+ * to `ProviderPackage.Settings` (`Readonly<Record<string, unknown>>`). An
+ * interface would not, and the contract would then be unverifiable, and
+ * therefore unmet.
  *
- * ⚠️ Les champs `undefined` sont **conservés** plutôt que remplacés par une
- * valeur par défaut : seule la clé d'identité du process (§ `agentKey`) et la
- * politique de permissions ont besoin d'un défaut, et les deux sont calculés au
- * point d'usage. Dupliquer les défauts ici les ferait diverger.
+ * Note: `undefined` fields are **kept** rather than replaced by a default. Only
+ * the process identity key (see `agentKey`) and the permission policy need a
+ * default, and both are computed at the point of use. Duplicating the defaults
+ * here would let them drift apart.
  */
 export type AcpProviderSettings = Readonly<{
-  /** La commande à lancer, p. ex. `"copilot"` ou `"npx"`. */
+  /** The command to launch, e.g. `"copilot"` or `"npx"`. */
   command: string
-  /** Arguments de la commande, p. ex. `["--acp"]`. */
+  /** Command arguments, e.g. `["--acp"]`. */
   args: readonly string[] | undefined
   /**
-   * Répertoire de travail de l'agent.
+   * The agent's working directory.
    *
-   * ⚠️ C'est le **seul** moyen d'en savoir un (§9bis) : `LLMRequest` ne porte
-   * ni `sessionID` ni `cwd`, et le registre de providers est global alors que le
-   * répertoire d'OpenCode est par projet.
+   * Note: this is the **only** way to know one. `LLMRequest` carries neither
+   * `sessionID` nor `cwd`, and the provider registry is global whereas
+   * OpenCode's directory is per project.
    */
   cwd: string | undefined
-  /** Variables d'environnement **ajoutées** à celles du serveur OpenCode. */
+  /** Environment variables **added** to those of the OpenCode server. */
   env: Readonly<Record<string, string>> | undefined
-  /** Que faire du stderr de l'agent (défaut : `"pipe"`, voir `parseSettings`). */
+  /** What to do with the agent's stderr (default `"pipe"`, see `parseSettings`). */
   stderr: StderrMode | undefined
   /**
-   * `session: "fresh"` (défaut) ouvre une session ACP par requête et renvoie
-   * l'historique complet ; `"reuse"` est une heuristique de cache par préfixe de
-   * conversation, décrite au §10 mais **non implémentée** en P1.
+   * `"fresh"` (the default) opens one ACP session per request and sends the
+   * whole history; `"reuse"` keeps one session per conversation and sends only
+   * the delta, a heuristic that can be wrong and is therefore verified message
+   * by message before being trusted (see `core/session-key.ts`).
    */
   session: SessionMode | undefined
   /**
-   * Texte ajouté **après** le système d'OpenCode (AGENTS.md, skills…).
+   * Text added **after** OpenCode's system prompt (AGENTS.md, skills...).
    *
-   * C'est ici que viendra le contrat de sortie JSON du mécanisme §7.3 en P2b :
-   * il doit être **après** le système, pour que l'agent ne puisse pas le traiter
-   * comme un simple contexte à reformuler.
+   * The JSON output contract is rendered here, and it must come **after** the
+   * system prompt so the agent cannot treat it as mere context to rephrase.
    */
   systemSuffix: string | undefined
   /**
-   * Outils **natifs** de l'agent ACP qu'on l'autorise à utiliser.
+   * The agent's **native** tools it is allowed to use.
    *
-   * - absent ou `[]` : mode « cerveau brut » — on refuse aussi les permissions
-   *   demandées, l'agent ne peut donc rien faire de destructif (§7.4) ;
-   * - `["*"]` : on accepte tout ce que l'agent propose ;
-   * - sinon : liste blanche de noms d'outils, **non applicable en P1** — la
-   *   demande de permission ACP ne porte pas toujours le nom de l'outil, donc une
-   *   liste blanche dégrade en « tout refuser » (voir `policyOf` dans
+   * - absent or `[]`: everything the agent asks for is refused, so it can do
+   *   nothing destructive;
+   * - `["*"]`: everything the agent proposes is accepted;
+   * - otherwise: a whitelist of tool names, which currently **degrades to
+   *   "refuse everything"** - an ACP permission request does not always carry the
+   *   tool name, so a whitelist cannot be honoured (see `policyOf` in
    *   `adapters/opencode-transport.ts`).
    */
   allowedTools: readonly string[] | undefined
   /**
-   * Niveau d'effort demandé — la valeur d'un `variant` de `Model.Info` (§5.2).
+   * The requested effort level - the value of a `Model.Info` variant.
    *
-   * ⚠️ Elle ne vient **pas** de l'utilisateur au clavier mais d'un `variant`
-   * publié par le plugin : `{ settings: { effort: "high" } }`, fusionné par
-   * OpenCode dans les settings du provider. L'adaptateur la traduit en
-   * `set_config_option("reasoning_effort", …)` **avant** le prompt, et **après**
-   * le modèle : l'agent change la liste des niveaux qu'il accepte en changeant
-   * de modèle (`none` n'existe pas pour `claude-sonnet-5` sur `copilot --acp`).
+   * Note: it does **not** come from the user typing, but from a variant published
+   * by the plugin: `{ settings: { effort: "high" } }`, merged by OpenCode into the
+   * provider settings. The adapter turns it into
+   * `set_config_option("reasoning_effort", ...)` **before** the prompt, and
+   * **after** the model: the agent changes the list of levels it accepts when the
+   * model changes (`none` does not exist for `claude-sonnet-5` on
+   * `copilot --acp`).
    *
-   * Absent : aucun `set_config_option` n'est envoyé, et l'agent applique la
-   * valeur qu'il annonce lui-même dans `session/new`.
+   * Absent: no `set_config_option` is sent, and the agent applies the value it
+   * announces itself in `session/new`.
    */
   effort: string | undefined
 }>
 
 /**
- * Les settings **tels qu'OpenCode les livre** : JSON brut, non validé.
+ * The settings **as OpenCode hands them over**: raw, unvalidated JSON.
  *
- * ⚠️ Tout est facultatif, y compris `command` : c'est `parseSettings` qui décide
- * si c'est acceptable, et son message d'erreur est le seul guide possible pour
- * l'utilisateur. Typer l'entrée avec `command: string` serait un mensonge qui
- * déplacerait l'erreur de la validation vers un `TypeError` en amont.
+ * Note: everything is optional, `command` included. `parseSettings` decides
+ * whether that is acceptable, and its error message is the only possible guide
+ * for the user. Typing the input with `command: string` would be a lie that
+ * moves the error from validation to a `TypeError` further upstream.
  */
 export type RawProviderSettings = Partial<AcpProviderSettings> & Readonly<Record<string, unknown>>
 
-/** Résultat de `parseSettings` : jamais une exception, toujours un diagnostic. */
+/** Result of `parseSettings`: never an exception, always a diagnostic. */
 export type SettingsResult =
   | { readonly ok: true; readonly value: AcpProviderSettings }
   | { readonly ok: false; readonly message: string }
@@ -113,7 +112,7 @@ export type SettingsResult =
 const isRecord = (input: unknown): input is Record<string, unknown> =>
   typeof input === "object" && input !== null && !Array.isArray(input)
 
-/** Message d'erreur homogène, avec le chemin du champ fautif. */
+/** Uniform error message, carrying the path of the offending field. */
 const invalid = (path: string, expected: string): { readonly ok: false; readonly message: string } => ({
   ok: false,
   message: `settings.${path} ${expected}`,
@@ -136,9 +135,9 @@ const optionalStringArray = (
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
   if (!Array.isArray(raw)) return invalid(key, "doit être un tableau de chaînes")
-  // On **recopie** plutôt que de rendre le tableau reçu : `Array.isArray` ne
-  // prouve rien sur le type de ses éléments, et une copie construite ici est
-  // nécessairement un `string[]` — sans avoir à mentir sur le typage.
+  // **Copy** rather than returning the received array: `Array.isArray` proves
+  // nothing about its element type, and a copy built here is necessarily a
+  // `string[]`, with no need to lie about the typing.
   const values: string[] = []
   for (const item of raw) {
     if (typeof item !== "string") return invalid(key, "doit être un tableau de chaînes")
@@ -170,8 +169,8 @@ const optionalEnum = <T extends string>(
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
   if (typeof raw !== "string") return invalid(key, `doit valoir ${allowed.map((v) => `"${v}"`).join(", ")}`)
-  // On relit la valeur dans la liste plutôt que de l'admettre telle quelle :
-  // c'est la liste qui fait autorité, donc le type est correct par construction.
+  // The value is looked up in the list rather than admitted as-is: the list is
+  // authoritative, so the type is correct by construction.
   const found = allowed.find((value) => value === raw)
   if (found === undefined) {
     return invalid(key, `doit valoir ${allowed.map((v) => `"${v}"`).join(", ")}`)
@@ -180,15 +179,14 @@ const optionalEnum = <T extends string>(
 }
 
 /**
- * Valide les settings brutes d'un provider.
+ * Validates a provider's raw settings.
  *
- * ⚠️ Les clés **inconnues sont ignorées**, pas rejetées. `ProviderPackage.Settings`
- * réserve déjà `baseURL`/`headers`/`body` à d'autres usages, et OpenCode peut
- * ajouter les siennes ; faire tomber le provider entier parce qu'une clé
- * supplémentaire traîne serait un mode de panne bien pire qu'une clé ignorée.
- * En revanche un champ connu **mal typé** est une erreur explicite : c'est
- * presque toujours une faute de frappe (`"argz"`, `"cwd": 12`) qu'il vaut mieux
- * dire que masquer.
+ * Note: **unknown keys are ignored**, not rejected. `ProviderPackage.Settings`
+ * already reserves `baseURL`/`headers`/`body` for other uses, and OpenCode may
+ * add its own; bringing the whole provider down because an extra key is lying
+ * around is a far worse failure mode than an ignored key. A known field with a
+ * **wrong type**, on the other hand, is an explicit error: it is almost always a
+ * typo (`"argz"`, `"cwd": 12`) that is better reported than hidden.
  */
 export const parseSettings = (input: unknown): SettingsResult => {
   if (!isRecord(input)) {
@@ -245,20 +243,19 @@ export const parseSettings = (input: unknown): SettingsResult => {
 }
 
 /**
- * Identité du **process** agent, pour le cache module de `opencode-transport`.
+ * Identity of the agent **process**, for `opencode-transport`'s module cache.
  *
- * ⚠️ La clé ne contient pas que `command`/`args`/`cwd`/`env` : `stderr` et
- * `allowedTools` changeient le **comportement du client ACP** (redirection des
- * logs, politique de permissions enregistrée dans le handler
- * `session/request_permission`). Les omettre partagerait un agent entre deux
- * providers configurés différemment — et le second hériterait de la politique du
- * premier, ce qui en mode « cerveau brut » (§7.4) reviendrait à **autoriser des
- * écritures que l'utilisateur a interdites**.
+ * Note: the key holds more than `command`/`args`/`cwd`/`env`. `stderr` and
+ * `allowedTools` change the **behaviour of the ACP client** (log redirection,
+ * permission policy registered in the `session/request_permission` handler).
+ * Leaving them out would share one agent between two differently configured
+ * providers, and the second would inherit the first's policy - which, in the
+ * default deny-all mode, means **allowing writes the user forbade**.
  *
- * À l'inverse `session` et `systemSuffix` n'y sont pas : ils ne touchent pas le
- * process, seulement la requête (`AcpPrepared`). `effort` non plus, pour la même
- * raison : c'est une valeur de `variant` appliquée par `set_config_option` sur la
- * session du tour, pas une propriété de l'agent.
+ * Conversely `session` and `systemSuffix` are not in it: they do not touch the
+ * process, only the request (`AcpPrepared`). Neither is `effort`, for the same
+ * reason: it is a variant value applied by `set_config_option` on the turn's
+ * session, not a property of the agent.
  */
 export const agentKey = (settings: AcpProviderSettings): string =>
   JSON.stringify([
@@ -270,10 +267,10 @@ export const agentKey = (settings: AcpProviderSettings): string =>
     settings.allowedTools ?? null,
   ])
 
-/** `true` si la liste blanche d'outils vaut « tout est permis ». */
+/** `true` if the tool whitelist means "everything is allowed". */
 export const allowsEveryTool = (settings: AcpProviderSettings): boolean =>
   settings.allowedTools?.includes("*") === true
 
-/** Étiquette lisible d'un agent, présente dans **tous** les messages d'erreur. */
+/** A readable agent label, present in **every** error message. */
 export const agentLabel = (settings: AcpProviderSettings): string =>
   [settings.command, ...(settings.args ?? [])].join(" ").trim()

@@ -1,18 +1,18 @@
 /**
- * Tests de la phase P1 : l'adaptateur OpenCode.
+ * The OpenCode adapter.
  *
- * Trois niveaux, du plus interne au plus externe :
+ * Three levels, from the innermost to the outermost:
  *
- * 1. **le réducteur**, en pur (§4.0) — les cas qu'un vrai agent produit trop
- *    rarement pour les déclencher à volonté (un delta sans start, un agent mort
- *    au milieu d'un bloc) sont ici des appels de fonction ;
- * 2. **les settings** — un JSON invalide doit produire un message qui nomme le
- *    champ, pas un `TypeError` dans le serveur d'OpenCode ;
- * 3. **le bout-en-bout** — la vraie route, construite par `model(...)`, contre
- *    `test/fake-acp.ts` lancé comme un vrai sous-processus. C'est le seul niveau
- *    qui prouve que la séquence `LLMEvent` est acceptée par le pipeline réel :
- *    une séquence mal formée échoue avec « The provider response ended
- *    unexpectedly. », indiscernable d'une troncature.
+ * 1. **the reducer**, pure - the cases a real agent produces too rarely to
+ *    trigger on demand (a delta without a start, an agent dying mid-block) are
+ *    here plain function calls;
+ * 2. **the settings** - invalid JSON must produce a message naming the field,
+ *    not a `TypeError` inside the OpenCode server;
+ * 3. **end to end** - the real route, built by `model(...)`, against
+ *    `test/fake-acp.ts` spawned as a real subprocess. This is the only level
+ *    that proves the `LLMEvent` sequence is accepted by the real pipeline: a
+ *    malformed sequence fails with "The provider response ended
+ *    unexpectedly.", indistinguishable from a truncation.
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
@@ -46,16 +46,16 @@ import type { AcpProviderSettings } from "../src/settings.js"
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 
 afterAll(async () => {
-  // Les agents ACP sont mis en cache au niveau module : sans cette fermeture,
-  // `bun test` tue le process de test en laissant des enfants vivants.
+  // ACP agents are cached at module level: without this close, `bun test` kills
+  // the test process leaving live children.
   await closeCachedAgents()
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
+// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Settings du faux agent ; échoue bruyamment si la validation se trompe. */
+/** The fake agent's settings; fails loudly if the validation goes wrong. */
 const fakeSettings = (
   env: Record<string, string> = {},
   extra: Readonly<Record<string, unknown>> = {},
@@ -64,8 +64,8 @@ const fakeSettings = (
     command: process.execPath,
     args: ["run", FAKE],
     cwd: process.cwd(),
-    // `"ignore"` : le stderr de l'agent est une variable d'environnement, donc
-    // il ne parle pas ; sans ça, `FAKE_NOISY_STDOUT` polluerait la sortie du test.
+    // `"ignore"`: the agent's stderr is an environment variable, so it stays
+    // quiet; otherwise `FAKE_NOISY_STDOUT` would pollute the test output.
     stderr: "ignore",
     env,
     ...extra,
@@ -74,7 +74,7 @@ const fakeSettings = (
   return parsed.value
 }
 
-/** Rejoue une suite d'événements ACP dans le réducteur. */
+/** Replays a sequence of ACP events through the reducer. */
 const replay = (
   events: readonly AcpEvent[],
   from: ReducerState = initialState,
@@ -89,7 +89,7 @@ const replay = (
   return { state, events: emitted }
 }
 
-/** Un état de réducteur portant un catalogue d'outils, comme `initial(request)` le fait. */
+/** A reducer state carrying a tool catalogue, the way `initial(request)` does. */
 const withTools = (
   ...names: readonly string[]
 ): ReducerState => ({
@@ -97,30 +97,30 @@ const withTools = (
   catalog: names.map((name) => ({ name, description: "", schema: {} })),
 })
 
-/** Les types d'événements, pour comparer une séquence entière d'un coup d'œil. */
+/** The event types, to compare a whole sequence at a glance. */
 const types = (events: readonly LLMEvent[]): string[] => events.map((event) => event.type)
 
 /**
- * Une réponse d'agent **conforme au contrat** de `core/prompt.ts` — §7.3.
+ * An agent answer **conforming to the contract** of `core/prompt.ts`.
  *
- * ⚠️ Depuis P2b, un `text` ACP n'est plus la réponse mais l'objet du contrat : le
- * réducteur le décode au `done`. Ces raccourcis évitent d'écrire du JSON littéral
- * dans chaque test, et surtout rendent visible la contrainte : un `text` en dur
- * échouerait désormais en `provider-error`.
+ * Note: an ACP `text` is no longer the answer but the contract object: the
+ * reducer decodes it at the `done`. These shorthands avoid writing literal JSON
+ * in every test, and above all make the constraint visible: a hard-coded `text`
+ * would now fail as `provider-error`.
  */
 const say = (text: string): AcpEvent => ({
   type: "text",
   text: JSON.stringify({ type: "text", text }),
 })
 
-/** Un `text` ACP **brut**, c'est-à-dire un agent qui n'obéit pas au contrat. */
+/** A **raw** ACP `text`, that is an agent that does not obey the contract. */
 const raw = (text: string): AcpEvent => ({ type: "text", text })
 
-/** L'index d'un événement de ce type, ou -1. */
+/** The index of an event of this type, or -1. */
 const indexOfType = (events: readonly LLMEvent[], type: string): number =>
   events.findIndex((event) => event.type === type)
 
-/** Le premier événement de ce type ; le test suppose qu'il existe. */
+/** The first event of this type; the test assumes it exists. */
 const first = <T extends LLMEvent["type"]>(
   events: readonly LLMEvent[],
   type: T,
@@ -131,29 +131,29 @@ const first = <T extends LLMEvent["type"]>(
 }
 
 /**
- * `TransportRuntime` du test.
+ * The test's `TransportRuntime`.
  *
- * Le transport ACP ne fait **jamais** de HTTP : cet exécuteur n'est donc jamais
- * appelé. Il est nevertheless construit (le type l'exige) et il `die` bruyamment
- * — un `Effect.succeed` silencieux masquerait le jour où quelqu'un brancherait un
- * vrai endpoint HTTP par accident.
+ * The ACP transport **never** does HTTP, so this executor is never called. It is
+ * nevertheless built (the type demands it) and it dies loudly: a silent
+ * `Effect.succeed` would hide the day someone wires a real HTTP endpoint by
+ * accident.
  */
 const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Le réducteur, en pur
+// 1. The reducer, pure
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("réducteur AcpEvent → LLMEvent", () => {
-  test("le texte est tamponné, puis rendu d'un seul bloc au done", () => {
-    // ⚠️ **Changement de comportement voulu (P2b).** Le texte n'est plus streamé
-    // delta par delta : il ne peut pas l'être, car tant qu'on n'a pas lu la
-    // réponse entière on ignore si c'est du texte ou un appel d'outil (§7.3).
+describe("AcpEvent -> LLMEvent reducer", () => {
+  test("the text is buffered, then rendered as a single block at the done", () => {
+    // Note: **a deliberate behaviour change.** The text is no longer streamed
+    // delta by delta: it cannot be, since until the whole answer has been read
+    // there is no way to know whether it is text or a tool call.
     const before = replay([
       { type: "text", text: '{"type":"text","text":"bon' },
       { type: "text", text: 'jour"}' },
     ])
-    // Rien n'est émis avant le `done` : c'est le cœur du compromis.
+    // Nothing is emitted before the `done`: that is the heart of the trade-off.
     expect(before.events).toEqual([])
 
     const { events } = replay(
@@ -172,11 +172,11 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       "step-finish",
       "finish",
     ])
-    // Un **seul** delta, qui porte la réponse et non le JSON du contrat.
+    // A **single** delta, carrying the answer and not the contract's JSON.
     expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["bonjour"])
   })
 
-  test("un bloc de raisonnement est fermé avant le texte rendu", () => {
+  test("a reasoning block is closed before the rendered text", () => {
     const { events } = replay([
       { type: "thought", text: "je réfléchis" },
       say("réponse"),
@@ -193,13 +193,13 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       "step-finish",
       "finish",
     ])
-    // `reasoning-end` **avant** `text-start` : un seul bloc ouvert à la fois.
+    // `reasoning-end` **before** `text-start`: one open block at a time.
     expect(indexOfType(events, "reasoning-end")).toBeLessThan(indexOfType(events, "text-start"))
   })
 
-  test("le raisonnement reste streamé en direct pendant que le texte s'accumule", () => {
-    // Ce qui reste en direct, c'est exactement ce que l'utilisateur a besoin de
-    // voir pendant que le tampon se remplit : l'activité de l'agent.
+  test("reasoning keeps streaming live while the text accumulates", () => {
+    // What stays live is exactly what the user needs to see while the buffer
+    // fills: the agent's activity.
     const { events } = replay([
       raw('{"type":"text","text":"ré'),
       { type: "thought", text: "je cherche" },
@@ -222,14 +222,14 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["réponse"])
   })
 
-  test("un done sans rien produit malgré tout une séquence valide", () => {
-    // Un agent qui n'écrit rien n'est pas une sortie non conforme : il n'y a
-    // simplement rien à décoder, et on finit proprement.
+  test("a done with nothing still produces a valid sequence", () => {
+    // An agent writing nothing is not a malformed output: there is simply nothing
+    // to decode, and it ends cleanly.
     const { events } = replay([{ type: "done", stopReason: "end_turn" }])
     expect(types(events)).toEqual(["step-start", "step-finish", "finish"])
   })
 
-  test("un plan devient du raisonnement, pas du texte visible", () => {
+  test("a plan becomes reasoning, not visible text", () => {
     const { events } = replay([
       {
         type: "plan",
@@ -252,10 +252,10 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "reasoning-delta").text).toContain("Analyser")
   })
 
-  test("un appel d'outil ACP n'est émis qu'une fois, sans tool-result", () => {
-    // Le cas réel : ACP envoie `tool_call`, puis `in_progress`, puis `completed`
-    // pour **un** appel. §7.3 : le provider propose, OpenCode exécute — donc
-    // aucun `tool-result`, et surtout pas trois `tool-call` pour un seul id.
+  test("an ACP tool call is emitted only once, with no tool-result", () => {
+    // The real case: ACP sends `tool_call`, then `in_progress`, then `completed`
+    // for **one** call. The provider proposes, OpenCode executes - so no
+    // `tool-result`, and above all not three `tool-call`s for a single id.
     const tool: AcpEvent = {
       type: "tool",
       id: "call-1",
@@ -285,12 +285,12 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       name: "read_file",
       input: { path: "README.md" },
     })
-    // `providerExecuted` absent ⇒ c'est OpenCode qui exécute.
+    // `providerExecuted` absent => OpenCode is the one executing.
     expect(first(events, "tool-call").providerExecuted).toBeUndefined()
     expect(state.tools.has("call-1")).toBe(true)
   })
 
-  test("un tool-call sans nom retombe sur le titre", () => {
+  test("a tool call with no name falls back to the title", () => {
     const { events } = replay([
       {
         type: "tool",
@@ -306,10 +306,10 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "tool-call").name).toBe("Écrire le fichier")
   })
 
-  test("un appel d'outil ACP précède le texte rendu au done", () => {
-    // Le texte est tamponné : il ne peut plus « fermer » un bloc de texte ouvert
-    // par un `tool-input-start`. L'ordre reste simplement : appel d'outil d'abord
-    // (il est arrivé avant), texte ensuite.
+  test("an ACP tool call precedes the text rendered at the done", () => {
+    // The text is buffered: it can no longer "close" a text block opened by a
+    // `tool-input-start`. The order is simply: tool call first (it arrived
+    // earlier), text after.
     const { events } = replay([
       say("je regarde"),
       { type: "tool", id: "c", name: "read", title: "Lire", kind: "read", status: "pending", input: {} },
@@ -329,7 +329,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     ])
   })
 
-  test("deux appels d'outils distincts donnent deux tool-call", () => {
+  test("two distinct tool calls give two tool-calls", () => {
     const { events } = replay([
       { type: "tool", id: "a", name: "read", title: "Lire", kind: "read", status: "pending", input: {} },
       { type: "tool", id: "b", name: "bash", title: "ls", kind: "execute", status: "pending", input: {} },
@@ -351,9 +351,9 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "step-finish").reason.normalized).toBe(expected)
   })
 
-  test("un tool-call force « tool-calls », même avec un stopReason « end_turn »", () => {
-    // Sans cela, la boucle OpenCode s'arrêterait et l'appel d'outil proposerait
-    // ne serait jamais exécuté : c'est le cœur du §7.1.
+  test('a tool call forces "tool-calls", even with an "end_turn" stopReason', () => {
+    // Without that, the OpenCode loop would stop and the proposed tool call
+    // would never be executed.
     const { events } = replay([
       {
         type: "tool",
@@ -370,10 +370,10 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "step-finish").reason.normalized).toBe("tool-calls")
   })
 
-  test("une erreur termine le flux par provider-error, et le done suivant est ignoré", () => {
-    // ⚠️ Le tampon est **abandonné** : à l'erreur, ce qu'il contient est un JSON
-    // tronqué, et l'afficher produirait un transcript à moitié mangé. L'erreur de
-    // l'agent passe donc seule, terminale.
+  test("an error ends the stream with provider-error, and the following done is ignored", () => {
+    // Note: the buffer is **abandoned**. On error, what it holds is truncated
+    // JSON, and rendering it would produce a half-eaten transcript, so the
+    // agent's error passes alone, as the terminal event.
     const { state, events } = replay([
       raw('{"type":"text","text":"partial'),
       { type: "error", message: "l'agent est mort" },
@@ -381,12 +381,12 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     ])
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
     expect(first(events, "provider-error").message).toBe("l'agent est mort")
-    // Aucun `finish` **après** le terminal : le core le refuserait.
+    // No `finish` **after** the terminal: the core would refuse it.
     expect(indexOfType(events, "finish")).toBe(-1)
     expect(state.terminal).toBe(true)
   })
 
-  test("l'usage de fenêtre de contexte est ignoré, celui du tour est une instance Usage", () => {
+  test("context window usage is ignored, turn usage is a Usage instance", () => {
     const { events } = replay([
       { type: "usage", kind: "context", used: 12_345 },
       say("x"),
@@ -403,7 +403,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
       { type: "done", stopReason: "end_turn" },
     ])
     const usage = first(events, "finish").usage
-    // ⚠️ Une **instance**, pas un objet littéral : c'est le piège du §4.0.
+    // Note: an **instance**, not a plain object - that is the trap.
     expect(usage).toBeInstanceOf(Usage)
     expect(usage?.inputTokens).toBe(40)
     expect(usage?.outputTokens).toBe(2)
@@ -411,13 +411,13 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(usage?.reasoningTokens).toBe(1)
     expect(usage?.cacheReadInputTokens).toBe(7)
     expect(usage?.cacheWriteInputTokens).toBe(9)
-    // Invariant de `Usage` : nonCached + cacheRead + cacheWrite = input.
+    // `Usage` invariant: nonCached + cacheRead + cacheWrite = input.
     expect(usage?.nonCachedInputTokens).toBe(24)
-    // Les deux `step-finish` et `finish` portent le même usage.
+    // Both `step-finish` and `finish` carry the same usage.
     expect(first(events, "step-finish").usage).toBe(usage)
   })
 
-  test("un usage vide n'est pas inventé", () => {
+  test("an empty usage is not invented", () => {
     const { events } = replay([
       { type: "usage", kind: "turn" },
       say("x"),
@@ -426,7 +426,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "finish").usage).toBeUndefined()
   })
 
-  test("un nonCached calculé ne descend jamais sous zéro", () => {
+  test("a computed nonCached never goes below zero", () => {
     const { events } = replay([
       { type: "usage", kind: "turn", input: 10, cacheRead: 8, cacheWrite: 8 },
       { type: "done", stopReason: "end_turn" },
@@ -434,7 +434,7 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(first(events, "finish").usage?.nonCachedInputTokens).toBe(0)
   })
 
-  test("une permission est comptée mais ne produit aucun LLMEvent", () => {
+  test("a permission is counted but produces no LLMEvent", () => {
     const { state, events } = replay([
       {
         type: "permission",
@@ -453,16 +453,15 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(types(events)).toEqual(["step-start", "step-finish", "finish"])
   })
 
-  test("halt comble un flux vide", () => {
-    // Le cas limite du core : un stream sans le moindre événement doit quand
-    // même produire un événement terminal, sinon « ended unexpectedly ».
+  test("halt fills in an empty stream", () => {
+    // The core's edge case: a stream with not a single event must still produce
+    // a terminal event, otherwise "ended unexpectedly".
     expect(types(halt(initialState).events)).toEqual(["step-start", "step-finish", "finish"])
   })
 
-  test("halt ferme les blocs ouverts avant de terminer", () => {
-    // Seul le raisonnement peut rester ouvert d'un `reduce` au suivant : le texte
-    // est tamponné, et le bloc de raisonnement doit être refermé avant le
-    // `step-finish`.
+  test("halt closes the open blocks before finishing", () => {
+    // Only reasoning can stay open from one `reduce` to the next: the text is
+    // buffered, and the reasoning block must be closed before the `step-finish`.
     const { state } = replay([say("a"), { type: "thought", text: "b" }])
     const flushed = halt(state)
     expect(types(flushed.events)).toEqual([
@@ -478,9 +477,9 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     )
   })
 
-  test("halt montre le tampon s'il est complet, et le jette s'il est tronqué", () => {
-    // Une réponse arrivée entière puis un flux mort : elle est montrée. Une réponse
-    // coupée au milieu du JSON : la jeter vaut mieux qu'afficher du JSON mangé.
+  test("halt shows the buffer when complete, and drops it when truncated", () => {
+    // An answer that arrived whole, then a dead stream: it is shown. An answer cut
+    // in the middle of the JSON: dropping it beats rendering mangled JSON.
     const complete = replay([say("déjà fini")])
     expect(types(halt(complete.state).events)).toEqual([
       "step-start",
@@ -495,12 +494,12 @@ describe("réducteur AcpEvent → LLMEvent", () => {
     expect(types(halt(truncated.state).events)).toEqual(["step-start", "step-finish", "finish"])
   })
 
-  test("halt est sans effet après un done", () => {
+  test("halt has no effect after a done", () => {
     const { state } = replay([say("a"), { type: "done", stopReason: "end_turn" }])
     expect(halt(state).events).toEqual([])
   })
 
-  test("halt garde « tool-calls » si un outil a été proposé", () => {
+  test('halt keeps "tool-calls" when a tool was proposed', () => {
     const { state } = replay([
       { type: "tool", id: "c", name: "bash", title: "ls", kind: "execute", status: "pending", input: {} },
     ])
@@ -509,14 +508,14 @@ describe("réducteur AcpEvent → LLMEvent", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1bis. Le mécanisme §7.3 : le contrat de sortie, au niveau du réducteur
+// 1bis. The core mechanism: the output contract, at the reducer level
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
-  test("une réponse conforme « tool » devient un tool-call SANS tool-result", () => {
-    // Le test qui porte la valeur du projet : l'agent **propose**, OpenCode
-    // **exécute**. Sans `providerExecuted` ni `tool-result`, c'est exactement ce
-    // que fait la boucle OpenCode (permissions, snapshots, undo).
+describe("the core mechanism: the output contract becomes a tool-call", () => {
+  test('a conforming "tool" answer becomes a tool-call WITHOUT tool-result', () => {
+    // The test that carries the project's value: the agent **proposes**,
+    // OpenCode **executes**. Without `providerExecuted` nor `tool-result`, that
+    // is exactly what the OpenCode loop does (permissions, snapshots, undo).
     const proposal = JSON.stringify({
       type: "tool",
       name: "read",
@@ -540,18 +539,18 @@ describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
     expect(first(events, "tool-call").providerExecuted).toBeUndefined()
     expect(indexOfType(events, "tool-result")).toBe(-1)
     expect(indexOfType(events, "tool-error")).toBe(-1)
-    // C'est cette raison qui fait poursuivre la boucle OpenCode.
+    // It is that reason which makes the OpenCode loop continue.
     expect(first(events, "finish").reason.normalized).toBe("tool-calls")
     expect(first(events, "step-finish").reason.normalized).toBe("tool-calls")
-    // L'appel entre dans le registre : il ne sera pas réémis.
+    // The call enters the registry: it will not be emitted again.
     expect(state.tools.size).toBe(1)
     expect(first(events, "tool-input-delta").text).toBe('{"filePath":"README.md"}')
   })
 
-  test("deux demandes d'outils ne peuvent pas être rendues dans un même tour", () => {
-    // Le contrat interdit d'en envoyer deux, et `parseAgentOutput` ne lit que
-    // le premier objet exploitable : le second est ignoré silencieusement plutôt
-    // que de produire une séquence que le core refuserait.
+  test("two tool requests cannot be rendered in the same turn", () => {
+    // The contract forbids sending two, and `parseAgentOutput` only reads the
+    // first usable object: the second is silently ignored rather than producing
+    // a sequence the core would refuse.
     const both = `{"type":"tool","name":"read","arguments":{}}${JSON.stringify({
       type: "tool",
       name: "bash",
@@ -562,9 +561,9 @@ describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
     expect(first(events, "tool-call").name).toBe("read")
   })
 
-  test("un outil absent du catalogue échoue en nommant l'outillage et les noms acceptés", () => {
-    // Jamais de dégradation silencieuse en texte : l'utilisateur doit voir que le
-    // travail demandé est perdu, pas croire que l'agent a répondu normalement.
+  test("a tool missing from the catalogue fails naming the tool and the accepted names", () => {
+    // Never a silent degradation into text: the user must see that the requested
+    // work is lost, not believe the agent answered normally.
     const { events } = replay(
       [raw('{"type":"tool","name":"shell","arguments":{}}'), { type: "done", stopReason: "end_turn" }],
       withTools("read", "bash"),
@@ -573,7 +572,7 @@ describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
     const message = first(events, "provider-error").message
     expect(message).toContain("shell")
     expect(message).toContain("read, bash")
-    // Jamais de `finish` derrière un événement terminal.
+    // Never a `finish` behind a terminal event.
     expect(indexOfType(events, "finish")).toBe(-1)
   })
 
@@ -585,20 +584,20 @@ describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
   ])("%s finit en provider-error, jamais en troncature", (_label, output) => {
     const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
-    // Le message porte un extrait de la sortie : c'est la seule chose qui permet
-    // de comprendre *ce que* l'agent a produit de travers.
+    // The message carries an excerpt of the output: the only thing that makes it
+    // possible to understand *what* the agent got wrong.
     expect(first(events, "provider-error").message.length).toBeGreaterThan(20)
   })
 
-  test("un objet échappé dans un bloc ``` reste lisible", () => {
-    // La tolérance de l'extraction ne s'arrête pas au premier `{` : une accolade
-    // dans une chaîne ne referme rien, sinon le texte de l'agent serait coupé.
+  test("an object escaped in a ``` block stays readable", () => {
+    // The extraction's tolerance does not stop at the first `{`: a brace inside
+    // a string closes nothing, otherwise the agent's text would be cut.
     const output = 'Voici : ```json\n{"type":"text","text":"voici {une} accolade"}\n```'
     const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
     expect(first(events, "text-delta").text).toBe("voici {une} accolade")
   })
 
-  test("un `arguments` qui n'est pas un objet est refusé, pas avalé", () => {
+  test("`arguments` that are not an object are refused, not swallowed", () => {
     for (const arguments_ of ['"read"', "[1,2]", "42", "null"]) {
       const { events } = replay(
         [raw(`{"type":"tool","name":"read","arguments":${arguments_}}`), { type: "done", stopReason: "end_turn" }],
@@ -610,11 +609,11 @@ describe("mécanisme §7.3 : le contrat de sortie devient un tool-call", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Les settings
+// 2. The settings
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("settings du provider", () => {
-  test("une configuration minimale est acceptée", () => {
+describe("provider settings", () => {
+  test("a minimal configuration is accepted", () => {
     const parsed = parseSettings({ command: "copilot", args: ["--acp"] })
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
@@ -623,7 +622,7 @@ describe("settings du provider", () => {
     expect(parsed.value.cwd).toBeUndefined()
   })
 
-  test("command est obligatoire, et le message nomme le champ", () => {
+  test("command is mandatory, and the message names the field", () => {
     const parsed = parseSettings({ args: ["--acp"] })
     expect(parsed.ok).toBe(false)
     if (parsed.ok) return
@@ -646,32 +645,32 @@ describe("settings du provider", () => {
     expect(parsed.message).toContain(fragment)
   })
 
-  test("une clé inconnue est ignorée, pas rejetée", () => {
-    // OpenCode peut ajouter ses propres clés : faire tomber le provider pour
-    // cela serait pire que d'ignorer une clé.
+  test("an unknown key is ignored, not rejected", () => {
+    // OpenCode may add its own keys: bringing the provider down for that would
+    // be worse than ignoring a key.
     const parsed = parseSettings({ command: "copilot", baseURL: "https://exemple" })
     expect(parsed.ok).toBe(true)
   })
 
-  test("la clé du process inclut la politique, sinon deux providers se contaminent", () => {
+  test("the process key includes the policy, otherwise two providers contaminate each other", () => {
     const strict = fakeSettings()
     const loose = fakeSettings({ FAKE_BOOLEAN_OPTION: "1" })
-    // `env` change la clé : deux faux agents différents, deux processus.
+    // `env` changes the key: two different fake agents, two processes.
     expect(agentKey(strict)).not.toBe(agentKey(loose))
     const withTools = parseSettings({ command: "copilot", allowedTools: ["*"] })
     const without = parseSettings({ command: "copilot" })
     if (!withTools.ok || !without.ok) throw new Error("parseSettings a échoué")
-    // `allowedTools` change la **politique du client ACP** : c'est une
-    // différence qui doit donner deux agents distincts.
+    // `allowedTools` changes the **ACP client policy**: a difference that must
+    // yield two distinct agents.
     expect(agentKey(withTools.value)).not.toBe(agentKey(without.value))
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Bout-en-bout contre le faux agent
+// 3. End to end against the fake agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Construit une requête `LLMRequest` réaliste : système, outils, transcript. */
+/** Builds a realistic `LLMRequest`: system, tools, transcript. */
 const buildRequest = (languageModel: LanguageModel, userText: string): LLMRequest =>
   new LLMRequest({
     model: languageModel,
@@ -707,8 +706,8 @@ const buildRequest = (languageModel: LanguageModel, userText: string): LLMReques
   })
 
 /**
- * Joue une requête de bout en bout et renvoie les `LLMEvent` **sans** échec
- * d'initialisation, exactement comme le fait le core d'OpenCode.
+ * Runs a request end to end and returns the `LLMEvent`s **without** an
+ * initialisation failure, exactly as OpenCode's core does.
  */
 const runTurn = async (
   settings: AcpProviderSettings,
@@ -716,10 +715,10 @@ const runTurn = async (
   request: LLMRequest,
 ): Promise<LLMEvent[]> => {
   const languageModel = model(modelID, settings)
-  // `LanguageModel.route` est typé `AnyRoute` par `@opencode/ai` : c'est la vue
-  // effacée qu'il expose, donc `body`/`prepared` sont opaques à ce niveau. On
-  // emprunte le même chemin que `compileRequest` : `body.from`, puis
-  // `prepareTransport`, puis `streamPrepared`.
+  // `@opencode/ai` types `LanguageModel.route` as `AnyRoute`: that is the erased
+  // view it exposes, so `body`/`prepared` are opaque at this level. The same
+  // path as `compileRequest` is taken: `body.from`, then `prepareTransport`,
+  // then `streamPrepared`.
   const route = languageModel.route
   const outcome = await Effect.runPromise(
     Effect.scoped(
@@ -736,12 +735,12 @@ const runTurn = async (
   return outcome.success
 }
 
-describe("bout-en-bout : route réelle contre l'agent ACP", () => {
-  test("un tour texte produit la séquence attendue", async () => {
+describe("end to end: the real route against the ACP agent", () => {
+  test("a text turn produces the expected sequence", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
-    // `PING` fait répondre le faux agent, qui respecte le contrat : un seul
-    // `text` portant l'objet JSON, décodé en un unique `text-delta` au `done`.
+    // `PING` makes the fake agent answer, obeying the contract: a single `text`
+    // carrying the JSON object, decoded into one `text-delta` at the `done`.
     const request = buildRequest(languageModel, "PING")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
@@ -758,13 +757,13 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(first(events, "finish").reason.normalized).toBe("stop")
   })
 
-  test("le prompt contient le système, le catalogue d'outils et le transcript", async () => {
-    // Le faux agent renvoie le prompt **qu'il a reçu** dans son unique chunk de
-    // texte : c'est la seule façon de vérifier `fromRequest` de bout en bout.
+  test("the prompt holds the system, the tool catalogue and the transcript", async () => {
+    // The fake agent returns the prompt **it received** in its single text
+    // chunk: the only way to check `fromRequest` end to end.
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
-    // Aucun mot-clé du faux agent : il prend sa branche par défaut, qui « echo »
-    // le prompt.
+    // No fake-agent keyword: it takes its default branch, which "echoes" the
+    // prompt.
     const request = buildRequest(languageModel, "bonjour")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
@@ -796,15 +795,15 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(echoed).toBe(`ACK: ${expected}`)
   })
 
-  test("un appel d'outil devient un tool-call SANS tool-result, et finit en tool-calls", async () => {
+  test("a tool call becomes a tool-call WITHOUT tool-result, and ends in tool-calls", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "TOOL")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
 
-    // Le faux agent émet `tool_call`, `in_progress` **puis** `completed` : le
-    // réducteur n'en fait qu'un seul `tool-call`, sans `tool-result` (§7.3).
+    // The fake agent emits `tool_call`, `in_progress` **then** `completed`: the
+    // reducer makes a single `tool-call` out of them, with no `tool-result`.
     expect(types(events)).toEqual([
       "step-start",
       "tool-input-start",
@@ -825,15 +824,15 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(first(events, "tool-call").providerExecuted).toBeUndefined()
     expect(indexOfType(events, "tool-result")).toBe(-1)
     expect(indexOfType(events, "tool-error")).toBe(-1)
-    // C'est ce qui fait continuer la boucle OpenCode.
+    // That is what makes the OpenCode loop continue.
     expect(first(events, "finish").reason.normalized).toBe("tool-calls")
   })
 
-  test("une réponse conforme « tool » devient un tool-call SANS tool-result, et finit en tool-calls", async () => {
-    // ⚠️ **Le test qui porte la valeur de P2b.** Le faux agent produit le contrat
-    // de sortie de `core/prompt.ts` — un `text` JSON unique — et le réducteur le
-    // transforme en `tool-call` que **OpenCode** exécutera. C'est le mécanisme
-    // §7.3 complet : prompt → parse → `LLMEvent` → boucle OpenCode.
+  test('a conforming "tool" answer becomes a tool-call WITHOUT tool-result, and ends in tool-calls', async () => {
+    // Note: **the test that carries the value of this mechanism.** The fake agent
+    // produces `core/prompt.ts`'s output contract - a single JSON `text` - and the
+    // reducer turns it into a `tool-call` that **OpenCode** will execute. That is
+    // the whole mechanism: prompt -> parse -> `LLMEvent` -> OpenCode loop.
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "TOOL_PROPOSAL")
@@ -849,8 +848,8 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
       "step-finish",
       "finish",
     ])
-    // Le nom vient du **catalogue transmis dans le prompt** (ici `read`), jamais
-    // d'un nom d'outil ACP : c'est ce qui supprime tout problème de mapping.
+    // The name comes from the **catalogue transmitted in the prompt** (here
+    // `read`), never from an ACP tool name: that removes any mapping problem.
     expect(first(events, "tool-call")).toMatchObject({
       name: "read",
       input: { filePath: "README.md" },
@@ -861,9 +860,10 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(first(events, "finish").reason.normalized).toBe("tool-calls")
   })
 
-  test("un agent qui répond en texte brut échoue en provider-error, sans troncature", async () => {
-    // `FAKE_OUTPUT=raw` : l'agent ignore le contrat. C'est le cas qu'un agent
-    // tiers produit, et il ne doit surtout pas ressembler à une troncature.
+  test("an agent answering in raw prose fails as provider-error, with no truncation", async () => {
+    // `FAKE_OUTPUT=raw`: the agent ignores the contract. That is the case a
+    // third-party agent produces, and it must above all not look like a
+    // truncation.
     const settings = fakeSettings({ FAKE_OUTPUT: "raw" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "bonjour")
@@ -875,10 +875,10 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(indexOfType(events, "finish")).toBe(-1)
   })
 
-  test("un outil halluciné échoue en nommant le catalogue transmis", async () => {
-    // `FAKE_OUTPUT=hallucinated` : l'agent propose un outil qui n'existe pas.
-    // Le message doit nommer l'outil **et** les noms acceptés, sinon l'utilisateur
-    // ne peut rien faire du tour.
+  test("a hallucinated tool fails naming the transmitted catalogue", async () => {
+    // `FAKE_OUTPUT=hallucinated`: the agent proposes a tool that does not exist.
+    // The message must name the tool **and** the accepted names, otherwise the
+    // user can do nothing with the turn.
     const settings = fakeSettings({ FAKE_OUTPUT: "hallucinated" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "bonjour")
@@ -891,9 +891,9 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
   })
 
-  test("une réponse enfermée dans un bloc ``` est acceptée", async () => {
-    // `FAKE_OUTPUT=fenced` : beaucoup d'agents Buryent leur JSON dans un bloc de
-    // markdown. La tolérance de `parseAgentOutput` doit absorber ça.
+  test("an answer fenced in a ``` block is accepted", async () => {
+    // `FAKE_OUTPUT=fenced`: many agents bury their JSON in a markdown block.
+    // `parseAgentOutput`'s tolerance must absorb that.
     const settings = fakeSettings({ FAKE_OUTPUT: "fenced" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "PING")
@@ -903,7 +903,7 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["PONG"])
   })
 
-  test("l'usage du tour est une instance de la classe Usage", async () => {
+  test("the turn usage is an instance of the Usage class", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "PING")
@@ -912,7 +912,7 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
 
     const usage = first(events, "finish").usage
     expect(usage).toBeInstanceOf(Usage)
-    // Relevé du faux agent (`USAGE` dans `fake-acp.ts`).
+    // Capture from the fake agent (`USAGE` in `fake-acp.ts`).
     expect(usage?.inputTokens).toBe(40)
     expect(usage?.outputTokens).toBe(2)
     expect(usage?.totalTokens).toBe(42)
@@ -922,12 +922,12 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(usage?.nonCachedInputTokens).toBe(24)
   })
 
-  test("un flux interrompu ne hangue pas et n'émet pas de finish orphelin", async () => {
-    // `TICK` : un `thought` immédiat, puis une longue latence interruptible. Le
-    // raisonnement est ce qui est encore streamé en direct (le texte est
-    // tamponné jusqu'au `done`), donc c'est lui qu'on attend. On ne prend que les
-    // premiers événements : le `Scope` de la requête se ferme, la session se
-    // ferme, l'agent reçoit `session/cancel`.
+  test("an interrupted stream does not hang and emits no orphan finish", async () => {
+    // `TICK`: an immediate `thought`, then a long interruptible latency.
+    // Reasoning is what still streams live (the text is buffered until the
+    // `done`), so it is what we wait for. Only the first events are taken: the
+    // request's `Scope` closes, the session closes, the agent receives
+    // `session/cancel`.
     const settings = fakeSettings({ FAKE_SLOW_MS: "30000" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "TICK")
@@ -949,18 +949,18 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
 
     expect(Result.isSuccess(outcome)).toBe(true)
     if (Result.isFailure(outcome)) return
-    // 30 s de latence côté agent : si l'annulation ne fonctionnait pas, ce test
-    // durerait 30 s.
+    // 30 s of agent-side latency: if cancellation did not work, this test would
+    // take 30 s.
     expect(elapsed).toBeLessThan(10_000)
     const seen = outcome.success.map((event) => event.type)
     expect(seen).toEqual(["step-start", "reasoning-start"])
-    // Aucun événement terminal, donc surtout **pas** de `finish` sans
-    // `step-finish` : ce serait exactement la troncature que le core signale
-    // par « The provider response ended unexpectedly. ».
+    // No terminal event, so above all **no** `finish` without `step-finish`:
+    // that would be exactly the truncation the core reports as "The provider
+    // response ended unexpectedly.".
     expect(indexOfType(outcome.success, "finish")).toBe(-1)
   })
 
-  test("un agent qui meurt en plein tour finit en provider-error, pas en troncature", async () => {
+  test("an agent dying mid-turn ends in provider-error, not in a truncation", async () => {
     const settings = fakeSettings({ FAKE_DIE_ON_PROMPT: "1" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "DIE")
@@ -969,31 +969,31 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
 
     expect(first(events, "provider-error").message).toBeTruthy()
     expect(indexOfType(events, "finish")).toBe(-1)
-    // Un `step-finish` **avant** le terminal : c'est lui qui empêche le core de
-    // lire une troncature.
+    // A `step-finish` **before** the terminal: that is what stops the core from
+    // reading a truncation.
     expect(indexOfType(events, "step-finish")).toBeLessThan(indexOfType(events, "provider-error"))
   })
 
-  test("le variant d'effort est appliqué avant le prompt, après le modèle", async () => {
-    // `effort` vient d'un `variant` de `Model.Info` (§5.2) : le plugin publie
-    // `{ effort: "high" }`, OpenCode le fusionne dans les settings, et c'est
-    // l'adaptateur qui doit le traduire en `set_config_option("reasoning_effort")`.
-    // Sans ce test, ce câblage pourrait disparaître sans qu'aucun vert ne tombe :
-    // `set_config_option` est un aller-retour JSON-RPC sans contrepartie.
+  test("the effort variant is applied before the prompt, after the model", async () => {
+    // `effort` comes from a `Model.Info` variant: the plugin publishes
+    // `{ effort: "high" }`, OpenCode merges it into the settings, and the adapter
+    // must translate it into `set_config_option("reasoning_effort")`. Without
+    // this test that wiring could disappear without any failure:
+    // `set_config_option` is a JSON-RPC round trip with no counterpart.
     const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1" }, { effort: "high" })
     const languageModel = model("claude-sonnet-5", settings)
     const request = buildRequest(languageModel, "PING")
 
     const events = await runTurn(settings, "claude-sonnet-5", request)
 
-    // Le faux agent répond ce qu'il a **appliqué** : les deux options ont donc
-    // été prises en compte, dans l'ordre.
+    // The fake agent answers with what it **applied**: both options were
+    // therefore taken into account, in order.
     expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual([
       "PONG claude-sonnet-5 high",
     ])
   })
 
-  test("sans variant, l'agent garde la valeur qu'il annonce lui-même", async () => {
+  test("without a variant, the agent keeps the value it announces itself", async () => {
     const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "PING")
@@ -1005,11 +1005,11 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     ])
   })
 
-  test("un effort hors liste échoue en nommant les valeurs acceptées", async () => {
-    // Un effort peut être valide pour le modèle courant et invalide pour un
-    // autre (`none` n'existe pas pour `claude-sonnet-5` sur `copilot --acp`) : on
-    // échoue donc en nommant la liste, plutôt que de laisser l'agent refuser une
-    // valeur muette.
+  test("an effort outside the list fails naming the accepted values", async () => {
+    // An effort can be valid for the current model and invalid for another
+    // (`none` does not exist for `claude-sonnet-5` on `copilot --acp`), so it
+    // fails by naming the list rather than letting the agent silently refuse a
+    // value.
     const settings = fakeSettings({}, { effort: "absent" })
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "PING")
@@ -1029,17 +1029,17 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     if (Result.isSuccess(outcome)) return
     expect(outcome.failure.message).toContain("absent")
     expect(outcome.failure.message).toContain("none, medium, high")
-    // Le message nomme la **chose** demandée : « le modèle "absent" » serait
-    // illisible.
+    // The message names the requested **thing**: 'model "absent"' would be
+    // unreadable.
     expect(outcome.failure.message).toContain("niveau d'effort")
   })
 
-  test("un modèle que l'agent ne propose pas échoue en nommant les valeurs acceptées", async () => {
+  test("a model the agent does not offer fails naming the accepted values", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "PING")
-    // On construit la requête avec un modèle, puis on en demande un autre : c'est
-    // `execute` qui applique le modèle de la requête (`set_config_option`).
+    // The request is built with one model, then another is asked for: it is
+    // `execute` that applies the request's model (`set_config_option`).
     const outcome = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -1057,7 +1057,7 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
     expect(outcome.failure.message).toContain("gpt-5.6-terra")
   })
 
-  test("une requête sans message est refusée avant tout spawn", async () => {
+  test("a message-less request is refused before any spawn", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
     const empty = new LLMRequest({ model: languageModel, system: [], messages: [], tools: [] })
@@ -1078,10 +1078,10 @@ describe("bout-en-bout : route réelle contre l'agent ACP", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Le contrat du package provider
+// 4. The provider package contract
 // ─────────────────────────────────────────────────────────────────────────────
-describe("contrat du package provider", () => {
-  test("model(id, settings) renvoie un LanguageModel rattaché à la route", () => {
+describe("provider package contract", () => {
+  test("model(id, settings) returns a LanguageModel attached to the route", () => {
     const languageModel = model("claude-sonnet-5", fakeSettings())
     expect(String(languageModel.id)).toBe("claude-sonnet-5")
     expect(String(languageModel.provider)).toBe("acp")
@@ -1090,9 +1090,9 @@ describe("contrat du package provider", () => {
     expect(languageModel.route.transport.id).toBe("acp-stdio/transport")
   })
 
-  test("des settings invalides lèvent un ProviderConfigurationError, pas une AIError", () => {
-    // Le contrat d'`@opencode/ai` : une erreur de configuration est levée
-    // **avant** toute requête, jamais au milieu d'un flux.
+  test("invalid settings throw a ProviderConfigurationError, not an AIError", () => {
+    // `@opencode/ai`'s contract: a configuration error is thrown **before** any
+    // request, never in the middle of a stream.
     expect(() => model("x", { args: ["--acp"] })).toThrow(ProviderConfigurationError)
     try {
       model("x", { args: ["--acp"] })
@@ -1103,23 +1103,24 @@ describe("contrat du package provider", () => {
     }
   })
 
-  test("le process est partagé entre deux requêtes de mêmes settings", async () => {
+  test("the process is shared between two requests with the same settings", async () => {
     const settings = fakeSettings()
-    // Sans ce cache, chaque tour d'une conversation relancerait un `initialize`.
+    // Without that cache, every turn of a conversation would restart an
+    // `initialize`.
     expect(acquireAgent(settings)).toBe(acquireAgent(settings))
   })
 
-  test("`@opencode/ai` est aligné sur la version qu'embarque l'hôte", async () => {
-    // ⚠️ **Le risque de double instance du §14 (R3).** Notre provider construit
-    // un `LanguageModel` et une `Usage` avec **notre** instance de
-    // `@opencode/ai` ; l'hôte les lit avec **la sienne**. Deux instances
-    // distinctes, c'est deux classes `Usage` différentes — donc un `instanceof`
-    // faux côté hôte, et le mode d'échec décrit au §4.0 (« The provider
-    // response ended unexpectedly. »), indiscernable d'une troncature.
+  test("`@opencode/ai` is aligned with the version the host embeds", async () => {
+    // Note: **the double-instance risk.** Our provider builds a `LanguageModel`
+    // and a `Usage` with **our** instance of `@opencode/ai`; the host reads them
+    // with **its own**. Two distinct instances mean two different `Usage`
+    // classes - hence a false `instanceof` host-side, and the failure mode
+    // described above ("The provider response ended unexpectedly."),
+    // indistinguishable from a truncation.
     //
-    // La référence n'est pas le `package.json` du projet (qui pourrait mentir) :
-    // c'est la dépendance déclarée par `@opencode/plugin`, c'est-à-dire le
-    // paquet que le serveur OpenCode fournit au chargement.
+    // The reference is not the project's `package.json` (which could lie): it is
+    // the dependency declared by `@opencode/plugin`, that is, the package the
+    // OpenCode server provides at load time.
     const read = async (relative: string): Promise<Record<string, unknown>> => {
       const path = fileURLToPath(new URL(relative, import.meta.url))
       return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
@@ -1133,23 +1134,23 @@ describe("contrat du package provider", () => {
 
     expect(ours["version"]).toBe("2.0.16")
     expect(hostDeps["@opencode/ai"]).toBe(ours["version"])
-    // `@opencode/schema` doit suivre : c'est de là que viennent `LLMEvent` et
-    // `Usage`, et les deux paquets sont résolus par le même chemin.
+    // `@opencode/schema` must follow: that is where `LLMEvent` and `Usage` come
+    // from, and both packages are resolved through the same path.
     const schema = await read("../node_modules/@opencode/schema/package.json")
     expect(schema["version"]).toBe(hostDeps["@opencode/schema"])
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. L'invariant de portabilité du cœur (§2.1)
+// 5. The core's portability invariant
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("invariant : le cœur n'importe rien de l'hôte", () => {
-  // P1 est la première phase à introduire `@opencode/ai` et `effect` dans le
-  // dépôt. C'est aussi la phase où il serait le plus tentant d'en faire un
-  // raccourci dans `core/` (« juste un type »). Ce test est la seule chose qui
-  // l'en empêche, et il coûte trois lignes.
-  test("core/ n'importe ni @opencode/ai, ni effect, ni le SDK ACP", async () => {
+describe("invariant: the core imports nothing from the host", () => {
+  // This is the first phase to introduce `@opencode/ai` and `effect` into the
+  // repository, and therefore the phase where it would be most tempting to use
+  // them as a shortcut in `core/` ("just a type"). This test is the only thing
+  // preventing that, and it costs three lines.
+  test("core/ imports neither @opencode/ai, nor effect, nor the ACP SDK", async () => {
     const directory = fileURLToPath(new URL("../src/core/", import.meta.url))
     const files = [...new Bun.Glob("*.ts").scanSync(directory)]
     expect(files.length).toBeGreaterThan(0)

@@ -1,23 +1,22 @@
 /**
- * `acp-run` — la CLI de debug de la phase P0.
+ * `acp-run` - the debug CLI.
  *
- * Elle ne fait rien de plus que le cœur : elle lance un agent ACP, affiche son
- * inventaire, et envoie un prompt en imprimant le flux `AcpEvent` en JSONL
- * sur stdout. C'est l'outil qui permet de qualifier un agent inconnu (« est-ce
- * qu'il obéit au contrat JSON ? » §13.3) avant d'investir dans l'adaptateur
- * OpenCode.
+ * It does nothing more than the core: it launches an ACP agent, displays its
+ * inventory, and sends a prompt while printing the `AcpEvent` stream as JSONL on
+ * stdout. It is the tool that lets an unknown agent be qualified ("does it obey
+ * the JSON contract?") before investing in the OpenCode adapter.
  *
  *   acp-run --command copilot --arg --acp --list-models
  *   acp-run --command copilot --arg --acp --prompt "PING"
  *
- * Convention : **stdout = JSONL** (donc exploitable par `jq`), **stderr = humain**.
+ * Convention: **stdout = JSONL** (so `jq` can read it), **stderr = human**.
  */
 
 import { createAcpAgent } from "../acp/agent.js"
 import type { AcpAgent, Inventory, NormalizedRequest } from "../core/types.js"
 import { allowAllPermissions, denyAllPermissions } from "../core/types.js"
 
-/** Ce que `--list-models` affiche. */
+/** What `--list-models` displays. */
 interface InventoryReport {
   agentName: string
   agentVersion: string
@@ -36,7 +35,7 @@ interface CliOptions {
   allowTools: boolean
 }
 
-/** Usage affiché sur stderr. */
+/** Usage printed on stderr. */
 const usage = (): string => `acp-run — lance un agent ACP et montre ce qu'il produit
 
   --command <cmd>     commande de l'agent (obligatoire, ex. "copilot")
@@ -60,7 +59,7 @@ Codes de sortie :
   4  l'agent a refusé une option (--model / --effort)
 `
 
-/** Parseur d'arguments minimal : pas de dépendance externe. */
+/** Minimal argument parser: no external dependency. */
 const parseArgs = (argv: readonly string[]): CliOptions | { help: true } => {
   const options: CliOptions = {
     command: "",
@@ -72,7 +71,7 @@ const parseArgs = (argv: readonly string[]): CliOptions | { help: true } => {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    // `--flag` et `--flag value` sont tous deux acceptés.
+    // Both `--flag` and `--flag value` are accepted.
     const [flag, inlineValue] = splitFlag(arg ?? "")
     const value = (): string => {
       if (inlineValue !== undefined) return inlineValue
@@ -125,14 +124,14 @@ const splitFlag = (arg: string): [string, string | undefined] => {
   return [arg.slice(0, index), arg.slice(index + 1)]
 }
 
-/** Requête minimale : pour l'instant on n'envoie que le texte brut (P2b fera mieux). */
+/** Minimal request: for now only raw text is sent. */
 const toRequest = (text: string): NormalizedRequest => ({
   system: [],
   tools: [],
   messages: [{ role: "user", text }],
 })
 
-/** Affichage humain de l'inventaire, sur stderr. */
+/** Human-readable inventory display, on stderr. */
 const printInventory = (report: InventoryReport): void => {
   const line = (label: string, value: string): void => {
     process.stderr.write(`${label.padEnd(16)}${value}\n`)
@@ -151,7 +150,7 @@ const printInventory = (report: InventoryReport): void => {
   )
 }
 
-/** Point d'entrée du binaire `acp-run` (voir `bin/acp-run.ts`). */
+/** The `acp-run` binary's entry point (see `bin/acp-run.ts`). */
 export const main = async (argv: readonly string[]): Promise<number> => {
   let options: CliOptions | { help: true }
   try {
@@ -177,13 +176,13 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       args: options.args,
       cwd: options.cwd,
       policy: options.allowTools ? allowAllPermissions : denyAllPermissions,
-      // Seule la CLI veut voir les logs de l'agent : elle **est** le terminal
-      // de l'utilisateur. Un hébergeur garderait le défaut `"pipe"` (§2.3).
+      // Only the CLI wants to see the agent's logs: it **is** the user's
+      // terminal. A host would keep the `"pipe"` default.
       stderr: "inherit",
     })
   } catch (error) {
-    // `AcpAgentError` porte déjà un message qui nomme la commande : inutile
-    // d'y ajouter une stack de SDK illisible.
+    // `AcpAgentError` already carries a message naming the command: adding an
+    // unreadable SDK stack on top of it is pointless.
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     return 3
   }
@@ -195,16 +194,16 @@ export const main = async (argv: readonly string[]): Promise<number> => {
         ` (${agent.info.name} ${agent.info.version})\n`,
     )
 
-    // Une seule session pour les deux opérations : quand `--list-models` est
-    // combiné à `--model`/`--effort`, l'inventaire affiché reflète l'état réel
-    // après application des bascules.
+    // A single session for both operations: when `--list-models` is combined
+    // with `--model`/`--effort`, the displayed inventory reflects the real state
+    // after the toggles are applied.
     const session = await agent.open({ cwd: options.cwd })
 
     try {
-      // ⚠️ « Modèle inconnu » est le diagnostic le plus probable face à un agent
-      // exotique. Sans ce `try/catch`, une valeur refusée remonte en rejection
-      // non rattrapée avec une stack de SDK illisible, et l'utilisateur ne voit
-      // ni la liste des valeurs acceptées ni la commande qui a échoué.
+      // "Unknown model" is the most likely diagnostic when facing an exotic
+      // agent. Without this `try/catch` a refused value surfaces as an
+      // unhandled rejection with an unreadable SDK stack, and the user sees
+      // neither the accepted values nor the command that failed.
       try {
         if (options.model !== undefined) await session.setModel(options.model)
         if (options.effort !== undefined) {
@@ -234,11 +233,11 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       }
 
       if (options.prompt !== undefined) {
-        // Un événement par ligne : lisible à l'œil *et* pipeable dans `jq`.
+        // One event per line: readable by eye *and* pipeable into `jq`.
         for await (const event of session.prompt(toRequest(options.prompt))) {
           process.stdout.write(`${JSON.stringify(event)}\n`)
-          // ⚠️ Un `error` dans le flux doit rendre un code **non nul** : avec 0,
-          // la CI ne voit rien et l'échec passe inaperçu.
+          // An `error` in the stream must yield a **non-zero** code: with 0, CI
+          // sees nothing and the failure goes unnoticed.
           if (event.type === "error") failed = true
         }
       }
@@ -251,8 +250,8 @@ export const main = async (argv: readonly string[]): Promise<number> => {
   }
 }
 
-// Exécution directe (`bun run src/adapters/cli.ts`) — ignorée quand le module
-// est importé (par `bin/acp-run.ts`).
+// Direct execution (`bun run src/adapters/cli.ts`) - ignored when the module is
+// imported (by `bin/acp-run.ts`).
 if (import.meta.main === true) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),

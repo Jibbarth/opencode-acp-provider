@@ -1,41 +1,37 @@
 /**
- * Construction du prompt ACP — PLAN.md §2.4 / §7.3.
+ * ACP prompt construction.
  *
- * Ce module est la preuve exécutable de la promesse du §2.2 : il **n'importe
- * que du local**. Un adaptateur HTTP (`adapters/openai-http`) réutilisera
- * `renderRequest` et `parseAgentOutput` sans tirer le SDK ACP — et donc `zod` et
- * le typage généré — dans son graphe de dépendances. C'est pour ça que la
- * fonction vit ici et pas dans `acp/agent.ts` : c'est de la construction de
- * prompt, pas du protocole.
+ * This module imports **only local code**, so any other transport can reuse
+ * `renderRequest` and `parseAgentOutput` without dragging the ACP SDK - and
+ * therefore `zod` and the generated types - into its dependency graph. That is
+ * why the function lives here and not in `acp/agent.ts`: this is prompt
+ * construction, not protocol.
  *
- * ⚠️ **C'est le fichier qui porte toute la valeur du projet** (§7.1). En mode
- * « cerveau brut », on ne laisse pas l'agent agir : on lui **donne** le catalogue
- * d'outils d'OpenCode et un contrat de sortie JSON strict, puis on lit sa réponse
- * (`core/parse.ts`) et on émet un `tool-call` que **OpenCode** exécute. Sans ce
- * contrat, l'agent répond en texte et la boucle OpenCode ne voit jamais d'appel
- * d'outil.
+ * The whole value of the project lives in this file. The agent is not left to
+ * act: it is **given** OpenCode's tool catalogue and a strict JSON output
+ * contract, its answer is then read back (`core/parse.ts`) and a `tool-call` is
+ * emitted for **OpenCode** to execute. Without that contract the agent answers
+ * in prose and the OpenCode loop never sees a tool call.
  *
- * ⚠️ L'ordre des sections n'est pas cosmétique : le contrat de sortie est **en
- * dernier**, donc le plus proche de la génération. Le système d'OpenCode
- * (AGENTS.md, skills, instructions opérateur) vient **après** le rôle, donc
- * avant le catalogue — il ne doit jamais pouvoir se retrouver « noyé » sous une
- * consigne de format.
+ * Note: the section order is not cosmetic. The output contract comes **last**,
+ * hence closest to generation. OpenCode's system prompt (AGENTS.md, skills,
+ * operator instructions) comes **after** the role and therefore before the
+ * catalogue - it must never end up "drowned" under a formatting instruction.
  */
 
 import { isJsonObject } from "./parse.js"
 import type { NormalizedMessage, NormalizedRequest, NormalizedTool } from "./types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sections fixes
+// Fixed sections
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Rôle — qui est le modèle, ce qu'on attend de lui.
+ * Role - who the model is and what is expected of it.
  *
- * ⚠️ La phrase « tu n'as aucun outil » est le **filet de sécurité** du §7.4
- * (point 3) : elle ne remplace pas le refus de permission, mais elle évite
- * qu'un agent passe son tour à essayer d'appeler ses outils natifs au lieu de
- * répondre au contrat.
+ * Note: the "you have no tool" sentence is a safety net. It does not replace
+ * the permission refusal, but it stops an agent from spending its turn trying
+ * to call its native tools instead of answering the contract.
  */
 const ROLE = [
   "## Rôle",
@@ -60,21 +56,41 @@ const TOOLS_RULE = [
   "exact nom que l'éditeur utilisera pour exécuter l'appel.",
 ].join("\n")
 
-/** Message honnête quand la requête ne porte aucun outil : ne pas laisser croire qu'il y en a. */
+/** Honest message when the request carries no tool: never imply there are some. */
 const NO_TOOLS = "(aucun outil n'est disponible pour cette requête)"
 
 const TRANSCRIPT_HEADER = "## Conversation"
 
-/** Message honnête quand le transcript est vide. */
+/**
+ * Transcript section header when an ACP session is **resumed**.
+ *
+ * Note: the textual counterpart of `NormalizedRequest.resume`. On resume,
+ * `messages` holds only the **new** messages: the agent has the earlier ones in
+ * its own memory. Without this mention it would read a truncated "Conversation"
+ * section and could believe the start of the exchange never happened - so it
+ * would summarise it, or answer as if the conversation began there. One line,
+ * and above all a **promise**: what is not recalled was not forgotten. The
+ * output contract itself does not change: the agent always answers with one
+ * JSON object.
+ */
+const RESUME_HEADER = "## Conversation — suite"
+
+/** Clarification rendered under the resume header. */
+const RESUME_NOTE = [
+  "(les messages qui précèdent sont déjà échangés : ils sont dans ta mémoire de session,",
+  "ne les répète pas et ne les reformule pas — réponds à la suite ci-dessous.)",
+].join("\n")
+
+/** Honest message when the transcript is empty. */
 const EMPTY_TRANSCRIPT = "(aucun message précédent)"
 
 const TOOL_SCHEMA_HEADER = "Schéma des arguments (JSON Schema) :"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rendu des outils
+// Tool rendering
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Rendu du nom, de la description et du schéma d'un outil. */
+/** Renders a tool's name, description and schema. */
 const renderTool = (tool: NormalizedTool): string => {
   const lines = [`### ${tool.name}`]
   if (tool.description !== "") lines.push(tool.description)
@@ -83,15 +99,15 @@ const renderTool = (tool: NormalizedTool): string => {
 }
 
 /**
- * Sérialisation **défensive** du JSON schema d'un outil.
+ * **Defensive** serialisation of a tool's JSON schema.
  *
- * ⚠️ `NormalizedTool.schema` est typé `unknown` : **rien** ne le valide en amont.
- * Un `schema: undefined` (un `inputSchema` absent côté OpenCode) sérialiserait
- * en `undefined`, et `JSON.stringify` sur une structure circulaire **lève** — donc
- * un catalogue aurait fait tomber la construction du prompt entière, avant même
- * le spawn de l'agent. On attrape les deux cas et on rend un repli explicite : un
- * agent qui lit « schéma indisponible » fera de son mieux, alors qu'une exception
- * ne dit rien du tout.
+ * Note: `NormalizedTool.schema` is typed `unknown` and **nothing** validates it
+ * upstream. A `schema: undefined` serialises to `undefined`, and
+ * `JSON.stringify` **throws** on a circular structure - so one bad catalogue
+ * entry would take down the whole prompt build, before the agent is even
+ * spawned. Both cases are caught and an explicit fallback is rendered: an agent
+ * reading "schema unavailable" will do its best, whereas an exception says
+ * nothing at all.
  */
 const renderSchema = (schema: unknown): string => {
   if (schema === undefined || schema === null) {
@@ -109,15 +125,14 @@ const renderSchema = (schema: unknown): string => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Exemple d'arguments conforme au schéma
+// Schema-conformant argument example
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Valeur d'exemple pour une propriété, déduite de son type et de son `enum`. */
+/** Sample value for a property, deduced from its type and its `enum`. */
 const sampleValue = (property: unknown): unknown => {
   if (!isJsonObject(property)) return "exemple"
-  // Un `enum` est la meilleure source d'exemple qui soit : la première valeur
-  // est *garantie* acceptée par le schéma, alors qu'une valeur inventée pour un
-  // `string` ne l'est pas.
+  // An `enum` is the best available source of examples: the first value is
+  // *guaranteed* accepted by the schema, which an invented `string` is not.
   const allowed = property["enum"]
   if (Array.isArray(allowed) && allowed.length > 0) return allowed[0]
   switch (property["type"]) {
@@ -138,13 +153,13 @@ const sampleValue = (property: unknown): unknown => {
 }
 
 /**
- * Exemple d'arguments pour un outil, construit depuis son schéma.
+ * Sample arguments for a tool, built from its schema.
  *
- * ⚠️ On ne fabrique ce+n'est que pour **l'exemple du contrat** : l'agent
- * n'obtiendra jamais cet objet par défaut. Mais un exemple cohérent avec le
- * schéma vaut mieux qu'un `{}` qui apprendrait au modèle à appeler `read` sans
- * chemin. Les propriétés retenues sont les `required` s'il y en a, sinon toutes
- * — et un schéma illisible donne `{}`, jamais une exception.
+ * Note: this exists only for the **contract's example**; the agent will never
+ * receive this object by default. But an example consistent with the schema
+ * beats a `{}` that would teach the model to call `read` with no path. The
+ * properties kept are the `required` ones if there are any, otherwise all of
+ * them - and an unreadable schema yields `{}`, never an exception.
  */
 const sampleArguments = (schema: unknown): Record<string, unknown> => {
   if (!isJsonObject(schema)) return {}
@@ -164,17 +179,17 @@ const sampleArguments = (schema: unknown): Record<string, unknown> => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Contrat de sortie
+// Output contract
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Le contrat de sortie — §7.3, point 4.
+ * The output contract.
  *
- * ⚠️ **Exemplifié, pas seulement décrit** : les essais réels ont montré que
- * l'agent respecte nettement mieux un contrat accompagné d'un exemple, et
- * l'exemple d'outil est reconstruit **depuis le catalogue réel** — il porte donc
- * toujours un nom valide et des arguments conformes au schéma, ce qui rend
- * impossible pour l'agent de copier un exemple obsolète.
+ * Note: **exemplified, not merely described**. Real runs showed the agent
+ * respects a contract accompanied by an example markedly better, and the tool
+ * example is rebuilt **from the real catalogue** - it therefore always carries a
+ * valid name and schema-conformant arguments, making it impossible for the
+ * agent to copy a stale example.
  */
 const renderContract = (tools: readonly NormalizedTool[]): string => {
   const lines = [
@@ -220,20 +235,19 @@ const renderContract = (tools: readonly NormalizedTool[]): string => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Préfixe de rôle appliqué à chaque message du transcript.
+ * Role prefix applied to every transcript message.
  *
- * ⚠️ Ce préfixe n'est pas cosmétique : ACP n'a pas de champ « system » et le
- * transcript est rendu **à plat**. Sans lui, l'agent ne peut pas distinguer sa
- * propre sortie antérieure d'une instruction de l'utilisateur — or il doit
- * respecter un contrat de sortie JSON (§7.3) : confondre les deux est le pire
- * invariant à casser. On rend donc le rôle explicite, en français, comme le
- * reste du prompt.
+ * Note: this prefix is not cosmetic. ACP has no "system" field and the
+ * transcript is rendered **flat**. Without it the agent cannot tell its own
+ * earlier output from a user instruction - yet it must respect a JSON output
+ * contract, and confusing the two is the worst invariant to break. The role is
+ * therefore explicit, in French, like the rest of the prompt.
  *
- * ⚠️ L'`id` d'un résultat d'outil n'est **pas** rendu. Il existe pour le
- * round-trip OpenCode → nous (§2.1) ; le montrer au modèle l'inciterait à
- * fabriquer ou à réutiliser un identifiant, alors qu'il n'a aucune prise sur
- * lui. Deux résultats du même outil restent distinguables par leur contenu et
- * par l'appel correspondant de la ligne précédente.
+ * Note: a tool result's `id` is deliberately **not** rendered. It exists for
+ * the OpenCode round-trip; showing it to the model would invite it to invent or
+ * reuse an identifier it has no hold on. Two results from the same tool stay
+ * distinguishable by their content and by the matching call on the previous
+ * line.
  */
 const rolePrefix = (message: NormalizedMessage): string => {
   switch (message.role) {
@@ -246,21 +260,28 @@ const rolePrefix = (message: NormalizedMessage): string => {
   }
 }
 
-/** Rendu d'un message unique, rôle compris. */
+/** Renders a single message, role included. */
 const renderMessage = (message: NormalizedMessage): string =>
   `${rolePrefix(message)} : ${message.role === "tool" ? message.output : message.text}`
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Point d'entrée
+// Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Rendu texte d'une `NormalizedRequest` — rôle, système, catalogue d'outils,
- * transcript, contrat de sortie. Dans cet ordre, toujours (§7.3).
+ * Text rendering of a `NormalizedRequest` - role, system, tool catalogue,
+ * transcript, output contract. Always in that order.
  *
- * Fonction **pure** et sans dépendance : mêmes entrées, même sortie. C'est ce
- * qui permet à `verify-real.ts`, aux tests et à un futur adaptateur HTTP de
- * vérifier la forme exacte du prompt sans démarrer d'agent.
+ * Pure and dependency-free: same inputs, same output. That is what lets
+ * `verify-real.ts`, the tests, and any other transport check the exact shape of
+ * the prompt without starting an agent.
+ *
+ * Note: only one thing changes when `request.resume` is true: the title - and
+ * the warning line - of the transcript section, which then holds only the
+ * **delta** of the conversation. The other sections are rendered **in full on
+ * every turn**: system, tool catalogue and contract are not deltafied, because
+ * they are not what duplicates, and an agent must see a system or tool change
+ * immediately.
  */
 export const renderRequest = (request: NormalizedRequest): string => {
   const sections: string[] = [ROLE]
@@ -277,14 +298,18 @@ export const renderRequest = (request: NormalizedRequest): string => {
   }
 
   if (request.messages.length > 0) {
-    sections.push(TRANSCRIPT_HEADER, request.messages.map(renderMessage).join("\n\n"))
+    sections.push(
+      request.resume === true ? RESUME_HEADER : TRANSCRIPT_HEADER,
+      ...(request.resume === true ? [RESUME_NOTE] : []),
+      request.messages.map(renderMessage).join("\n\n"),
+    )
   } else {
-    sections.push(TRANSCRIPT_HEADER, EMPTY_TRANSCRIPT)
+    sections.push(request.resume === true ? RESUME_HEADER : TRANSCRIPT_HEADER, EMPTY_TRANSCRIPT)
   }
 
-  // Le contrat ferme **toujours** le prompt, même sans outil : c'est lui qui
-  // interdit de répondre en texte libre, y compris quand il n'y a rien à
-  // demander à l'éditeur.
+  // The contract always closes the prompt, even with no tool: it is what forbids
+  // answering in free prose, including when there is nothing to ask the editor
+  // for.
   sections.push(renderContract(request.tools))
 
   return sections.join("\n\n")

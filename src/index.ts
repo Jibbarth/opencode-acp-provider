@@ -1,16 +1,16 @@
 /**
- * Point d'entrée **provider** — PLAN.md §3.1.
+ * The **provider** entry point.
  *
- * C'est le module que le champ `package` d'un `Provider.Info` fait importer par
- * le serveur OpenCode. Son contrat est minimal — une seule fonction, `model` —
- * et il ne doit rien exporter d'autre d'obligatoire : ce qui compte, c'est que
- * le serveur puisse construire un `LanguageModel` sans rien savoir d'autre.
+ * This is the module the `package` field of a `Provider.Info` makes the
+ * OpenCode server import. Its contract is minimal - a single function, `model` -
+ * and it must not require anything else to be exported: what matters is that the
+ * server can build a `LanguageModel` knowing nothing else.
  *
- * ⚠️ `model` est **synchrone** et peut **échouer** : une configuration invalide
- * est un `ProviderConfigurationError` levé ici, pas une `AIError` de requête.
- * C'est exactement la distinction d'`@opencode/ai` (voir `ProviderConfigurationError`
- * dans `schema/errors.d.ts`), et la raison pour laquelle `parseSettings` renvoie
- * un diagnostic plutôt que de lever : le message doit nommer le champ fautif.
+ * Note: `model` is **synchronous** and can **fail**. An invalid configuration
+ * is a `ProviderConfigurationError` thrown here, not a request `AIError`. That
+ * is exactly `@opencode/ai`'s distinction (see `ProviderConfigurationError` in
+ * `schema/errors.d.ts`), and the reason `parseSettings` returns a diagnostic
+ * rather than throwing: the message must name the offending field.
  */
 
 import { ProviderConfigurationError } from "@opencode/ai/schema/index"
@@ -21,24 +21,24 @@ import { makeRoute, PROVIDER } from "./adapters/opencode-transport.js"
 import { parseSettings } from "./settings.js"
 import type { AcpProviderSettings, RawProviderSettings } from "./settings.js"
 
-/** Contrat `ProviderPackage.Definition` (§3.1), tel qu'OpenCode le consomme. */
+/** The `ProviderPackage.Definition` contract, as OpenCode consumes it. */
 export type ProviderPackageContract = ProviderPackage.Definition<
   AcpProviderSettings,
   ProviderOptions,
   undefined
 >
 
-/** La seule fonction que le serveur OpenCode a besoin d'appeler. */
+/** The only function the OpenCode server needs to call. */
 export type ModelContract = (modelID: string, settings: RawProviderSettings) => LanguageModel
 
 /**
- * Construit le `LanguageModel` d'un modèle d'agent ACP.
+ * Builds the `LanguageModel` of an ACP agent model.
  *
- * ⚠️ La route est reconstruite **à chaque appel** : elle porte les settings
- * (le `systemSuffix` atteint `body.from`, la politique atteint le spawn), et les
- * partager entre deux providers reviendrait à faire commander à l'un par la
- * configuration de l'autre. Le coût est nul : une `Route` n'est qu'une
- * description, et l'agent, lui, est mis en cache au niveau module.
+ * Note: the route is rebuilt **on every call**. It carries the settings (the
+ * `systemSuffix` reaches `body.from`, the policy reaches the spawn), and sharing
+ * it between two providers would let one be driven by the other's configuration.
+ * The cost is nil: a `Route` is only a description, and the agent itself is
+ * cached at module level.
  */
 export const model: ModelContract = (modelID, settings) => {
   const parsed = parseSettings(settings)
@@ -49,10 +49,10 @@ export const model: ModelContract = (modelID, settings) => {
 }
 
 /**
- * ⚠️ Vérification **à la compilation** du contrat du §3.1 : c'est le seul endroit
- * où une dérive du contrat du package provider peut être détectée, et elle
- * serait sinon invisible — un serveur OpenCode joyful chargerait le module, ne
- * trouverait pas `model`, et échouerait au premier chat.
+ * **Compile-time** check of the provider package contract: the only place a
+ * drift of that contract can be caught. Otherwise it is invisible - a cheerful
+ * OpenCode server would load the module, find no `model`, and fail on the first
+ * chat.
  */
 const _contract: ProviderPackageContract = { model }
 void _contract

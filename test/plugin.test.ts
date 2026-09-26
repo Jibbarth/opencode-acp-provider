@@ -1,27 +1,26 @@
 /**
- * A.3 — Rendre les échecs de chargement **visibles** (§14, R4).
+ * Making load failures **visible**.
  *
- * Un package de plugin qui ne se charge ne produit **aucune** erreur visible :
- * l'hôte note « plugin ignoré » et passe à autre chose. Toutes les causes
- * possibles se ressemblent — mauvais chemin dans `opencode.jsonc`, module qui
- * lève pendant son évaluation, `Plugin.define` jamais atteint, `setup` qui
- * rejette — et le diagnostic est toujours le même : le provider est absent de
- * `/model`, sans raison.
+ * A plugin package that does not load produces **no** visible error: the host
+ * notes "plugin skipped" and moves on. All the possible causes look alike - a
+ * wrong path in `opencode.jsonc`, a module throwing while being evaluated,
+ * `Plugin.define` never reached, a `setup` that rejects - and the diagnostic is
+ * always the same: the provider is missing from `/model`, for no stated reason.
  *
- * Ce qui manque, c'est la distinction entre deux situations :
+ * What is missing is the distinction between two situations:
  *
- *   · **le module n'a jamais été évalué** ;
- *   · **`setup()` a été atteint, et a échoué ou rien enregistré**.
+ *   - **the module was never evaluated**;
+ *   - **`setup()` was reached, and failed or registered nothing**.
  *
- * Le marqueur écrit par `src/plugin.ts` **au moment où le module est évalué**
- * tranche : s'il est absent du stderr, le problème est en amont de nous (chemin,
- * installation, erreur d'import) ; s'il est présent, tout ce qu'il reste à
- * regarder est dans le journal de `setup`.
+ * The marker `src/plugin.ts` writes **at the moment the module is evaluated**
+ * settles it: if it is absent from stderr the problem is upstream of us (path,
+ * installation, import error); if it is present, everything left to look at is in
+ * `setup`'s log.
  *
- * ⚠️ Les tests passent donc par un **sous-processus** : la seule façon
- * d'observer ce qui est écrit pendant l'évaluation d'un module est de le charger
- * dans un runtime neuf. Un `import` dans le test lui-même émettrait la ligne
- * avant même que le test ne démarre.
+ * Note: the tests therefore go through a **subprocess**. The only way to observe
+ * what is written while a module is evaluated is to load it in a fresh runtime;
+ * an `import` in the test itself would emit the line before the test even
+ * starts.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -30,7 +29,7 @@ import { fileURLToPath } from "node:url"
 const PLUGIN = fileURLToPath(new URL("../src/plugin.ts", import.meta.url))
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 
-/** Charge le module dans un process neuf et renvoie son stderr. */
+/** Loads the module in a fresh process and returns its stderr. */
 const evaluatePlugin = async (args: readonly string[] = []): Promise<string> => {
   const script = `await import(${JSON.stringify(PLUGIN)}); ${args.join(" ")}`
   const proc = Bun.spawn([process.execPath, "-e", script], {
@@ -43,21 +42,21 @@ const evaluatePlugin = async (args: readonly string[] = []): Promise<string> => 
   return stderr
 }
 
-describe("le chargement du plugin laisse une trace", () => {
-  test("le module écrit son marqueur sur stderr, dès son évaluation", async () => {
+describe("plugin loading leaves a trace", () => {
+  test("the module writes its marker on stderr, as soon as it is evaluated", async () => {
     const stderr = await evaluatePlugin()
-    // Le marqueur porte l'**URL** du module : c'est ce qui permet de vérifier
-    // d'un coup d'œil que c'est bien *ce* fichier qui a été évalué, et pas un
-    // autre plugin qui aurait écrit la même ligne.
+    // The marker carries the module's **URL**: that is what makes it obvious at
+    // a glance that *this* file was evaluated, not another plugin that happened
+    // to write the same line.
     expect(stderr).toContain("module évalué")
     expect(stderr).toContain(PLUGIN)
-    // Et **une seule** ligne de marqueur : « discret » veut dire discret.
+    // And **one** marker line only: "discreet" means discreet.
     expect(stderr.split("\n").filter((line) => line.includes("module évalué"))).toHaveLength(1)
   })
 
-  test("le marqueur est écrit sur stderr, jamais sur stdout", async () => {
-    // stdout est le canal du protocole du serveur : y écrire une ligne de
-    // diagnostic polluerait une sortie que d'autres composants lisent.
+  test("the marker is written on stderr, never on stdout", async () => {
+    // stdout is the server's protocol channel: writing a diagnostic line there
+    // would pollute an output other components read.
     const script = `await import(${JSON.stringify(PLUGIN)})`
     const proc = Bun.spawn([process.execPath, "-e", script], {
       stdout: "pipe",
@@ -69,32 +68,31 @@ describe("le chargement du plugin laisse une trace", () => {
     expect(stdout).toBe("")
   })
 
-  test("`setup` rend la main au lieu de faire tomber le chargement", async () => {
-    // ⚠️ L'invariant affiché en tête de `src/plugin.ts` : une configuration
-    // illisible est journalisée et ramenée à « rien n'est enregistré ». Le
-    // process doit donc **sortir avec 0**, sans laisser rejeter quoi que ce soit.
+  test("`setup` returns instead of bringing down the startup", async () => {
+    // Note: the invariant stated at the top of `src/plugin.ts`: an unreadable
+    // configuration is logged and reduced to "nothing is registered". The process
+    // must therefore **exit with 0**, letting nothing reject.
     const stderr = await evaluatePlugin([
       `const plugin = (await import(${JSON.stringify(PLUGIN)})).default;`,
       `await plugin.setup({ options: { agents: "pas un tableau" } });`,
     ])
     expect(stderr).toContain("module évalué")
-    // Le marqueur est **présent** ⇒ le module a bien été évalué, et la ligne
-    // suivante est le journal de `setup` : c'est exactement la distinction que
-    // ce lot rend possible.
+    // The marker is **present** => the module really was evaluated, and the next
+    // line is `setup`'s log: exactly the distinction this batch makes possible.
     expect(stderr).toContain("configuration ignorée")
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Le chemin nominal : le plugin découvre vraiment un agent et enregistre un provider
+// The nominal path: the plugin really discovers an agent and registers a provider
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("le plugin enregistre un provider depuis un faux agent", () => {
-  test("un agent valide produit un enregistrement, journalisé et démontable", async () => {
-    // On construit un contexte d'hôte **minimal** : le plugin ne lit que
-    // `options`, `provider.transform` et `event.subscribe` (avec
-    // `refreshMs: 0`, il ne s'abonne même pas). Un `Proxy` fournit le reste,
-    // donc aucune propriété inventée ne peut faire échouer le test par surprise.
+describe("the plugin registers a provider from a fake agent", () => {
+  test("a valid agent produces a registration, logged and disposable", async () => {
+    // A **minimal** host context is built: the plugin only reads `options`,
+    // `provider.transform` and `event.subscribe` (with `refreshMs: 0` it does not
+    // even subscribe). A `Proxy` supplies the rest, so no invented property can
+    // make the test fail by surprise.
     const script = `
       const module = await import(${JSON.stringify(PLUGIN)})
       const added = []
@@ -137,16 +135,16 @@ describe("le plugin enregistre un provider depuis un faux agent", () => {
     const record = published as Record<string, unknown>
     expect(record["dispose"]).toBe("function")
     expect(record["id"]).toBe("acp")
-    // C'est le point de A.4 : l'URL enregistrée doit être un `file://` absolu
-    // vers un fichier qui existe — sinon `/model` montre le provider et le
-    // premier tour échoue en `ERR_MODULE_NOT_FOUND`.
+    // This is the point of the package contract tests: the registered URL must
+    // be an absolute `file://` pointing at a file that exists - otherwise `/model`
+    // shows the provider and the first turn fails with `ERR_MODULE_NOT_FOUND`.
     expect(String(record["package"]).startsWith("file://")).toBe(true)
-    // `auto` est filtré (§5, `PSEUDO_MODEL_IDS`) : deux modèles restent.
+    // `auto` is filtered out (`PSEUDO_MODEL_IDS`): two models remain.
     expect(record["models"]).toEqual(["gpt-5.6-terra", "claude-sonnet-5"])
     expect(stderr).toContain("module évalué")
   })
 
-  test("un agent indisponible ne fait pas tomber le chargement", async () => {
+  test("an unavailable agent does not bring down the startup", async () => {
     const script = `
       const module = await import(${JSON.stringify(PLUGIN)})
       const context = new Proxy({}, {
@@ -170,21 +168,21 @@ describe("le plugin enregistre un provider depuis un faux agent", () => {
     ])
     expect({ code, stdout }).toEqual({ code: 0, stdout: "dispose=undefined\n" })
     expect(stderr).toContain("module évalué")
-    // Le marqueur est présent **et** l'échec est journalisé : c'est la
-    // différence entre « le module n'a pas été chargé » et « l'agent manque ».
+    // The marker is present **and** the failure is logged: that is the difference
+    // between "the module did not load" and "the agent is missing".
     expect(stderr).toContain("indisponible")
     expect(stderr).toContain("opencode-acp-commande-inexistante-42")
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A.6 — Bornes de la découverte (§14, R7)
+// Discovery bounds
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("la découverte est bornée", () => {
+describe("discovery is bounded", () => {
   /**
-   * Lance `setup` avec un contexte **vide** — donc un agent qui n'est jamais
-   * touché — et renvoie la sortie du process. `options` peut être surchargé.
+   * Runs `setup` with an **empty** context - so an agent that is never touched -
+   * and returns the process output. `options` can be overridden.
    */
   const setup = async (options: string): Promise<{ code: number; stdout: string; stderr: string; elapsed: number }> => {
     const script = `
@@ -206,47 +204,47 @@ describe("la découverte est bornée", () => {
     return { code, stdout, stderr, elapsed: Date.now() - started }
   }
 
-  /** Les options d'un agent qui répond, mais après `FAKE_SLOW_INIT_MS`. */
+  /** The options of an agent that answers, but only after `FAKE_SLOW_INIT_MS`. */
   const slowAgent = (ms: number) =>
     `{ agents: [{ id: "lent", command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}], env: { FAKE_SLOW_INIT_MS: "${ms}" } }], ` +
     `discoveryTimeoutMs: 700, discoveryIdleTimeoutMs: 700 }`
 
-  test("un agent qui ne répond pas à initialize ne bloque pas le chargement", async () => {
-    // `FAKE_SLOW_INIT_MS=30000` : l'agent met trente secondes. Sans borne, le
-    // chargement d'OpenCode serait figé trente secondes, sans un mot.
+  test("an agent that never answers initialize does not block the startup", async () => {
+    // `FAKE_SLOW_INIT_MS=30000`: the agent takes thirty seconds. Without a
+    // bound, OpenCode's startup would freeze for thirty seconds without a word.
     const { code, stdout, stderr, elapsed } = await setup(slowAgent(30_000))
     expect(code).toBe(0)
     expect(stdout).toBe("dispose=undefined\n")
-    // La borne a joué : 700 ms de configuration, et l'injection de l'agent
-    // ('process' + 'execPath') est de l'ordre de la milliseconde.
+    // The bound did its job: 700 ms of configuration, and injecting the agent
+    // ('process' + 'execPath') is on the order of a millisecond.
     expect(elapsed).toBeLessThan(10_000)
-    // L'erreur nomme l'agent **et** la borne : un diagnostic sans le nom de
-    // l'agent ne dit rien quand la liste en contient plusieurs.
+    // The error names the agent **and** the bound: a diagnostic without the
+    // agent's name says nothing when the list holds several.
     expect(stderr).toContain("agent « lent » indisponible")
     expect(stderr).toContain("700 ms")
   }, 20_000)
 
-  test("la borne d'inactivité attrape un agent bavard qui ne finit pas", async () => {
-    // Un agent qui **parle** sans jamais terminer n'est pas un agent muet : la
-    // borne globale le laisserait attendre son terme en silence. C'est le cas
-    // réel d'une authentification en boucle, et il ne produit aucun message.
-    // On vérifie surtout que la sortie reste propre et bornée.
+  test("the inactivity bound catches a rambling agent that never finishes", async () => {
+    // An agent that **talks** without ever finishing is not a mute agent: the
+    // global bound would leave it waiting out its term in silence. That is the
+    // real case of an authentication loop, and it produces no message. What is
+    // checked above all is that the output stays clean and bounded.
     const { code, stdout, stderr, elapsed } = await setup(
       `{ agents: [{ id: "bavard", command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}], env: { FAKE_SLOW_INIT_MS: "30000", FAKE_NOISY_STDOUT: "1" } }], ` +
         `discoveryTimeoutMs: 600, discoveryIdleTimeoutMs: 3000 }`,
     )
     expect(code).toBe(0)
     expect(stdout).toBe("dispose=undefined\n")
-    // Le stdout bruyant de l'agent est relayé **par** l'agent, pas par nous : le
-    // plugin ne le recopie pas dans son journal.
+    // The agent's noisy stdout is relayed **by** the agent, not by us: the plugin
+    // does not copy it into its log.
     expect(stderr).not.toContain("Ceci n'est pas du JSON")
     expect(elapsed).toBeLessThan(10_000)
   }, 20_000)
 
-  test("un agent lent mais bavard dispose de toute la borne globale", async () => {
-    // Le contre-sens de la borne d'inactivité : elle ne doit pas transformer un
-    // agent bavard en agent muet. Ici l'agent répond au bout de 400 ms, la
-    // borne d'inactivité est à 3 s, et la découverte **réussit**.
+  test("a slow but chatty agent gets the whole global bound", async () => {
+    // The opposite mistake for the inactivity bound: it must not turn a chatty
+    // agent into a mute one. Here the agent answers after 400 ms, the inactivity
+    // bound is 3 s, and the discovery **succeeds**.
     const script = `
       const module = await import(${JSON.stringify(PLUGIN)})
       const added = []
@@ -273,12 +271,12 @@ describe("la découverte est bornée", () => {
     expect(record.models).toBe(2)
   }, 20_000)
 
-  test("un agent lent abandonné ne laisse pas de processus orphelin", async () => {
-    // ⚠️ Le point que la seule borne ne couvre pas : `createAcpAgent` rend la
-    // main après `initialize`, donc sa promesse est **en vol** quand la borne
-    // expire. L'agent qu'elle produira serait vivant sans personne pour le
-    // fermer — un orphelin par chargement de plugin. On compte donc les
-    // processus `fake-acp` avant et après.
+  test("an abandoned slow agent leaves no orphan process", async () => {
+    // Note: the point the bound alone does not cover. `createAcpAgent` returns
+    // after `initialize`, so its promise is **in flight** when the bound fires.
+    // The agent it will produce would be alive with nobody to close it - one
+    // orphan per plugin load. The `fake-acp` processes are therefore counted
+    // before and after.
     const script = `
       const module = await import(${JSON.stringify(PLUGIN)})
       const context = new Proxy({}, {
@@ -297,8 +295,8 @@ describe("la découverte est bornée", () => {
       cwd: process.cwd(),
     })
     await proc.exited
-    // L'agent abandonné met 4 s à démarrer : on lui laisse le temps d'exister,
-    // puis on vérifie qu'il a été tué en naissant.
+    // The abandoned agent takes 4 s to start: it is given time to exist, and
+    // then it is checked to have been killed as it was born.
     await Bun.sleep(6_000)
     expect(countFake()).toBe(before)
   }, 30_000)

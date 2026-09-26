@@ -1,24 +1,24 @@
 /**
- * Crochet de résolution « `.js` → `.ts` » pour **Node** seul.
+ * The `.js` -> `.ts` resolution hook, for **Node** only.
  *
- * ⚠️ Pourquoi ce fichier existe. Le projet écrit ses import internes avec
- * l'extension **compilée** (`./core/prompt.js`) alors qu'il distribue des
- * sources TypeScript : c'est la convention qui rend le code exécutable à la fois
- * par Bun (qui résout `.js` vers `.ts`) et par un bundler, et elle est vérifiée
- * à la compilation par `tsc`. Node, lui, sait effacer les types depuis la 22.6
- * mais **ne réécrit pas** les spécificateurs : sans ce crochet, importer
- * `src/plugin.ts` échoue sur le premier `import "./core/publish.js"` avec un
- * `ERR_MODULE_NOT_FOUND` qui ne dit rien du contrat du paquet.
+ * Note: why this file exists. The project writes its internal imports with the
+ * **compiled** extension (`./core/prompt.js`) while it ships TypeScript sources:
+ * that is the convention making the code runnable both by Bun (which resolves
+ * `.js` to `.ts`) and by a bundler, and it is checked at compile time by `tsc`.
+ * Node, on the other hand, has stripped types since 22.6 but does **not** rewrite
+ * specifiers: without this hook, importing `src/plugin.ts` fails on the first
+ * `import "./core/publish.js"` with an `ERR_MODULE_NOT_FOUND` that says nothing
+ * about the package contract.
  *
- * Ce n'est donc **pas** une invention de code : on ne touche qu'à la
- * résolution, et seulement quand le fichier `.ts` correspondant existe
- * réellement. Un `.js` légitime (une dépendance, un build) passe inchangé.
+ * This is therefore **not** a code invention: only resolution is touched, and
+ * only when the matching `.ts` file really exists. A legitimate `.js` (a
+ * dependency, a build) passes through unchanged.
  */
 
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
-/** Un spécificateur relatif (`./x.js`, `../x.js`) — tout ce que le projet écrit. */
+/** A relative specifier (`./x.js`, `../x.js`) - everything the project writes. */
 const isRelative = (specifier) => specifier.startsWith("./") || specifier.startsWith("../")
 
 export const resolve = (specifier, context, nextResolve) => {

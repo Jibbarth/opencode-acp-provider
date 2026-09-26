@@ -1,43 +1,41 @@
 /**
- * Lecture de la sortie d'un agent ACP — PLAN.md §7.3.
+ * Reading the output of an ACP agent.
  *
- * Ce module fait l'autre moitié du « pont à sortie structurée » : `core/prompt.ts`
- * écrit le contrat, ce fichier le relit. Les deux sont **purs** et n'importent que
- * du local — c'est la condition pour que l'adaptateur HTTP (`adapters/openai-http`,
- * P7) puisse réutiliser exactement le même cœur sans tirer `@opencode/ai` dans son
- * graphe (§2.1 / §2.2).
+ * This module is the other half of the structured-output bridge: `core/prompt.ts`
+ * writes the contract, this file reads it back. Both are **pure** and import
+ * only local code - the condition for any other transport to reuse exactly the
+ * same core without pulling `@opencode/ai` into its graph.
  *
- * ⚠️ **Pourquoi valider le fond, et pas seulement la forme.** Les essais réels
- * (16/16 conformes sur `copilot --acp`) ont montré un cas limite : un agent peut
- * produire un JSON parfaitement valide et sémantiquement vide — typiquement
- * `{"type":"text","text":""}`, c'est-à-dire l'objet d'exemple recopié tel quel.
- * Un parseur qui se contente de vérifier « c'est du JSON » laisserait passer ce
- * cas et produirait un tour vide : l'utilisateur verrait l'agent « répondre » sans
- * jamais rien obtenir. D'où les deux règles de fond :
+ * Note: **why the substance is validated, not only the shape.** Real runs
+ * surfaced an edge case: an agent can produce perfectly valid JSON that is
+ * semantically empty - typically `{"type":"text","text":""}`, the example object
+ * copied verbatim. A parser that only checked "this is JSON" would let that
+ * through and produce an empty turn: the user would see the agent "answer" and
+ * never get anything. Hence the two substantive rules:
  *
- * 1. `type:"text"` exige une chaîne **non vide** ;
- * 2. `type:"tool"` exige un nom **exactement** présent dans le catalogue.
+ * 1. `type:"text"` requires a **non-empty** string;
+ * 2. `type:"tool"` requires a name **exactly** present in the catalogue.
  *
- * ⚠️ **Pourquoi ne pas dégrader un nom inconnu en texte.** Si l'agent propose un
- * outil qui n'existe pas, c'est une hallucination : l'afficher comme du texte
- * ferait croire à l'utilisateur que l'agent a répondu normalement, alors que le
- * travail qu'il voulait faire est perdu. On échoue donc en nommant l'outillage
- * fautif **et** les noms acceptés — exactement comme le fait déjà le transport
- * pour un modèle que l'agent ne propose pas (`applyModel`).
+ * Note: **why an unknown name is not degraded into text.** If the agent proposes
+ * a tool that does not exist, it is hallucinating: rendering it as text would
+ * make the user believe the agent answered normally, while the work it wanted
+ * to do is lost. So it fails, naming both the offending tool and the accepted
+ * names - exactly as the transport already does for a model the agent does not
+ * offer (`applyModel`).
  */
 
 import type { NormalizedTool } from "./types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Résultat
+// Result
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Échec de lecture, toujours porteur d'un **extrait de la sortie brute**.
+ * A read failure, always carrying a **bounded excerpt** of the raw output.
  *
- * Un extrait borné, et non la sortie entière : une réponse d'agent qui dérape
- * peut faire des dizaines de kilo-octets, et noyer un message d'erreur dans le
- * transcript rendrait le diagnostic plus difficile que l'erreur qu'il décrit.
+ * Bounded rather than complete: a runaway agent answer can run to tens of
+ * kilobytes, and drowning an error message in the transcript would make the
+ * diagnosis harder than the error it describes.
  */
 export class ParseError extends Error {
   constructor(message: string) {
@@ -46,13 +44,13 @@ export class ParseError extends Error {
   }
 }
 
-/** La réponse de l'agent, une fois le contrat de sortie validé. */
+/** The agent's answer, once the output contract is validated. */
 export type AgentOutput =
-  /** Une réponse en texte : `text-start` / `text-delta` / `text-end`. */
+  /** A text answer: `text-start` / `text-delta` / `text-end`. */
   | { readonly type: "text"; readonly text: string }
   /**
-   * Une demande d'appel d'outil : `tool-input-*` puis `tool-call` **sans**
-   * `tool-result`, pour qu'OpenCode l'exécute réellement (§7.3).
+   * A tool call request: `tool-input-*` then `tool-call` **without**
+   * `tool-result`, so OpenCode actually executes it.
    */
   | {
       readonly type: "tool"
@@ -60,43 +58,43 @@ export type AgentOutput =
       readonly arguments: Readonly<Record<string, unknown>>
     }
 
-/** Résultat de lecture : jamais une exception, pour que l'appelant reste total. */
+/** Read result: never an exception, so the caller stays total. */
 export type ParseResult =
   | { readonly ok: true; readonly output: AgentOutput }
   | { readonly ok: false; readonly error: ParseError }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
+// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Un objet JSON « nu » — ni tableau, ni `null`.
+ * A "bare" JSON object - not an array, not `null`.
  *
- * ⚠️ Le refus explicite des **tableaux** est ce qui distingue « arguments mal
- * typés » de « arguments valides » : `Array.isArray` renvoie `true` pour un
- * tableau, et un tableau passé comme entrée d'outil produirait une erreur
- * opaque au moment de l'exécution, bien après le relecteur.
+ * Note: explicitly rejecting **arrays** is what distinguishes "badly typed
+ * arguments" from "valid arguments". `Array.isArray` returns `true` for an
+ * array, and an array passed as tool input would produce an opaque error at
+ * execution time, long after the reader.
  */
 export const isJsonObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
-/** Longueur maximale de l'extrait de sortie brute joint à une erreur. */
+/** Maximum length of the raw output excerpt attached to an error. */
 const MAX_EXCERPT = 400
 
-/** Extrait borné et compact d'une sortie, pour un message d'erreur lisible. */
+/** A bounded, compacted excerpt of an output, for a readable error message. */
 const excerpt = (raw: string): string => {
   const flat = raw.replace(/\s+/g, " ").trim()
   if (flat === "") return "(sortie vide)"
   return flat.length <= MAX_EXCERPT ? flat : `${flat.slice(0, MAX_EXCERPT)}…`
 }
 
-/** Construit un échec, toujours avec la sortie brute sous les yeux. */
+/** Builds a failure, always with the raw output in sight. */
 const fail = (raw: string, reason: string): ParseResult => ({
   ok: false,
   error: new ParseError(`${reason} — sortie reçue : « ${excerpt(raw)} »`),
 })
 
-/** Décrit une valeur pour un message d'erreur (« un tableau », « null »…). */
+/** Describes a value for an error message ("an array", "null"...). */
 const describe = (value: unknown): string => {
   if (value === null) return "null"
   if (Array.isArray(value)) return "un tableau"
@@ -104,16 +102,16 @@ const describe = (value: unknown): string => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extraction du JSON
+// JSON extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Index du `}` qui referme le `{` d'`start`, ou -1.
+ * Index of the `}` closing the `{` at `start`, or -1.
  *
- * ⚠️ C'est ici que se joue le piège classique de l'extraction « premier `{` puis
- * premier `}` » : un agent qui répond `{"type":"text","text":"voici {une} accolade"}`
- * verrait son objet coupé en deux et l'extraction échouerait. D'où le suivi des
- * **chaînes** et des **échappements** : un `}` dans une chaîne ne referme rien.
+ * Note: this is where the classic "first `{` then first `}`" trap is avoided: an
+ * agent answering `{"type":"text","text":"here is {a} brace"}` would have its
+ * object cut in two and the extraction would fail. Hence the tracking of
+ * **strings** and **escapes**: a `}` inside a string closes nothing.
  */
 const closingBrace = (raw: string, start: number): number => {
   let depth = 0
@@ -137,7 +135,7 @@ const closingBrace = (raw: string, start: number): number => {
   return -1
 }
 
-/** Tous les objets JSON **équilibrés** enchâssés dans un texte, dans l'ordre. */
+/** All the **balanced** JSON objects embedded in a text, in order. */
 const embeddedObjects = (raw: string): string[] => {
   const found: string[] = []
   let index = 0
@@ -148,19 +146,19 @@ const embeddedObjects = (raw: string): string[] => {
     }
     const end = closingBrace(raw, index)
     if (end === -1) {
-      // Un `{` non fermé ne peut pas cacher d'objet : on avance d'un cran.
+      // An unclosed `{` cannot hide an object: advance by one.
       index += 1
       continue
     }
     found.push(raw.slice(index, end + 1))
-    // On **reprend après** l'objet fermé : deux objets côte à côte ne doivent pas
-    // être confondus en un seul candidat imbriqué.
+    // Resume **after** the closed object: two side-by-side objects must not be
+    // mistaken for a single nested candidate.
     index = end + 1
   }
   return found
 }
 
-/** Contenu des blocs ```` ```…``` ````, avec ou sans indication de langage. */
+/** Contents of ``` fenced blocks, with or without a language hint. */
 const fencedBlocks = (raw: string): string[] => {
   const found: string[] = []
   for (const match of raw.matchAll(/```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n?([\s\S]*?)```/g)) {
@@ -171,12 +169,12 @@ const fencedBlocks = (raw: string): string[] => {
 }
 
 /**
- * Candidats, du plus probable au plus improbable.
+ * Candidates, from most to least probable.
  *
- * L'ordre encode la tolérance attendue, du cas le plus net au plus bricolé :
- * la sortie brute entière, puis les blocs ```` ``` ```` (ce que produisent la
- * plupart des agents quand on leur demande du JSON), puis les objets équilibrés
- * enchâssés dans du texte (« Voici ma réponse : {...} »).
+ * The order encodes the expected tolerance, from the cleanest case to the most
+ * improvised: the whole raw output, then ``` fenced blocks (what most agents
+ * produce when asked for JSON), then balanced objects embedded in prose
+ * ("Here is my answer: {...}").
  */
 const candidates = (raw: string): string[] => {
   const trimmed = raw.trim()
@@ -190,22 +188,22 @@ const candidates = (raw: string): string[] => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Validation du fond
+// Substantive validation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Catalogue d'outils, rendu en une liste de noms pour un message d'erreur. */
+/** Tool catalogue, rendered as a list of names for an error message. */
 const catalogNames = (tools: readonly NormalizedTool[]): string =>
   tools.length === 0
     ? "(aucun — la requête ne portait aucun outil)"
     : tools.map((tool) => tool.name).join(", ")
 
 /**
- * Validation d'un objet **déjà** reconnu comme porteur d'un `type` connu.
+ * Validates an object **already** recognised as carrying a known `type`.
  *
- * C'est le cœur de la lecture : la forme a été vérifiée, le fond reste à
- * contrôler. Aucun `arguments` n'est validé contre le JSON schema — OpenCode le
- * fera à l'exécution, et reimplémenter une validation de schema ici donnerait
- * deux Definitions de la vérité pour la même entrée.
+ * This is the heart of the reading: the shape has been checked, the substance
+ * remains. No `arguments` are validated against the JSON schema - OpenCode does
+ * that at execution time, and reimplementing schema validation here would give
+ * two definitions of the truth for the same input.
  */
 const validate = (
   value: Record<string, unknown>,
@@ -215,8 +213,8 @@ const validate = (
 ): ParseResult => {
   if (type === "text") {
     const text = value["text"]
-    // ⚠️ Une réponse vide est une **erreur**, pas un texte vide silencieux : c'est
-    // le cas limite observé en réel (« JSON valide mais vide de sens »).
+    // An empty answer is an **error**, not a silent empty text: this is the
+    // edge case observed in real runs (valid JSON, empty of meaning).
     if (typeof text !== "string" || text.trim() === "") {
       return fail(
         raw,
@@ -239,10 +237,10 @@ const validate = (
   }
 
   const args = value["arguments"]
-  // ⚠️ `arguments` **absent** n'est pas une erreur : un outil sans paramètre
-  // (ou dont l'agent n'a rien à passer) mérite un objet vide, pas un tour
-  // perdu. En revanche un `arguments` présent et mal typé est une faute de
-  // contrat : on la dit, plutôt que de la laisser exploser à l'exécution.
+  // An **absent** `arguments` is not an error: a parameterless tool (or one the
+  // agent has nothing to pass) deserves an empty object, not a lost turn. A
+  // present but badly typed `arguments`, on the other hand, is a contract
+  // violation: it is reported rather than left to blow up at execution time.
   if (args === undefined) return { ok: true, output: { type: "tool", name, arguments: {} } }
   if (!isJsonObject(args)) {
     return fail(
@@ -254,19 +252,20 @@ const validate = (
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Point d'entrée
+// Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Lit la sortie d'un agent et la rend conforme au contrat de `core/prompt.ts`.
+ * Reads an agent's output and makes it conform to the contract of
+ * `core/prompt.ts`.
  *
- * Fonction **pure** : aucun process, aucun SDK, aucun état global. Tout ce qu'elle
- * peut échouer, elle le rend dans `ParseResult` — l'appelant décide, et l'adaptateur
- * OpenCode transforme l'échec en `provider-error` terminal (§4.0).
+ * Pure: no process, no SDK, no global state. Everything it can fail at is
+ * returned in `ParseResult` - the caller decides, and the OpenCode adapter turns
+ * a failure into a terminal `provider-error`.
  *
- * @param raw    sortie brute concaténée de l'agent pour ce tour
- * @param tools  catalogue transmis dans le prompt — la **seule** source de vérité
- *               sur les noms d'outils acceptables
+ * @param raw    the raw output concatenated for this turn
+ * @param tools  the catalogue sent in the prompt - the **only** source of truth
+ *               on acceptable tool names
  */
 export const parseAgentOutput = (
   raw: string,
@@ -276,9 +275,9 @@ export const parseAgentOutput = (
     return fail(raw, "l'agent n'a produit aucune sortie exploitable")
   }
 
-  // Retenu pour le diagnostic : un objet JSON bien formé mais de `type` inconnu
-  // est un cas différent d'une sortie qui n'est pas du JSON du tout, et le
-  // message doit pouvoir le dire.
+  // Kept for the diagnostic: a well-formed JSON object with an unknown `type` is
+  // a different case from output that is not JSON at all, and the message must
+  // be able to say so.
   let unknownType: string | undefined
 
   for (const candidate of candidates(raw)) {
@@ -286,7 +285,7 @@ export const parseAgentOutput = (
     try {
       value = JSON.parse(candidate)
     } catch {
-      // Candidat suivant : du texte autour d'un objet n'a pas à être du JSON.
+      // Next candidate: prose around an object need not be JSON.
       continue
     }
     if (!isJsonObject(value)) continue

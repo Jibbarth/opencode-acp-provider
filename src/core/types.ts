@@ -1,17 +1,17 @@
 /**
- * Le contrat portable du projet — PLAN.md §2.1.
+ * The project's portable contract.
  *
- * ⚠️ Ce fichier n'importe **rien** : ni le SDK ACP, ni `@opencode/ai`, ni `effect`.
- * C'est la garantie que le cœur (`core/`) survit à un changement de transport,
- * de SDK ou d'hôte (§2.2 du plan). Toute référence au protocole ACP passe par
- * les types structurels déclarés ici.
+ * Note: this file imports **nothing** - no ACP SDK, no `@opencode/ai`, no
+ * `effect`. That is what guarantees `core/` survives a change of transport, SDK
+ * or host. Every reference to the ACP protocol goes through the structural
+ * types declared here.
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Événements de sortie d'un agent ACP
+// Events emitted by an ACP agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Raison d'arrêt d'un tour de prompt, alignée sur le `StopReason` d'ACP. */
+/** Why a prompt turn stopped, aligned with ACP's `StopReason`. */
 export type AcpStopReason =
   | "end_turn"
   | "max_tokens"
@@ -20,48 +20,47 @@ export type AcpStopReason =
   | "cancelled"
 
 /**
- * L'unique flux que partagent les trois adaptateurs (OpenCode, HTTP, CLI).
- * C'est le « point de bascule » du plan : tout ce qui est au-dessus ne parle
- * que `AcpEvent`, tout ce qui est en dessous parle ACP.
+ * The one stream the adapters share. Everything above speaks only `AcpEvent`;
+ * everything below speaks ACP.
  */
 export type AcpEvent =
-  /** Morceau de texte produit par l'agent (réponse visible). */
+  /** Text chunk produced by the agent (the visible answer). */
   | { type: "text"; text: string }
-  /** Réflexion de l'agent — à router vers `reasoning-*` côté OpenCode. */
+  /** Agent reasoning - routed to `reasoning-*` on the OpenCode side. */
   | { type: "thought"; text: string }
-  /** Ouverture ou mise à jour d'un appel d'outil natif de l'agent. */
+  /** Opening or update of a native agent tool call. */
   | {
       type: "tool"
       id: string
-      /** Nom programmatique de l'outil ; vide si l'agent n'en fournit pas. */
+      /** Programmatic tool name; empty if the agent provides none. */
       name: string
-      /** Titre lisible, toujours présent côté ACP. */
+      /** Readable title, always present in ACP. */
       title: string
       kind: string
       status: string
       input: unknown
       output?: unknown
     }
-  /** Plan d'exécution de l'agent. */
+  /** The agent's execution plan. */
   | { type: "plan"; entries: readonly PlanEntry[] }
   /**
-   * Compteurs de tokens, en **deux variantes discriminées par `kind`**.
+   * Token counters, in **two variants discriminated by `kind`**.
    *
-   * ⚠️ Pourquoi deux variantes plutôt qu'un objet à champs optionnels : les
-   * deux sémantiques viennent de **deux producteurs distincts** et ne se
-   * recoupent pas. `usage_update` ne parle que de la fenêtre de contexte
-   * (combien de tokens sont *réservés*), le `PromptResponse` final ne parle que
-   * de ce que le tour a *coûté*. Un `{ input?, output?, context? }` à champs
-   * tous optionnels rend `{}` légitime : le réducteur de l'adaptateur devrait
-   * alors deviner de quel côté on parle — exactement le piège documenté au
-   * §4.0 pour `LLMEvent`, où un objet mal formé produit « The provider
-   * response ended unexpectedly. », indiscernable d'une troncature.
+   * Note: two variants rather than one object with optional fields, because
+   * the two semantics come from **two distinct producers** and do not overlap.
+   * `usage_update` only speaks about the context window (how many tokens are
+   * *reserved*); the final `PromptResponse` only speaks about what the turn
+   * *cost*. An all-optional `{ input?, output?, context? }` would make `{}`
+   * legitimate, and the adapter reducer would have to guess which side it is
+   * looking at - the very trap that makes a malformed `LLMEvent` surface as
+   * "The provider response ended unexpectedly.", indistinguishable from a
+   * truncation.
    *
-   * - `context` : notification `usage_update`, en cours de tour (monotonique).
-   * - `turn` : le `PromptResponse` final du tour. `reasoning` / `cacheRead` /
-   *   `cacheWrite` correspondent à `thoughtTokens` / `cachedReadTokens` /
-   *   `cachedWriteTokens` de l'`Usage` ACP (§4.1) et alimentent directement la
-   *   classe `Usage` d'OpenCode en P1, **instances de `Usage` comprises**.
+   * - `context`: an `usage_update` notification, mid-turn (monotonic).
+   * - `turn`: the turn's final `PromptResponse`. `reasoning` / `cacheRead` /
+   *   `cacheWrite` map to `thoughtTokens` / `cachedReadTokens` /
+   *   `cachedWriteTokens` of ACP's `Usage` and feed OpenCode's `Usage` class
+   *   directly, `Usage` instances included.
    */
   | { type: "usage"; kind: "context"; used: number }
   | {
@@ -70,18 +69,18 @@ export type AcpEvent =
       input?: number
       output?: number
       total?: number
-      /** Tokens de raisonnement (`thoughtTokens` côté ACP). */
+      /** Reasoning tokens (`thoughtTokens` in ACP). */
       reasoning?: number
       cacheRead?: number
       cacheWrite?: number
     }
   /**
-   * Décision de permission prise pendant le tour.
+   * A permission decision taken during the turn.
    *
-   * ⚠️ Sans cet événement la politique est **invisible** dans le flux : ni P2
-   * ni P4 ne peuvent afficher « l'agent voulait écrire, on a refusé », alors
-   * que c'est précisément ce que l'utilisateur doit voir en mode cerveau brut
-   * (§7.4). `selectedOptionId` est absent quand le tour a été annulé.
+   * Note: without this event the policy is **invisible** in the stream: nothing
+   * can show "the agent wanted to write, we refused", which is precisely what
+   * the user must see. `selectedOptionId` is absent when the turn was
+   * cancelled.
    */
   | {
       type: "permission"
@@ -90,17 +89,17 @@ export type AcpEvent =
       selectedOptionId?: string
     }
   /**
-   * Fin de tour. Toujours le dernier événement d'un `prompt()`.
+   * End of turn. Always the last event of a `prompt()`.
    *
-   * ⚠️ Émis **aussi** après un `error` : un flux qui se termine sans `done`
-   * fait échouer la chaîne `@opencode/ai` avec « The provider response ended
-   * unexpectedly. », indiscernable d'une troncature (§4.0).
+   * Note: also emitted **after** an `error`. A stream that ends without `done`
+   * fails the `@opencode/ai` chain with "The provider response ended
+   * unexpectedly.", indistinguishable from a truncation.
    */
   | { type: "done"; stopReason: AcpStopReason }
-  /** Erreur récupérée pendant le tour ; le flux se termine juste après. */
+  /** Error caught during the turn; the stream ends right after. */
   | { type: "error"; message: string }
 
-/** Une entrée du plan d'exécution de l'agent. */
+/** One entry of the agent's execution plan. */
 export interface PlanEntry {
   content: string
   priority: "high" | "medium" | "low"
@@ -108,27 +107,26 @@ export interface PlanEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Requête normalisée — indépendante d'OpenCode comme de l'API OpenAI
+// Normalized request - independent of OpenCode and of the OpenAI API alike
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Un message du transcript, rendu sous une forme agnostique.
+ * A transcript message, rendered in an agnostic form.
  *
- * ⚠️ La variante `tool` porte un **`id` explicite** alors qu'ACP n'en
- * transporte aucun. Raison : cet id est **synthétisé par l'émetteur** (au tour
- * N, quand on émet le `tool-call`) et **renvoyé fidèlement** par le
- * consommateur au tour N+1 — OpenCode via `toolCallId`, l'API OpenAI via
- * `tool_call_id`. Le round-trip est donc stable dans les deux cas, sans table de
- * correspondance à maintenir.
+ * Note: the `tool` variant carries an **explicit `id`** even though ACP
+ * transports none. The id is **synthesised by the emitter** (at turn N, when
+ * the `tool-call` is emitted) and **echoed back verbatim** by the consumer at
+ * turn N+1 - OpenCode through `toolCallId`, the OpenAI API through
+ * `tool_call_id`. The round-trip is therefore stable in both cases, with no
+ * lookup table to maintain.
  *
- * L'alternative — laisser l'id de côté et le reconstruire au rendu — rendait
- * deux appels du même outil dans la même conversation **indiscernables**, alors
- * que le §4 exige d'émettre `tool-result{ id, name, result }` : sans id stable,
- * le réducteur ne sait pas quel résultat refermer.
+ * The alternative - dropping the id and rebuilding it at render time - made two
+ * calls to the same tool within one conversation **indistinguishable**, and a
+ * reducer cannot tell which result to close without a stable id.
  *
- * **Contrainte pour les adaptateurs** : propager cet `id` **verbatim**, et
- * garantir son **unicité par requête** — deux `tool-call` d'un même tour ne
- * doivent jamais porter le même id.
+ * **Constraint for adapters**: propagate this `id` **verbatim**, and guarantee
+ * its **uniqueness per request** - two `tool-call`s of the same turn must never
+ * carry the same id.
  */
 export type NormalizedMessage =
   | { role: "user"; text: string }
@@ -136,94 +134,112 @@ export type NormalizedMessage =
   | { role: "tool"; id: string; name: string; output: string }
 
 /**
- * Un outil exposé à l'agent, avec son vrai nom et son vrai schéma JSON.
+ * A tool exposed to the agent, with its real name and its real JSON schema.
  *
- * ⚠️ `name` est le nom **à plat** que l'agent doit reproduire, et
- * `namespace` l'namespace dont il est issu, **s'il y en a un**. Les deux
- * existent parce que le runtime d'OpenCode indexe son registre par
- * `namespace.nom` (`ToolRuntime.dispatch` de `@opencode/ai`), alors que les
- * protocoles sans namespace natif aplatissent en `namespace_nom`. Un
- * adaptateur qui n'enverrait que le nom aplati produirait un `tool-call`
- * introuvable (« No tool named "…" is currently available ») : les deux moitiés
- * sont donc conservées, et seul `name` est rendu dans le prompt.
+ * Note: `name` is the **flat** name the agent must reproduce, and `namespace`
+ * the namespace it came from, **if any**. Both exist because OpenCode's runtime
+ * indexes its registry by `namespace.name` (`ToolRuntime.dispatch` in
+ * `@opencode/ai`), while protocols without a native namespace flatten to
+ * `namespace_name`. An adapter sending only the flat name would produce an
+ * unresolvable `tool-call` ("No tool named "..." is currently available"), so
+ * both halves are kept, and only `name` is rendered into the prompt.
  */
 export interface NormalizedTool {
   name: string
   description: string
   schema: unknown
-  /** Namespace d'origine, absent pour un outil de premier niveau. */
+  /** Origin namespace, absent for a top-level tool. */
   namespace?: string
 }
 
 /**
- * La requête telle que la comprend le cœur, quel que soit l'appelant.
- * L'adaptateur OpenCode convertit `LLMRequest` → ici ; l'adaptateur HTTP
- * convertit le corps OpenAI → ici. La logique métier n'existe qu'une fois.
+ * The request as the core understands it, whoever the caller is: the OpenCode
+ * adapter converts `LLMRequest`, the HTTP adapter converts an OpenAI body. The
+ * business logic exists exactly once.
  */
 export interface NormalizedRequest {
-  /** Instructions système, déjà résolues (AGENTS.md, skills, contrat de sortie). */
+  /** System instructions, already resolved (AGENTS.md, skills, output contract). */
   system: readonly string[]
-  /** Catalogue d'outils à proposer à l'agent — cœur du mécanisme §7.3. */
+  /** Catalogue of tools to offer the agent. */
   tools: readonly NormalizedTool[]
-  /** Transcript complet, résultats d'outils inclus. */
+  /**
+   * The transcript **to send**, which is not necessarily the whole history.
+   *
+   * Note: on session resume these are the only **new** messages: the agent
+   * already holds the earlier ones in its own memory, and resending them would
+   * produce a duplicated history - the agent would see every message twice and
+   * reason over an incoherent conversation. See `core/session-key.ts` for the
+   * delta computation, and `resume` below.
+   */
   messages: readonly NormalizedMessage[]
   maxOutputTokens?: number
-  /** Niveau d'effort demandé (`thought_level` côté ACP). */
+  /** Requested effort level (`thought_level` in ACP). */
   thinkingLevel?: string
+  /**
+   * `true` when `messages` is a **delta** rather than the full history.
+   *
+   * Note: this is only an **honest mention** in the prompt. Without it the
+   * agent reads a "Conversation" section holding just the last messages and may
+   * believe that is the whole exchange - so it reformulates, summarises or
+   * "completes" a conversation it already has in front of it. Resume remains a
+   * **heuristic**: the field says what we did, it guarantees nothing about what
+   * the agent retained.
+   */
+  resume?: boolean
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inventaire — §5
+// Inventory
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Un modèle sélectionnable côté agent. */
+/** A model selectable on the agent side. */
 export interface AcpModel {
-  /** Identifiant brut renvoyé par l'agent (celui qu'on renvoie à `set_config_option`). */
+  /** Raw id returned by the agent (the one echoed back to `set_config_option`). */
   id: string
-  /** Libellé lisible. */
+  /** Readable label. */
   name: string
   description?: string
 }
 
-/** Un mode d'opération de l'agent (`#agent`, `#plan`…). */
+/** An agent operating mode (`#agent`, `#plan`...). */
 export interface AcpMode {
-  /** Identifiant raccourci, pratique pour l'affichage (`#agent`). */
+  /** Shortened id, convenient for display (`#agent`). */
   id: string
-  /** Identifiant complet renvoyé par l'agent (souvent une URL). */
+  /** Full id returned by the agent (often a URL). */
   rawId: string
   name: string
   description?: string
 }
 
 /**
- * Une option de configuration de session, normalisée.
- * `type` est conservé parce que `session/set_config_option` exige un payload
- * différent pour un booléen (`{ type: "boolean", value: bool }`) et un selecteur.
+ * A normalised session configuration option. `type` is kept because
+ * `session/set_config_option` needs a different payload for a boolean
+ * (`{ type: "boolean", value: bool }`) and for a selector.
  */
 export interface AcpOption {
   id: string
   name: string
-  /** Catégorie sémantique ACP : `model`, `thought_level`, `mode`, `permissions`… */
+  /** ACP semantic category: `model`, `thought_level`, `mode`, `permissions`... */
   category: string
   type: "select" | "boolean"
-  /** Valeur courante, toujours rendue sous forme de chaîne. */
+  /** Current value, always rendered as a string. */
   currentValue: string
-  /** Valeurs acceptées, dans l'ordre d'affichage côté agent. */
+  /** Accepted values, in the agent's display order. */
   values: readonly string[]
   description?: string
 }
 
-/** L'inventaire complet déduit des `configOptions` d'une session. */
+/** The full inventory deduced from a session's `configOptions`. */
 export interface Inventory {
-  /** Catégorie `model` → un modèle OpenCode par valeur (§5). */
+  /** `model` category: one OpenCode model per value. */
   models: readonly AcpModel[]
-  /** Catégorie `thought_level` → variants du modèle. */
+  /** `thought_level` category: variants of the model. */
   thoughtLevels: readonly string[]
-  /** Catégorie `mode` → agents OpenCode (§5). */
+  /** `mode` category: OpenCode agents. */
   modes: readonly AcpMode[]
-  /** Catégorie `permissions` → épinglée à `off` en mode « cerveau brut » (§7.4). */
+  /** `permissions` category, pinned to `off` by the default policy. */
   permissions?: AcpOption
-  /** Toutes les options, brutes mais normalisées, pour l'inspection. */
+  /** All options, raw but normalised, for inspection. */
   options: readonly AcpOption[]
   currentModel?: string
   currentThoughtLevel?: string
@@ -231,10 +247,10 @@ export interface Inventory {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Permissions — §7.4 / §9
+// Permissions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Un choix proposé par l'agent lors d'une `session/request_permission`. */
+/** A choice offered by the agent during a `session/request_permission`. */
 export interface PermissionOption {
   id: string
   name: string
@@ -242,7 +258,7 @@ export interface PermissionOption {
   kind: string
 }
 
-/** Ce que l'agent veut faire, résumé. */
+/** What the agent wants to do, summarised. */
 export interface PermissionRequest {
   sessionId: string
   toolCallId: string
@@ -251,33 +267,33 @@ export interface PermissionRequest {
   options: readonly PermissionOption[]
 }
 
-/** La décision rendue à l'agent. */
+/** The decision handed back to the agent. */
 export type PermissionDecision =
-  /** Choisir une option proposée (par défaut la première compatible). */
+  /** Pick an offered option (by default the first compatible one). */
   | { action: "select"; optionId: string }
-  /** Refuser ; l'agent reçoit l'option `reject_*` correspondante. */
+  /** Refuse; the agent receives the matching `reject_*` option. */
   | { action: "reject"; optionId?: string }
-  /** Annulation du tour côté agent (`outcome: "cancelled"`). */
+  /** Turn cancellation on the agent side (`outcome: "cancelled"`). */
   | { action: "cancel" }
 
 /**
- * Fonction de décision pour `session/request_permission`.
+ * Decision function for `session/request_permission`.
  *
- * Le package provider n'a pas accès aux permissions d'OpenCode (`Settings` est
- * du JSON plat, cf. §3.2) : c'est donc une fonction, alimentée par la config du
- * provider. **Défaut : refuser** — mode « cerveau brut » (§7.4).
+ * The provider package has no access to OpenCode's permissions (`Settings` is
+ * flat JSON), so this is a function fed by the provider config.
+ * **Default: deny.**
  */
 export type AcpPermissionPolicy = (
   request: PermissionRequest,
 ) => PermissionDecision | Promise<PermissionDecision>
 
-/** Politique par défaut : on refuse systématiquement tout ce que l'agent propose. */
+/** Default policy: systematically refuse everything the agent proposes. */
 export const denyAllPermissions: AcpPermissionPolicy = (request) => {
   const option = request.options.find((o) => o.kind.startsWith("reject_"))
   return option ? { action: "select", optionId: option.id } : { action: "cancel" }
 }
 
-/** Politique « outils natifs autorisés » : on accepte la première option `allow_*`. */
+/** "native tools allowed" policy: accept the first `allow_*` option. */
 export const allowAllPermissions: AcpPermissionPolicy = (request) => {
   const option = request.options.find((o) => o.kind.startsWith("allow_"))
   return option ? { action: "select", optionId: option.id } : { action: "cancel" }
@@ -287,48 +303,48 @@ export const allowAllPermissions: AcpPermissionPolicy = (request) => {
 // Agent & session
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Identité de l'agent, telle que rapportée par `initialize`. */
+/** Agent identity, as reported by `initialize`. */
 export interface AcpAgentInfo {
   name: string
   version: string
 }
 
-/** Un agent ACP opérationnel, avec son process vivant. */
+/** A running ACP agent, with its process alive. */
 export interface AcpAgent {
   readonly info: AcpAgentInfo
-  /** Version de protocole négociée lors d'`initialize`. */
+  /** Protocol version negotiated during `initialize`. */
   readonly protocolVersion: number
-  /** Inventaire complet (modèles, efforts, modes, permissions). */
+  /** Full inventory (models, efforts, modes, permissions). */
   inventory(): Promise<Inventory>
-  /** Raccourci : uniquement les modèles de la catégorie `model`. */
+  /** Shortcut: only the models of the `model` category. */
   models(): Promise<readonly AcpModel[]>
-  /** Ouvre une session ACP neuve. */
+  /** Opens a fresh ACP session. */
   open(options?: { cwd?: string; signal?: AbortSignal }): Promise<AcpSession>
-  /** Ferme la connexion puis tue le sous-processus. */
+  /** Closes the connection, then kills the subprocess. */
   close(): Promise<void>
 }
 
-/** Une session ACP ouverte, prête à recevoir des tours de prompt. */
+/** An open ACP session, ready to receive prompt turns. */
 export interface AcpSession {
   readonly sessionId: string
-  /** Inventaire tel que renvoyé par `session/new` (et rafraîchi par les updates). */
+  /** Inventory as returned by `session/new` (refreshed by updates). */
   inventory(): Inventory
-  /** Raccourci : change la valeur courante de l'option de catégorie `model`. */
+  /** Shortcut: change the current value of the `model` category option. */
   setModel(modelId: string): Promise<void>
-  /** Change une option quelconque (`reasoning_effort`, `allow_all`…). */
+  /** Change any option (`reasoning_effort`, `allow_all`...). */
   setOption(configId: string, value: string): Promise<void>
   /**
-   * Le point que les trois adaptateurs ont en commun.
+   * The one point the three adapters share.
    *
-   * ⚠️ `signal` est **facultatif et piégeux** : ne pas le fournir ne doit pas
-   * être plus dangereux que de le fournir. L'implémentation annule donc le
-   * tour automatiquement quand le consommateur abandonne l'itération
-   * (`break`, `return`, `throw`) — avec ou sans signal.
+   * Note: `signal` is **optional and treacherous** - not providing it must not
+   * be more dangerous than providing it. The implementation therefore cancels
+   * the turn automatically when the consumer abandons the iteration (`break`,
+   * `return`, `throw`), with or without a signal.
    */
   prompt(
     request: NormalizedRequest,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<AcpEvent>
-  /** Libère le routage des updates et, si possible, ferme la session côté agent. */
+  /** Releases update routing and, if possible, closes the session agent-side. */
   close(): Promise<void>
 }

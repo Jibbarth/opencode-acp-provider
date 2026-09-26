@@ -1,15 +1,14 @@
 /**
- * A.4 — `verify:package` : le contrat du paquet, vérifié **par exécution**.
+ * `verify:package`: the package contract, verified **by execution**.
  *
- * Un point d'entrée qui n'exporte pas `setup` / `model`, ou un champ `package`
- * qui ne pointe sur rien, ne produit **aucune** erreur au chargement : le
- * serveur importe le module, ne trouve pas la fonction attendue, et le premier
- * chat échoue. `scripts/verify-package.mjs` attrape ça **avant** la publication.
+ * An entry point that does not export `setup` / `model`, or a `package` field
+ * pointing at nothing, produces **no** error at load time: the server imports
+ * the module, does not find the expected function, and the first chat fails.
+ * `scripts/verify-package.mjs` catches that **before** publication.
  *
- * Ces tests exécutent le script dans un process Node neuf, parce que sa
- * raison d'être est précisément de proving qu'un runtime **différent** de celui
- * du développement sait charger le paquet — donc un test dans le runtime de
- * test ne prouverait rien.
+ * These tests run the script in a fresh Node process, because its whole purpose
+ * is to prove that a runtime **different** from the development one can load the
+ * package - a test inside the test runtime would therefore prove nothing.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -23,21 +22,20 @@ const MANIFEST = fileURLToPath(new URL("../package.json", import.meta.url))
 const HOOK = fileURLToPath(new URL("../scripts/resolve-ts-extensions.mjs", import.meta.url))
 
 /**
- * Le binaire **Node**, et non `process.execPath`.
+ * The **Node** binary, not `process.execPath`.
  *
- * ⚠️ C'est le détail qui fait toute la valeur de ce fichier de test : la suite
- * tourne sous Bun, donc `process.execPath` est `bun` — et Bun résout
- * `./x.js` vers `./x.ts` et efface les types nativement. Lancer le script avec
- * lui testerait Bun, c'est-à-dire exactement ce que le script prétend **ne**
- * pas dépendre. `bun` échoue aussi sur la résolution : le test doit donc trouver
- * `node` par lui-même.
+ * Note: this detail is what gives the whole file its value. The suite runs under
+ * Bun, so `process.execPath` is `bun` - and Bun resolves `./x.js` to `./x.ts`
+ * and strips types natively. Running the script with it would test Bun, that is,
+ * exactly what the script claims **not** to depend on. `bun` also fails on the
+ * resolution, so the test has to find `node` by itself.
  */
 const NODE = Bun.which("node")
 if (NODE === null) {
   throw new Error("node est requis pour tester scripts/verify-package.mjs")
 }
 
-/** Lance le script et renvoie `{ code, stdout, stderr }`. */
+/** Runs the script and returns `{ code, stdout, stderr }`. */
 const run = async (script = SCRIPT, cwd?: string): Promise<{ code: number; stdout: string; stderr: string }> => {
   const proc = Bun.spawn([NODE, script], {
     stdout: "pipe",
@@ -53,38 +51,37 @@ const run = async (script = SCRIPT, cwd?: string): Promise<{ code: number; stdou
 }
 
 describe("verify:package", () => {
-  test("le paquet intact passe, et chaque contrat est nommé", async () => {
+  test("the intact package passes, and every contract is named", async () => {
     const { code, stdout } = await run()
-    // ⚠️ Ce test échouerait si le script contenait la moindre syntaxe
-    // TypeScript non effaçable (une « parameter property », par exemple) :
-    // Node n'efface les types qu'il sait effacer, et l'échec serait un
-    // `SyntaxError` sans rapport avec le contrat — d'où la valeur de le
-    // lancer par le **binaire Node** plutôt que par `process.execPath`.
+    // Note: this test would fail if the script held any TypeScript syntax Node
+    // cannot strip (a parameter property, say): Node only strips what it knows
+    // how to strip, and the failure would be a `SyntaxError` unrelated to the
+    // contract - hence the value of launching it with the **Node binary** rather
+    // than with `process.execPath`.
     expect(code).toBe(0)
-    // Les quatre contrats demandés, un par un, avec leur nom de champ.
+    // The four requested contracts, one by one, with their field name.
     expect(stdout).toContain("default.setup")
     expect(stdout).toContain("model")
     expect(stdout).toContain("Provider.Info.package")
     expect(stdout).toContain("contrat du paquet vérifié")
   })
 
-  test("le script n'utilise aucune API Bun, et vit dans un `.mjs`", async () => {
-    // La raison d'être de ce script est precisely de tourner chez qui publie,
-    // dans un runtime qui n'a pas Bun. Une dépendance à `Bun.spawn` ou
-    // `Bun.file` le ferait échouer *avant* le premier contrôle — le pire endroit
-    // pour un garde-fou.
+  test("the script uses no Bun API, and lives in a `.mjs`", async () => {
+    // The whole point of the script is to run wherever publishing happens, in a
+    // runtime that has no Bun. A dependency on `Bun.spawn` or `Bun.file` would
+    // make it fail *before* the first check - the worst place for a guard.
     expect(SCRIPT.endsWith(".mjs")).toBe(true)
     const source = await readFile(SCRIPT, "utf8")
-    // Ni l'identifiant global `Bun`, ni un shebang bun, ni un import interne.
+    // Neither the `Bun` global, nor a bun shebang, nor an internal import.
     expect(source).not.toMatch(/\bBun\s*[.[]/)
     expect(source.startsWith("#!/usr/bin/env node")).toBe(true)
-    // Le crochet de résolution est bien présent, sinon l'import échouerait sur
-    // le premier `./x.js` et le message parlerait de résolution, pas de contrat.
+    // The resolution hook is present, otherwise the import would fail on the
+    // first `./x.js` and the message would be about resolution, not contract.
     expect(source).toContain("resolve-ts-extensions.mjs")
     expect(HOOK.endsWith(".mjs")).toBe(true)
   })
 
-  test("`prepack` est bien branché, et il échoue si la vérification échoue", async () => {
+  test("`prepack` is properly wired, and fails when the verification fails", async () => {
     const manifest = JSON.parse(await readFile(MANIFEST, "utf8")) as {
       scripts?: Record<string, string>
     }
@@ -92,14 +89,14 @@ describe("verify:package", () => {
     expect(manifest.scripts?.["prepack"]).toContain("verify:package")
   })
 
-  test("le crochet de résolution ne réécrit que ce qui doit l'être", async () => {
-    // Le crochet ne doit toucher **que** les spécificateurs relatifs en `.js`
-    // dont un `.ts` existe : une dépendance qui s'appelle `x.js` doit rester
-    // intacte, sinon le paquet chargerait la mauvaise dépendance.
+  test("the resolution hook rewrites only what it should", async () => {
+    // The hook must touch **only** relative `.js` specifiers whose `.ts`
+    // exists: a dependency named `x.js` must stay intact, otherwise the package
+    // would load the wrong dependency.
     const probe = [
       `const hook = await import(${JSON.stringify(HOOK)})`,
       'const cases = ["./core/prompt.js", "../core/prompt.js", "effect", "./agent.js", "/abs.js"]',
-      // `src/acp/` : `../core/prompt.ts` existe, `./core/prompt.ts` non plus.
+      // `src/acp/`: `../core/prompt.ts` exists, `./core/prompt.ts` does not.
       `const parentURL = ${JSON.stringify(
         new URL("../src/acp/", import.meta.url).href,
       )}`,
@@ -116,15 +113,15 @@ describe("verify:package", () => {
       expect(code).toBe(0)
       const resolved: unknown = JSON.parse(stdout.trim())
       expect(resolved).toEqual([
-        // `src/acp/core/prompt.ts` n'existe pas ⇒ on ne réécrit pas.
+        // `src/acp/core/prompt.ts` does not exist => no rewrite.
         "./core/prompt.js",
-        // `src/core/prompt.ts` existe ⇒ réécriture.
+        // `src/core/prompt.ts` exists => rewrite.
         "../core/prompt.ts",
-        // Un paquet nu n'est jamais réécrit.
+        // A bare package is never rewritten.
         "effect",
-        // `src/acp/agent.ts` existe ⇒ réécriture.
+        // `src/acp/agent.ts` exists => rewrite.
         "./agent.ts",
-        // Un chemin absolu n'est jamais réécrit.
+        // An absolute path is never rewritten.
         "/abs.js",
       ])
     } finally {
@@ -132,18 +129,18 @@ describe("verify:package", () => {
     }
   })
 
-  test("un champ falsifié est nommé dans le message d'échec", async () => {
-    // On ne casse pas le `package.json` du dépôt : on en fait une copie dans un
-    // répertoire temporaire, avec le même script pointé dessus. Le script
-    // détermine sa racine **depuis son propre emplacement**, donc on copie les
-    // deux, et on n'altère que le manifeste.
+  test("a forged field is named in the failure message", async () => {
+    // The repository's `package.json` is not broken: a copy is made in a
+    // temporary directory, with the same script pointed at it. The script
+    // determines its root **from its own location**, so both are copied, and
+    // only the manifest is altered.
     const scratch = await mkdtemp(join(tmpdir(), "acp-verify-"))
     const root = fileURLToPath(new URL("..", import.meta.url))
     try {
       const { cp } = await import("node:fs/promises")
       await cp(join(root, "scripts"), join(scratch, "scripts"), { recursive: true })
-      // Les points d'entrée doivent exister *dans la racine copiée* : on n'en
-      // copie que le `package.json` falsifié et un `src/` minimal.
+      // The entry points must exist *in the copied root*: the forged
+      // `package.json` and a minimal `src/` are what get copied.
       await cp(join(root, "src"), join(scratch, "src"), { recursive: true })
       const manifest = JSON.parse(await readFile(MANIFEST, "utf8")) as Record<string, unknown>
       const exportsField = manifest["exports"] as Record<string, string>
@@ -152,7 +149,7 @@ describe("verify:package", () => {
 
       const { code, stderr } = await run(join(scratch, "scripts", "verify-package.mjs"), scratch)
       expect(code).not.toBe(0)
-      // Le champ fautif est nommé, et le résumé les récapitule.
+      // The offending field is named, and the summary lists them.
       expect(stderr).toContain('exports["."]')
       expect(stderr).toContain("champ(s) en défaut")
     } finally {

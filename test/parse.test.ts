@@ -1,18 +1,18 @@
 /**
- * Tests de la phase P2b : le **cœur** du projet.
+ * The **core** of the project.
  *
- * Deux modules sont ici couverts, tous deux purs et sans process :
+ * Two modules are covered here, both pure and process-free:
  *
- * 1. `core/parse.ts` — la lecture de la sortie de l'agent. C'est le lecteur du
- *    contrat de sortie écrit par `core/prompt.ts` (§7.3). Les cas couverts sont
- *    exactement ceux qu'un agent produit en vrai : du JSON noyé dans du texte, un
- *    objet dans un bloc de markdown, des accolades **dans une chaîne**, une
- *    réponse valide mais vide de sens, un nom d'outil inventé.
- * 2. `core/prompt.ts` — l'écriture du contrat : ordre des sections, catalogue
- *    d'outils, exemple reconstruit, et repli sur un `schema` illisible.
+ * 1. `core/parse.ts` - reading the agent's output. It is the reader of the output
+ *    contract written by `core/prompt.ts`. The cases covered are exactly those a
+ *    real agent produces: JSON drowned in prose, an object inside a markdown
+ *    block, braces **inside a string**, a valid but semantically empty answer, an
+ *    invented tool name.
+ * 2. `core/prompt.ts` - writing the contract: section order, tool catalogue,
+ *    rebuilt example, and the fallback for an unreadable `schema`.
  *
- * Ces tests ne lancent **aucun** sous-processus : c'est ce qui permet de couvrir
- * une sortie d'agent qui n'a rien à voir avec ce que le faux agent sait produire.
+ * These tests spawn **no** subprocess, which is what allows covering an agent
+ * output nothing like what the fake agent can produce.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -22,7 +22,7 @@ import { renderRequest } from "../src/core/prompt.js"
 import type { NormalizedRequest, NormalizedTool } from "../src/core/types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilitaires
+// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
 const READ: NormalizedTool = {
@@ -32,7 +32,7 @@ const READ: NormalizedTool = {
 }
 const BASH: NormalizedTool = { name: "bash", description: "Exécute une commande", schema: {} }
 
-/** Le message d'un échec, en exigeant qu'il existe (sinon le test ne teste rien). */
+/** A failure's message, requiring that it exists (otherwise the test tests nothing). */
 const failure = (raw: string, tools: readonly NormalizedTool[] = [READ]): string => {
   const parsed = parseAgentOutput(raw, tools)
   if (parsed.ok) throw new Error(`un échec était attendu, obtenu : ${JSON.stringify(parsed.output)}`)
@@ -40,7 +40,7 @@ const failure = (raw: string, tools: readonly NormalizedTool[] = [READ]): string
   return parsed.error.message
 }
 
-/** La valeur lue, en exigeant un succès. */
+/** The read value, requiring a success. */
 const output = (raw: string, tools: readonly NormalizedTool[] = [READ]) => {
   const parsed = parseAgentOutput(raw, tools)
   if (!parsed.ok) throw new Error(parsed.error.message)
@@ -57,56 +57,57 @@ const baseRequest: NormalizedRequest = {
 // core/parse.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("parseAgentOutput — extraction", () => {
-  test("un objet JSON direct", () => {
+describe("parseAgentOutput - extraction", () => {
+  test("a direct JSON object", () => {
     expect(output('{"type":"text","text":"pong"}')).toEqual({ type: "text", text: "pong" })
   })
 
-  test("des espaces autour ne changent rien", () => {
+  test("surrounding whitespace changes nothing", () => {
     expect(output('\n  {"type":"text","text":"pong"}  \n')).toEqual({ type: "text", text: "pong" })
   })
 
-  test("un objet dans un bloc ```json", () => {
+  test("an object in a ```json block", () => {
     const raw = 'Voici ma réponse :\n```json\n{"type":"text","text":"pong"}\n```\nCordialement.'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 
-  test("un objet dans un bloc ``` sans langage", () => {
+  test("an object in a ``` block with no language", () => {
     const raw = '```\n{"type":"text","text":"pong"}\n```'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 
-  test("un objet JSON enchâssé dans du texte", () => {
-    // Le cas le plus fréquent chez les agents : une phrase d'introduction.
+  test("a JSON object embedded in prose", () => {
+    // The most frequent case with agents: an introductory sentence.
     const raw = 'Bien sûr ! Voici le résultat : {"type":"text","text":"pong"} — bonne journée.'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 
-  test("le premier objet exploitable gagne", () => {
+  test("the first usable object wins", () => {
     const raw = '{"type":"text","text":"un"}{"type":"text","text":"deux"}'
     expect(output(raw)).toEqual({ type: "text", text: "un" })
   })
 
-  test("le premier objet est ignoré s'il n'a pas un type connu", () => {
+  test("the first object is skipped when it has no known type", () => {
     const raw = '{"type":"schema","value":1}\n{"type":"text","text":"deux"}'
     expect(output(raw)).toEqual({ type: "text", text: "deux" })
   })
 
-  test("une accolade dans une chaîne ne referme pas l'objet", () => {
-    // ⚠️ C'est LE piège de l'extraction naïve « premier `{`, premier `}` » : sans
-    // suivi des chaînes, l'objet serait coupé et la lecture échouerait.
+  test("a brace inside a string does not close the object", () => {
+    // Note: this is THE trap of the naive "first `{`, first `}`" extraction:
+    // without tracking strings, the object would be cut and the read would
+    // fail.
     const raw = '{"type":"text","text":"voici {une} accolade et un \\" guillemet"}'
     expect(output(raw)).toEqual({ type: "text", text: 'voici {une} accolade et un " guillemet' })
   })
 
-  test("un échappement de fin de chaîne est géré", () => {
-    // `\\"` est un guillemet **dans** la chaîne : la fermeture de la chaîne arrive
-    // après, sinon le `}` final serait avalé.
+  test("a trailing string escape is handled", () => {
+    // `\\"` is a quote **inside** the string: the string's closing quote comes
+    // after, otherwise the final `}` would be swallowed.
     const raw = '{"type":"text","text":"une barre \\\\ puis }"}'
     expect(output(raw)).toEqual({ type: "text", text: "une barre \\ puis }" })
   })
 
-  test("des objets imbriqués ne confondent pas l'extraction", () => {
+  test("nested objects do not confuse the extraction", () => {
     const raw = '{"type":"tool","name":"bash","arguments":{"command":{"nested":{"deep":true}}}}'
     expect(output(raw, [READ, BASH])).toEqual({
       type: "tool",
@@ -115,73 +116,73 @@ describe("parseAgentOutput — extraction", () => {
     })
   })
 
-  test("un `{` non fermé n'empêche pas de lire la suite", () => {
+  test("an unclosed `{` does not prevent reading the rest", () => {
     const raw = 'une accolade orpheline { puis {"type":"text","text":"pong"}'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 })
 
-describe("parseAgentOutput — validation du fond", () => {
-  test("une sortie vide est une erreur, pas un texte vide", () => {
-    // Le cas limite relevé en réel : un agent peut renvoyer « rien » après avoir
-    // accepté le contrat. Un texte vide silencieux ferait croire à une réponse.
+describe("parseAgentOutput - substantive validation", () => {
+  test("an empty output is an error, not empty text", () => {
+    // The edge case seen in real runs: an agent can return "nothing" after
+    // having accepted the contract. A silent empty text would suggest an answer.
     expect(failure("")).toContain("aucune sortie exploitable")
     expect(failure("   \n  ")).toContain("aucune sortie exploitable")
   })
 
-  test("un texte vide est une erreur", () => {
-    // ⚠️ « JSON valide mais vide de sens » : la forme est bonne, le fond ne l'est pas.
+  test("empty text is an error", () => {
+    // Note: "valid JSON but empty of meaning": the shape is right, the substance is not.
     expect(failure('{"type":"text","text":""}')).toContain("texte exploitable")
   })
 
-  test("un texte composé d'espaces est une erreur", () => {
+  test("whitespace-only text is an error", () => {
     expect(failure('{"type":"text","text":"   "}')).toContain("texte exploitable")
   })
 
-  test("un champ `text` absent est une erreur", () => {
+  test("a missing `text` field is an error", () => {
     expect(failure('{"type":"text"}')).toContain("texte exploitable")
   })
 
-  test("un `text` non textuel est une erreur", () => {
+  test("a non-textual `text` is an error", () => {
     expect(failure('{"type":"text","text":42}')).toContain("texte exploitable")
   })
 
-  test("du texte brut est une erreur", () => {
+  test("raw prose is an error", () => {
     expect(failure("Bonjour, je peux vous aider.")).toContain("aucun objet JSON")
   })
 
-  test("du JSON invalide est une erreur", () => {
+  test("invalid JSON is an error", () => {
     expect(failure('{"type":"text","text":')).toContain("aucun objet JSON")
   })
 
-  test("un type inconnu est une erreur qui nomme ce qu'il a trouvé", () => {
+  test("an unknown type is an error naming what it found", () => {
     const message = failure('{"type":"réponse","text":"pong"}')
     expect(message).toContain("réponse")
     expect(message).toContain('"text"')
   })
 
-  test("un nom d'outil inconnu est une erreur qui nomme l'outil ET les noms acceptés", () => {
-    // Aucune dégradation silencieuse en texte : l'utilisateur doit voir que le
-    // travail demandé est perdu, et avec quoi le refaire.
+  test("an unknown tool name is an error naming the tool AND the accepted names", () => {
+    // No silent degradation into text: the user must see that the requested work
+    // is lost, and with what to redo it.
     const message = failure('{"type":"tool","name":"shell","arguments":{}}', [READ, BASH])
     expect(message).toContain("shell")
     expect(message).toContain("read, bash")
   })
 
-  test("une demande d'outil sans catalogue échoue en le disant", () => {
+  test("a tool request with no catalogue fails saying so", () => {
     const message = failure('{"type":"tool","name":"read","arguments":{}}', [])
     expect(message).toContain("read")
     expect(message).toContain("aucun")
   })
 
-  test("un `name` absent ou vide est une erreur", () => {
+  test("a missing or empty `name` is an error", () => {
     expect(failure('{"type":"tool","arguments":{}}')).toContain("ne nomme aucun outil")
     expect(failure('{"type":"tool","name":"","arguments":{}}')).toContain("ne nomme aucun outil")
   })
 
-  test("le nom doit être EXACT : ni préfixe, ni casse différente", () => {
-    // Le nom est la clé que OpenCode utilise pour trouver l'outil : une
-    // approximation ne ferait qu'un `tool-call` que rien ne peut exécuter.
+  test("the name must be EXACT: no prefix, no different case", () => {
+    // The name is the key OpenCode uses to find the tool: an approximation would
+    // only produce a `tool-call` nothing can execute.
     expect(failure('{"type":"tool","name":"Read","arguments":{}}')).toContain("read")
     expect(failure('{"type":"tool","name":"read_file","arguments":{}}')).toContain("read")
   })
@@ -199,8 +200,8 @@ describe("parseAgentOutput — validation du fond", () => {
     expect(message).toContain("read")
   })
 
-  test("des `arguments` absents valent un objet vide, pas une erreur", () => {
-    // Un outil sans paramètre mérite un appel, pas un tour perdu.
+  test("absent `arguments` mean an empty object, not an error", () => {
+    // A parameterless tool deserves a call, not a lost turn.
     expect(output('{"type":"tool","name":"bash"}', [READ, BASH])).toEqual({
       type: "tool",
       name: "bash",
@@ -208,29 +209,29 @@ describe("parseAgentOutput — validation du fond", () => {
     })
   })
 
-  test("des `arguments` invalides ne sont pas validés contre le schéma", () => {
-    // OpenCode valide l'entrée au moment de l'exécution : le relecteur n'a pas à
-    // être une seconde définition de la vérité sur les schemas.
+  test("invalid `arguments` are not validated against the schema", () => {
+    // OpenCode validates the input at execution time: the reader does not have to
+    // be a second definition of the truth about schemas.
     const output_ = output('{"type":"tool","name":"read","arguments":{"filePath":42}}')
     expect(output_).toEqual({ type: "tool", name: "read", arguments: { filePath: 42 } })
   })
 
-  test("le message d'erreur contient un extrait borné de la sortie", () => {
-    // Une réponse valide noyée dans 5 000 caractères de bruit est **lue** : la
-    // tolérance de l'extraction fait son travail.
+  test("the error message holds a bounded excerpt of the output", () => {
+    // A valid answer drowned in 5 000 characters of noise is **read**: the
+    // extraction's tolerance does its job.
     const long = `x`.repeat(5000)
     expect(output(`voici : ${long} {"type":"text","text":"pong"}`)).toEqual({
       type: "text",
       text: "pong",
     })
-    // Quand la lecture échoue, l'extrait est borné : noyer un message dans le
-    // transcript rendrait le diagnostic plus dur que l'erreur qu'il décrit.
+    // When the read fails, the excerpt is bounded: drowning a message in the
+    // transcript would make the diagnosis harder than the error it describes.
     const bounded = failure(`voici : ${long}`)
     expect(bounded.length).toBeLessThan(600)
     expect(bounded).toContain("…")
   })
 
-  test("un message d'erreur sur une sortie vide le dit", () => {
+  test("an error message on an empty output says so", () => {
     expect(failure("")).toContain("sortie vide")
   })
 })
@@ -239,8 +240,8 @@ describe("parseAgentOutput — validation du fond", () => {
 // core/prompt.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("renderRequest — structure du prompt", () => {
-  test("les sections apparaissent dans l'ordre du §7.3", () => {
+describe("renderRequest - prompt structure", () => {
+  test("the sections appear in the canonical order", () => {
     const rendered = renderRequest(baseRequest)
     const role = rendered.indexOf("## Rôle")
     const system = rendered.indexOf("## Instructions système")
@@ -253,26 +254,26 @@ describe("renderRequest — structure du prompt", () => {
     expect(role).toBe(0)
   })
 
-  test("le système est repris tel quel, sans réécriture", () => {
+  test("the system prompt is taken as-is, without rewriting", () => {
     expect(renderRequest(baseRequest)).toContain("SYSTÈME")
   })
 
-  test("le catalogue nomme chaque outil, sa description et son schéma sérialisé", () => {
+  test("the catalogue names every tool, its description and its serialised schema", () => {
     const rendered = renderRequest(baseRequest)
     expect(rendered).toContain("### read")
     expect(rendered).toContain("Lit un fichier")
     expect(rendered).toContain('"required":["filePath"]')
   })
 
-  test("les noms d'outils sont imposés explicitement", () => {
-    // L'agent doit choisir un nom **parmi ceux-là** : le contrat le dit, et le
-    // catalogue est la seule source de vérité.
+  test("tool names are explicitly mandated", () => {
+    // The agent must pick a name **among those**: the contract says so, and the
+    // catalogue is the only source of truth.
     const rendered = renderRequest(baseRequest)
     expect(rendered).toContain("caractère pour caractère")
     expect(rendered).toContain("read")
   })
 
-  test("le transcript garde son préfixe de rôle", () => {
+  test("the transcript keeps its role prefix", () => {
     const rendered = renderRequest({
       ...baseRequest,
       messages: [
@@ -286,28 +287,29 @@ describe("renderRequest — structure du prompt", () => {
     expect(rendered).toContain("Outil read : # README")
   })
 
-  test("l'id d'un résultat d'outil n'est pas rendu", () => {
-    // Il sert au round-trip OpenCode → nous, pas au modèle : le montrer
-    // l'inviterait à fabriquer un identifiant.
+  test("a tool result's id is not rendered", () => {
+    // It serves the OpenCode round-trip, not the model: showing it would invite
+    // the model to fabricate an identifier.
     expect(renderRequest(baseRequest)).not.toContain("call-1")
   })
 
-  test("le contrat interdit le texte autour et les outils natifs", () => {
+  test("the contract forbids surrounding prose and native tools", () => {
     const rendered = renderRequest(baseRequest)
     expect(rendered).toContain("un seul objet JSON")
     expect(rendered).toContain("aucun texte avant")
     expect(rendered).toContain("N'appelle aucun outil natif")
   })
 
-  test("les deux formes du contrat sont écrites, et exemplifiées", () => {
+  test("both shapes of the contract are written and exemplified", () => {
     const rendered = renderRequest(baseRequest)
     expect(rendered).toContain('{"type":"text","text":"<ta réponse>"}')
     expect(rendered).toContain('{"type":"text","text":"Le fichier contient 42 lignes."}')
   })
 
-  test("l'exemple d'outil est reconstruit depuis le catalogue réel", () => {
-    // Un exemple figé pourrait citer un outil absent : l'agent le recopierait et
-    // l'appel serait refusé. Celui-ci est donc dérivé du **premier** outil.
+  test("the tool example is rebuilt from the real catalogue", () => {
+    // A frozen example could cite an absent tool: the agent would copy it and the
+    // call would be refused. This one is therefore derived from the **first**
+    // tool.
     const rendered = renderRequest({
       ...baseRequest,
       tools: [{ ...BASH, schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } }],
@@ -316,7 +318,7 @@ describe("renderRequest — structure du prompt", () => {
     expect(rendered).not.toContain('"name":"read"')
   })
 
-  test("l'exemple d'arguments respecte les `required` et les `enum` du schéma", () => {
+  test("the argument example honours the schema's `required` and `enum`", () => {
     const rendered = renderRequest({
       ...baseRequest,
       tools: [
@@ -334,42 +336,42 @@ describe("renderRequest — structure du prompt", () => {
         },
       ],
     })
-    // Seule la propriété requise est dans l'exemple, avec la première valeur de
-    // l'`enum` — une valeur inventée pour un `enum` serait refusée par le schéma.
+    // Only the required property is in the example, with the first value of the
+    // `enum` - an invented value for an `enum` would be refused by the schema.
     expect(rendered).toContain('"arguments":{"mode":"rapide"}')
   })
 
-  test("sans outil, le catalogue le dit et le contrat n'exemplifie pas d'appel", () => {
+  test("with no tool, the catalogue says so and the contract exemplifies no call", () => {
     const rendered = renderRequest({ ...baseRequest, tools: [] })
     expect(rendered).toContain("aucun outil n'est disponible")
-    // La **forme** reste décrite, mais aucun exemple ne peut citer un outil : il
-    // n'y en a pas, et l'agent n'aurait qu'un nom à recopier.
+    // The **shape** is still described, but no example can cite a tool: there is
+    // none, and the agent would only have a name to copy.
     expect(rendered).toContain('"name":"<nom exact d\'un outil listé plus haut>"')
     expect(rendered).not.toContain('{"type":"tool","name":"read"')
   })
 
-  test("sans message, le transcript le dit", () => {
+  test("with no message, the transcript says so", () => {
     expect(renderRequest({ ...baseRequest, messages: [] })).toContain("aucun message précédent")
   })
 
-  test("le rendu est stable : mêmes entrées, même sortie", () => {
+  test("the rendering is stable: same inputs, same output", () => {
     expect(renderRequest(baseRequest)).toBe(renderRequest(baseRequest))
   })
 })
 
-describe("renderRequest — schémas d'outils illisibles", () => {
-  test("un schema absent ne casse pas le catalogue", () => {
-    // ⚠️ `NormalizedTool.schema` est typé `unknown` : **rien** ne le valide en
-    // amont. Un `undefined` sérialiserait en `undefined` et laisserait l'agent
-    // sans aucune information sur l'outil.
+describe("renderRequest - unreadable tool schemas", () => {
+  test("a missing schema does not break the catalogue", () => {
+    // Note: `NormalizedTool.schema` is typed `unknown` and **nothing** validates
+    // it upstream. An `undefined` would serialise to `undefined` and leave the
+    // agent with no information at all about the tool.
     const rendered = renderRequest({ ...baseRequest, tools: [{ name: "read", description: "", schema: undefined }] })
     expect(rendered).toContain("### read")
     expect(rendered).toContain("aucun schéma")
   })
 
-  test("un schema circulaire ne fait pas tomber la construction du prompt", () => {
-    // `JSON.stringify` **lève** sur une structure circulaire : sans repli, une
-    // seule entrée malformée ferait échouer le prompt entier, avant tout spawn.
+  test("a circular schema does not bring down the prompt build", () => {
+    // `JSON.stringify` **throws** on a circular structure: without a fallback, a
+    // single malformed entry would fail the whole prompt, before any spawn.
     const circular: Record<string, unknown> = { type: "object" }
     circular["self"] = circular
     const rendered = renderRequest({ ...baseRequest, tools: [{ name: "read", description: "", schema: circular }] })
@@ -377,7 +379,7 @@ describe("renderRequest — schémas d'outils illisibles", () => {
     expect(rendered).toContain("non sérialisable")
   })
 
-  test("un schema qui ne sérialise pas en JSON (BigInt) a un repli aussi", () => {
+  test("a schema that does not serialise to JSON (BigInt) has a fallback too", () => {
     const rendered = renderRequest({
       ...baseRequest,
       tools: [{ name: "read", description: "", schema: { taille: 1n } }],
@@ -386,7 +388,7 @@ describe("renderRequest — schémas d'outils illisibles", () => {
     expect(rendered).toContain("non sérialisable")
   })
 
-  test("un schema en texte libre est rendu tel quel, sans être jeté", () => {
+  test("a free-form schema is rendered as-is, not discarded", () => {
     const rendered = renderRequest({
       ...baseRequest,
       tools: [{ name: "read", description: "", schema: "un objet quelconque" }],

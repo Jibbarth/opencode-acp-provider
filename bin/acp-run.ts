@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 /**
- * Point d'entrée binaire de la CLI de debug : `bin/acp-run.ts`.
+ * Binary entry point of the debug CLI.
  *
- * Toute la logique vit dans `src/adapters/cli.ts` (couche `adapters/`) ; ce
- * fichier ne fait que lier — ce qui garde `src/` en TypeScript pur, exécutable
- * par `bun` sans étape de build.
+ * All the logic lives in `src/adapters/cli.ts`; this file only wires it up,
+ * which keeps `src/` pure TypeScript, runnable by `bun` with no build step.
  *
  *   bun run bin/acp-run.ts --command copilot --arg --acp --list-models
  */
