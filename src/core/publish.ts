@@ -185,6 +185,15 @@ export interface PublishOptions {
   readonly id?: string
   /** Readable provider label, e.g. `"ACP - Copilot"`. */
   readonly label?: string
+  /**
+   * The agent's own name, e.g. `"Copilot"` - the origin shown on every model.
+   *
+   * Note: without it two providers exposing the same model id are told apart
+   * only by the provider column of the picker, which is collapsed or scrolled
+   * away exactly when the list is long. The name is the one place the origin is
+   * always visible.
+   */
+  readonly agent?: string
   /** Provider settings, handed back to `model()`. */
   readonly settings?: Readonly<Record<string, unknown>>
   /** Announced limits; `DEFAULT_LIMITS` otherwise. */
@@ -226,7 +235,18 @@ const isPseudoModel = (id: string): boolean => {
  * `Gpt 5.6 Terra` where the agent shows `GPT-5.6 Terra`, and the model in
  * `/model` would no longer look like the agent's.
  */
-const displayName = (model: AcpModel): string => (model.name.trim() === "" ? model.id : model.name)
+/**
+ * The model's display name, with its origin when one is known.
+ *
+ * Note: the origin is **appended**, not prefixed. The model id is what the user
+ * came looking for, so it stays first; the agent's own display name leads the
+ * sentence otherwise.
+ */
+export const displayName = (model: AcpModel, origin?: string): string => {
+  const base = model.name.trim() === "" ? model.id : model.name
+  if (origin === undefined || origin.trim() === "") return base
+  return `${base} (${origin.trim()})`
+}
 
 /**
  * Effort levels OpenCode can never deliver.
@@ -288,7 +308,7 @@ export const inventoryToModels = (
     seen.add(model.id)
     models.push({
       id: model.id,
-      name: displayName(model),
+      name: displayName(model, options.agent),
       capabilities: DEFAULT_CAPABILITIES,
       limit,
       variants,

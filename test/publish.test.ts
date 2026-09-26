@@ -173,6 +173,26 @@ describe("inventoryToModels (pure)", () => {
     expect(models[0]?.name).toBe("x-1")
   })
 
+  test("an unknown origin leaves the name alone, and an empty one is not invented", () => {
+    // Two providers can expose the same model id - `gpt-5.4` is on Copilot and on
+    // `opencode acp`. The origin is what tells them apart in the picker.
+    const withOrigin = inventoryToModels(
+      { ...emptyInventory(), models: [{ id: "gpt-5.4", name: "GPT-5.4" }] },
+      { agent: "Copilot" },
+    )
+    expect(withOrigin[0]?.name).toBe("GPT-5.4 (Copilot)")
+
+    const without = inventoryToModels({ ...emptyInventory(), models: [{ id: "gpt-5.4", name: "GPT-5.4" }] })
+    expect(without[0]?.name).toBe("GPT-5.4")
+
+    // An absent origin and an empty one are the same thing: no invented suffix.
+    const blank = inventoryToModels(
+      { ...emptyInventory(), models: [{ id: "gpt-5.4", name: "GPT-5.4" }] },
+      { agent: "   " },
+    )
+    expect(blank[0]?.name).toBe("GPT-5.4")
+  })
+
   test("the capabilities are textual, and `tools` is true", () => {
     for (const model of inventoryToModels(copilotInventory())) {
       expect(model.capabilities).toEqual({ tools: true, input: ["text"], output: ["text"] })

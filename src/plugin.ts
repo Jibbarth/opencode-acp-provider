@@ -608,6 +608,7 @@ const bringUp = async (
   const options: PublishOptions = {
     id: providerId,
     label: `ACP — ${acp.info.name}`,
+    agent: acp.info.name,
     settings: providerSettingsOf(agent, providerId),
     ...(agent.limits === undefined ? {} : { limits: agent.limits }),
   }
