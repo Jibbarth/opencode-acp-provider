@@ -18,7 +18,7 @@
  * variants - is testable with no process, no import and no server.
  */
 
-import type { AcpModel, Inventory } from "./types.js"
+import type { AcpModel, Inventory, SessionMode } from "./types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Identity
@@ -341,6 +341,17 @@ export interface RawAgent {
   readonly env: Readonly<Record<string, string>> | undefined
   /** Note: only drives an all-or-nothing switch today, cf. `settings.allowedTools`. */
   readonly allowedTools: readonly string[] | undefined
+  /**
+   * ACP session strategy for this agent's requests.
+   *
+   * Note: absent means `fresh`, exactly as for the hand-written
+   * `providers.<id>.settings` - the two spell the same default, and an agent
+   * entry that says nothing about it must produce the provider it always did.
+   * Declared **per agent** because the mode is a property of the agent's cost
+   * profile, not of the request: a cheap fast agent and an expensive careful one
+   * have opposite interests here, and a single global switch cannot serve both.
+   */
+  readonly session?: SessionMode | undefined
   /** Limits announced for this agent's models. */
   readonly limits: ModelLimits | undefined
 }
@@ -392,6 +403,7 @@ export const DEFAULT_AGENT: RawAgent = {
   cwd: undefined,
   env: undefined,
   allowedTools: undefined,
+  session: undefined,
   limits: undefined,
 }
 
@@ -482,6 +494,29 @@ const readLimits = (
 }
 
 /**
+ * The session mode, read as one of two literals.
+ *
+ * Note the list is **authoritative** and the value is looked up in it rather than
+ * admitted as-is, so the returned type is correct by construction - the same
+ * reasoning as `optionalEnum` in `settings.ts`, which validates the very same
+ * field on the other side of the provider boundary. The two lists must agree, and
+ * a typo in either is a value the other refuses.
+ */
+const readSession = (
+  input: Record<string, unknown>,
+  path: string,
+): { readonly ok: true; readonly value: SessionMode | undefined } | { readonly ok: false; readonly message: string } => {
+  const SESSION_MODES: readonly SessionMode[] = ["fresh", "reuse"]
+  const raw = input["session"]
+  if (raw === undefined) return { ok: true, value: undefined }
+  const found = SESSION_MODES.find((mode) => mode === raw)
+  if (found === undefined) {
+    return invalid(`${path}.session`, `doit valoir ${SESSION_MODES.map((m) => `"${m}"`).join(", ")}`)
+  }
+  return { ok: true, value: found }
+}
+
+/**
  * Validates an agent entry.
  *
  * Note: `command` is the **only** mandatory field, and an empty command is a
@@ -522,6 +557,8 @@ const readAgent = (
   if (!env.ok) return env
   const allowedTools = readStringArray(raw, path, "allowedTools")
   if (!allowedTools.ok) return allowedTools
+  const session = readSession(raw, path)
+  if (!session.ok) return session
   const limits = readLimits(raw, path)
   if (!limits.ok) return limits
 
@@ -537,6 +574,7 @@ const readAgent = (
       cwd: cwd === undefined ? undefined : cwd,
       env: env.value,
       allowedTools: allowedTools.value,
+      session: session.value,
       limits: limits.value,
     },
   }
@@ -636,6 +674,12 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
  * overwrite, at merge time, the value the user put in `opencode.jsonc` under
  * `providers.acp.settings`.
  *
+ * Note `session` **is** published, and it is the only field whose value can
+ * contradict what a user wrote in `providers.<id>.settings`: an agent entry that
+ * says `reuse` wins there, because the agent entry *is* the per-agent
+ * configuration. Omitting the key when the agent says nothing keeps the two
+ * independent, and a provider written by hand keeps its own choice.
+ *
  * Note: `providerId` **is** published, and only when it differs from the
  * default. `model(modelID, settings)` receives no other trace of which provider
  * it is building a route for, so this key is the sole place the id can travel -
@@ -651,5 +695,6 @@ export const providerSettingsOf = (
   ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
   ...(agent.env === undefined ? {} : { env: { ...agent.env } }),
   ...(agent.allowedTools === undefined ? {} : { allowedTools: [...agent.allowedTools] }),
+  ...(agent.session === undefined ? {} : { session: agent.session }),
   ...(providerId === PROVIDER_ID ? {} : { provider: providerId }),
 })

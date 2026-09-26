@@ -66,6 +66,10 @@ en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarr
   exactement une extension de celui déjà envoyé, et toute divergence (édition,
   fork, `/compact`, changement de modèle) retombe sur une session neuve. Le
   défaut reste `"fresh"`.
+- **`reuse` gonfle le compteur de tokens d'OpenCode.** Mesuré : sur une session
+  reprise, `copilot` annonce un `input` cumulé (≈ 4,4× sa fenêtre réelle), que
+  nous forwardons tel quel. La fenêtre de l'agent n'est pas affectée ; le seuil de
+  `/compact`, si. Voir « Sessions persistantes ».
 - **Le rafraîchissement est déclenché, pas continu.** L'inventaire est relu au
   plus une fois par `refreshMs` (60 s par défaut), et seulement après un
   `session.idle`. Le `config_option_update` des sessions du transport n'est pas
@@ -169,15 +173,43 @@ Ce que la reprise apporte, en revanche, se lit dans `cacheWrite` :
 D'où une latence par tour **~3× moindre** et plate, contre une latence qui
 **croit** avec la conversation en `fresh`.
 
-⚠️ Le contrepartie est dans la même colonne : `input` de l'agent **croit linéairement**
-en `reuse` (17 k → 75 k sur quatre tours), parce que sa session contient tout ce
-qu'il a déjà reçu, alors qu'en `fresh` il est borné par la taille de l'historique
-rendu. Sur une longue conversation, `reuse` atteint donc la fenêtre de contexte
-de l'agent **plus tôt**. C'est le vrai compromis, et il n'a rien d'un oubli.
+⚠️ Le contrepartie est dans la même colonne : `input` **croit linéairement** en
+`reuse` (17 k → 75 k sur quatre tours) alors qu'il reste plat en `fresh`. La
+première explication — « la session de l'agent contient tout ce qu'il a déjà reçu »
+— **est fausse, et la mesure le montre**. En `fresh`, l'historique rendu dans le
+prompt occupe exactement la même place dans la fenêtre de l'agent ; ce n'est pas
+l'accumulation côté session qui differentiate les deux modes.
+
+Ce que `input` vaut vraiment, c'est le **compteur de cache cumulé de la session**
+sur une session reprise : `cacheRead + cacheWrite`, soit 106 805 + 29 962 = 136 767
+pour un `input` de 136 785 au tour 6, là où la fenêtre réelle en occupe 30 809.
+Relevé par `npm run verify:sessions` (six tours, remplissage contrôlé), en
+comparant `input` au `usage_update.used` que l'agent annonce lui-même :
+
+| tour 6, remplissage 9 000 car./tour | `input` rapporté | contexte réel (`usage_update`) |
+| --- | --- | --- |
+| `fresh` | 26 674 | 27 620 |
+| `reuse` | 136 785 | 30 809 |
+
+Donc les **fenêtres réelles se remplissent à la même vitesse** dans les deux modes
+(≈ 2 200 jetons/tour en `fresh`, ≈ 2 850 en `reuse`) — l'agent n'est jamais le
+facteur limitant, et `reuse` n'atteint pas sa fenêtre plus tôt que `fresh`.
+
+Le chiffre qui reste problématique est l'autre. `input` est ce que
+`adapters/opencode-protocol.ts` forward à `Usage.inputTokens` : **136 785 au lieu
+de 30 809**, soit un facteur 4,4. C'est ce compte que l'interface affiche et que
+le seuil de `/compact` d'OpenCode finit par rencontrer. (Ce qui est mesuré ici :
+le forwarding et le facteur ; le seuil exact d'OpenCode et sa façon d'agréger les
+usages par message ne sont pas dans ce dépôt et n'ont pas été extraits.)
+
+En `reuse`, une conversation se ferait donc compacter trop tôt, et l'indicateur
+de tokens afficherait un contexte qui n'existe pas. C'est la raison mesurée pour
+laquelle `fresh` reste le défaut — et elle n'a rien à voir avec un oubli de
+l'agent.
 
 Ce que la reprise n'apporte donc **pas** : une mémoire que `fresh` n'aurait pas.
-Ce qu'elle apporte : un coût par tour constant. `fresh` reste le défaut — plus
-simple, et correct — mais pour la raison mesurée ci-dessus, pas pour une autre.
+Ce qu'elle apporte : un prompt et une latence par tour constants. `fresh` reste le
+défaut — plus simple, correct, et le seul à annoncer un comptage de tokens exact.
 
 ### Comment une conversation est reconnue
 
@@ -348,6 +380,51 @@ côte à côte, et le réglage se fait par provider :
 ```jsonc
 { "provider": { "acp-copilot": { "options": { "session": "reuse" } } } }
 ```
+
+### Choisir un mode de session par agent
+
+`agents[].session` est le moyen de **déclarer le mode dans l'entrée d'agent**,
+c'est-à-dire à l'endroit où l'on décrit déjà la commande, le `cwd` et l'`env` :
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-acp-provider",
+      "options": {
+        "agents": [
+          {
+            "id": "copilot",
+            "command": "copilot",
+            "args": ["--acp"],
+            "session": "reuse"
+          },
+          {
+            "id": "codex",
+            "command": "npx",
+            "args": ["-y", "@agentclientprotocol/codex-acp"],
+            "session": "fresh"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Les deux formes écrivent le même réglage, et `agents[].session` **gagne** sur
+`provider.acp-copilot.options.session` : l'entrée d'agent *est* la configuration
+par agent. Un agent qui ne dit rien ne publie **aucune** clé `session`, donc une
+configuration écrite avant l'existence du champ produit exactement le même
+provider qu'avant — et c'est vérifié par un test qui compare les clés publiées, pas
+seulement le comportement.
+
+| `agents[].session` | effet |
+| --- | --- |
+| absent (défaut) | `fresh` — une session ACP par appel de modèle |
+| `"fresh"` | idem, explicite |
+| `"reuse"` | une session ACP par conversation, delta seul |
+| autre valeur | refusé : `options.agents[N].session doit valoir "fresh", "reuse"` |
 
 ### L'identifiant du provider
 

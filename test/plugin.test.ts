@@ -421,6 +421,29 @@ describe("one provider per agent", () => {
     expect(providers[1]?.settings).toEqual({ command: process.execPath, args: ["run", FAKE] })
   }, 30_000)
 
+  test("the session mode travels per agent, and an entry that says nothing adds no key", async () => {
+    // The gap this closes, end to end: `session` existed in the settings but had
+    // no way in from an agent entry, so a multi-agent configuration could not put
+    // one agent in `reuse` and another in `fresh`.
+    const { code, stdout } = await setup(`[
+      { ${NAMED("rapide")} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}], session: "reuse" },
+      { ${NAMED("prudent")} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}], session: "fresh" },
+      { ${NAMED("muet")} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] },
+    ]`)
+    expect(code).toBe(0)
+    const { providers } = read(stdout)
+    const settingsOf = (id: string): Readonly<Record<string, unknown>> => {
+      const entry = providers.find((candidate) => candidate.id === `acp-${id}`)
+      if (entry === undefined) throw new Error(`provider absent : acp-${id}`)
+      return entry.settings
+    }
+    expect(settingsOf("rapide")["session"]).toBe("reuse")
+    expect(settingsOf("prudent")["session"]).toBe("fresh")
+    // Absent, not `"fresh"`: an undefined value published as such would overwrite,
+    // at merge time, whatever the user put in `providers.acp-muet.settings`.
+    expect(Object.keys(settingsOf("muet"))).not.toContain("session")
+  }, 30_000)
+
   test("an agent that does not start does not prevent the others from registering", async () => {
     // The failure mode that mattered when a single provider was registered: one
     // broken entry in the list used to cost the user the whole configuration.

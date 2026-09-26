@@ -303,6 +303,23 @@ export const allowAllPermissions: AcpPermissionPolicy = (request) => {
 // Agent & session
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * ACP session strategy, per request.
+ *
+ * Note: declared here rather than in `src/settings.ts`, because `core/publish.ts`
+ * needs it for `RawAgent` and `settings.ts` already depends on this module - the
+ * other way round would be a cycle, and a duplicated union would be free to drift
+ * from the validation that admits it.
+ *
+ * - `fresh`: one session per model call, the whole history replayed. Correct by
+ *   construction, at the cost of a `session/new` per call and of an agent that
+ *   forgets everything between two calls.
+ * - `reuse`: one session per conversation, only the delta sent. Cheaper, and
+ *   safe only because the delta is proven message by message - see
+ *   `core/session-key.ts`.
+ */
+export type SessionMode = "reuse" | "fresh"
+
 /** Agent identity, as reported by `initialize`. */
 export interface AcpAgentInfo {
   name: string

@@ -399,6 +399,7 @@ describe("parsePluginConfig (pure)", () => {
           cwd: "/srv/projet",
           env: { HTTPS_PROXY: "http://proxy:3128" },
           allowedTools: ["*"],
+          session: "reuse",
           limits: { context: 400_000, output: 64_000 },
         },
       ],
@@ -412,6 +413,7 @@ describe("parsePluginConfig (pure)", () => {
       cwd: "/srv/projet",
       env: { HTTPS_PROXY: "http://proxy:3128" },
       allowedTools: ["*"],
+      session: "reuse",
       limits: { context: 400_000, output: 64_000 },
     })
     expect(refreshMs).toBe(5_000)
@@ -487,6 +489,33 @@ describe("parsePluginConfig (pure)", () => {
     expect(ok({ agents: [{ command: "copilot", futureOption: true }] }).agents.length).toBe(1)
   })
 
+  test("`session` is admitted per agent, and a bad value is named", () => {
+    // The whole point of the field: one agent `reuse`, another `fresh`, from the
+    // place a user configures agents. A typo here would otherwise silently cost a
+    // `session/new` per model call, or - worse - be ignored.
+    const { agents } = ok({
+      agents: [
+        { id: "copilot", command: "copilot", session: "reuse" },
+        { id: "codex", command: "npx", session: "fresh" },
+        { id: "gpt", command: "gemini" },
+      ],
+    })
+    expect(agents.map((agent) => agent.session)).toEqual(["reuse", "fresh", undefined])
+    // Absence is not a third value: it has to reach `parseSettings` as `fresh`.
+    expect(parseSettings(providerSettingsOf(agents[2]!)).ok).toBe(true)
+  })
+
+  test("an invalid `session` is refused, naming the field and the two values", () => {
+    for (const value of ["Resume", "", true, 1, ["reuse"], null]) {
+      const result = parsePluginConfig({ agents: [{ command: "copilot", session: value }] })
+      expect(result.ok).toBe(false)
+      if (result.ok) continue
+      expect(result.message).toContain("options.agents[0].session")
+      expect(result.message).toContain('"fresh"')
+      expect(result.message).toContain('"reuse"')
+    }
+  })
+
   test("a negative or non-finite `refreshMs` is refused", () => {
     expect(parsePluginConfig({ refreshMs: -1 }).ok).toBe(false)
     expect(parsePluginConfig({ refreshMs: Number.NaN }).ok).toBe(false)
@@ -509,6 +538,40 @@ describe("parsePluginConfig (pure)", () => {
         limits: { context: 1, output: 1 },
       }),
     ).toEqual({ command: "npx", args: ["-y"], cwd: "/srv", env: { A: "1" }, allowedTools: ["*"] })
+  })
+
+  test("`session` reaches the route, and only when the agent asked for it", () => {
+    // The gap this closes: `session` was readable in `AcpProviderSettings` but had
+    // no way in from an agent entry, so a multi-agent configuration could not
+    // choose a mode per agent.
+    const reuse = ok({ agents: [{ command: "copilot", session: "reuse" }] }).agents[0]
+    const fresh = ok({ agents: [{ command: "copilot", session: "fresh" }] }).agents[0]
+    const silent = ok({ agents: [{ command: "copilot" }] }).agents[0]
+    if (reuse === undefined || fresh === undefined || silent === undefined) {
+      throw new Error("agent manquant")
+    }
+    expect(providerSettingsOf(reuse)).toEqual({ command: "copilot", session: "reuse" })
+
+    // Backward compatibility, stated as a test: the default agent now carries
+    // `session: undefined`, and that must not reach the route. The published
+    // object is compared key by key, so the assertion is about the bytes that
+    // OpenCode will merge, not about the provider happening to behave the same.
+    expect(providerSettingsOf(silent)).toEqual({ command: "copilot" })
+    expect(Object.keys(providerSettingsOf(silent))).not.toContain("session")
+    expect(providerSettingsOf(DEFAULT_AGENT)).toEqual(
+      providerSettingsOf({ ...DEFAULT_AGENT, session: undefined }),
+    )
+
+    for (const [agent, expected] of [
+      [reuse, "reuse"],
+      [fresh, "fresh"],
+      [silent, undefined],
+    ] as const) {
+      const parsed = parseSettings(providerSettingsOf(agent))
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) return
+      expect(parsed.value.session).toBe(expected)
+    }
   })
 
   test("the published settings are accepted as-is by `parseSettings`", () => {

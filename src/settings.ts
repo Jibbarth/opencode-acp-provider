@@ -15,12 +15,19 @@
  */
 
 import { PROVIDER_ID } from "./core/publish.js"
+import type { SessionMode } from "./core/types.js"
 
 /** Redirection of the ACP agent's stderr. */
 export type StderrMode = "inherit" | "ignore" | "pipe"
 
-/** ACP session strategy per request. */
-export type SessionMode = "reuse" | "fresh"
+/**
+ * ACP session strategy per request.
+ *
+ * Note: re-exported from the portable core, which is where `core/publish.ts` can
+ * reach it without importing this file back. The public surface of the package
+ * keeps the historical `settings` path.
+ */
+export type { SessionMode }
 
 /**
  * Validated, normalised settings.
