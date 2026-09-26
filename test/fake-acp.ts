@@ -44,6 +44,8 @@
  * | `FAKE_CUMULATIVE_USAGE=1`      | the turn reports the **session's** cache accounting, as a resumed agent does |
  * | `FAKE_STOP_REASON=<x>`         | the turn's `stopReason` (`max_tokens`, `refusal`, `cancelled`) |
  * | `FAKE_BOOLEAN_OPTION=1`        | adds a `configOption` of `type: "boolean"`                 |
+ * | `FAKE_EFFORT_ID=<id>`          | renames the `thought_level` option's `id` (`opencode acp` uses `effort`) |
+ * | `FAKE_NO_PERMISSIONS=1`        | publishes **no** `permissions` category                     |
  * | `FAKE_NO_CONFIG_OPTIONS=1`     | `session/new` **omits** `configOptions` (non-conforming third party) |
  * | `FAKE_SET_OMITS_CONFIG_OPTIONS=1` | `set_config_option` answers without `configOptions`      |
  * | `FAKE_ECHO_CONFIG=1`           | `PING` answers `PONG <model> <effort>`: the current options |
@@ -184,6 +186,17 @@ const MODELS = [
 
 const THOUGHT_LEVELS = ["none", "medium", "high"]
 
+/**
+ * The `id` of the `thought_level` option.
+ *
+ * Note: the default reproduces `copilot --acp` (`reasoning_effort`), but **no
+ * agent is obliged to name its options after ours**. `opencode acp` uses
+ * `effort` for the very same category, and a category is never a valid
+ * `configId`. The fake is therefore renameable: a suite that only ever saw
+ * `reasoning_effort` would pass with a category sent on the wire.
+ */
+const EFFORT_OPTION_ID = process.env["FAKE_EFFORT_ID"] ?? "reasoning_effort"
+
 /** The mode ids are URLs: that is the real case worth covering. */
 const MODES = [
   { value: "https://agentclientprotocol.com/registry/modes/agent#agent", name: "Agent" },
@@ -208,7 +221,7 @@ const CONFIG_OPTIONS: acp.SessionConfigOption[] = [
     options: MODELS,
   },
   {
-    id: "reasoning_effort",
+    id: EFFORT_OPTION_ID,
     name: "Reasoning effort",
     type: "select",
     category: "thought_level",
@@ -223,17 +236,23 @@ const CONFIG_OPTIONS: acp.SessionConfigOption[] = [
     currentValue: MODES[0]?.value ?? "",
     options: MODES,
   },
-  {
-    id: "allow_all",
-    name: "Allow all tools",
-    type: "select",
-    category: "permissions",
-    currentValue: "off",
-    options: [
-      { value: "on", name: "On" },
-      { value: "off", name: "Off" },
-    ],
-  },
+  // `FAKE_NO_PERMISSIONS=1`: `opencode acp` publishes no `permissions` category,
+  // and the client must run on a single model rather than assume it is there.
+  ...(flag("FAKE_NO_PERMISSIONS")
+    ? []
+    : [
+        {
+          id: "allow_all",
+          name: "Allow all tools",
+          type: "select",
+          category: "permissions",
+          currentValue: "off",
+          options: [
+            { value: "on", name: "On" },
+            { value: "off", name: "Off" },
+          ],
+        },
+      ] as acp.SessionConfigOption[]),
   // `FAKE_BOOLEAN_OPTION=1`: the only way to exercise the typed
   // `{ type: "boolean", value: bool }` payload of `session/set_config_option`.
   ...(flag("FAKE_BOOLEAN_OPTION") ? [BOOLEAN_OPTION] : []),
@@ -347,6 +366,19 @@ class FakeAgent {
         `Invalid model: ${String(params.value)}`,
       )
     }
+    // An unknown `configId` is refused, like every real agent measured
+    // (`Unknown config option '...'` on copilot, `unknown config option` on
+    // opencode). Accepting everything here is what let a **category** be sent
+    // as a `configId` pass unnoticed: the fake answered a request no agent
+    // would have honoured. The `set` below matches nothing in that case, so a
+    // lenient fake turns a protocol violation into a silent no-op.
+    const known = this.sessions.get(params.sessionId) ?? CONFIG_OPTIONS
+    if (!known.some((option) => option.id === params.configId)) {
+      throw acp.RequestError.invalidParams(
+        { configId: params.configId },
+        `Unknown config option '${params.configId}'`,
+      )
+    }
     const current = this.sessions.get(params.sessionId) ?? structuredClone(CONFIG_OPTIONS)
     const next = current.map((option) => {
       if (option.id !== params.configId) return option
@@ -386,11 +418,11 @@ class FakeAgent {
    */
   private echoConfig(sessionId: string): string {
     const current = this.sessions.get(sessionId) ?? CONFIG_OPTIONS
-    const read = (id: string): string => {
-      const option = current.find((entry) => entry.id === id)
+    const read = (category: string): string => {
+      const option = current.find((entry) => entry.category === category)
       return option === undefined ? "?" : String(option.currentValue)
     }
-    return `PONG ${read("model")} ${read("reasoning_effort")}`
+    return `PONG ${read("model")} ${read("thought_level")}`
   }
 
   /**

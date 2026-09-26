@@ -1226,6 +1226,76 @@ describe("parseInventory (pure)", () => {
     expect(inventory.currentThoughtLevel).toBe("high")
   })
 
+  test("the id fallback also knows `effort`, the id `opencode acp` uses", () => {
+    // Measured on `opencode acp`: `category: thought_level` with `id: effort`.
+    // The entry is therefore **not** what makes that agent work - it sends its
+    // category. It covers the agent that would send only the id, and dropping it
+    // would cost the effort levels silently: no variant published, and the
+    // requested effort ignored without a word.
+    const inventory = parseInventory([
+      { id: "effort", name: "Effort", type: "select", currentValue: "xhigh", options: [{ value: "xhigh", name: "xhigh" }] },
+    ])
+    expect(inventory.thoughtLevels).toEqual(["xhigh"])
+    expect(inventory.options[0]?.id).toBe("effort")
+  })
+
+  test("a category name is never used as an id to resolve", () => {
+    // The table that resolves an id into a category is also what makes
+    // `applyOption` send that id, so an entry equal to a category would put a
+    // category on the wire - and every measured agent refuses one. The option
+    // survives, uncategorised, which is the honest outcome: we do not know what
+    // it means, and we must not guess a value the agent would reject.
+    for (const id of ["thought_level", "permissions", "model_config"]) {
+      const inventory = parseInventory([
+        { id, name: id, type: "select", currentValue: "a", options: [{ value: "a", name: "a" }] },
+      ])
+      expect(inventory.options).toHaveLength(1)
+      expect(inventory.options[0]?.category).toBe("")
+      expect(inventory.thoughtLevels).toEqual([])
+      expect(inventory.models).toEqual([])
+      expect(inventory.permissions).toBeUndefined()
+    }
+  })
+
+  test("`model` and `mode` stay resolvable: they are the real ids both agents send", () => {
+    // The coincidence is measured, not assumed - `copilot` and `opencode acp`
+    // both name these options `model` and `mode`, and both accept them. This
+    // is the one case where an id equals its category, and it is why the
+    // exclusion above stops at the categories nobody uses as ids.
+    const inventory = parseInventory([
+      { id: "model", type: "select", currentValue: "m", options: [{ value: "m", name: "m" }] },
+      { id: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "build" }] },
+    ])
+    expect(inventory.options.map((o) => o.category)).toEqual(["model", "mode"])
+    expect(inventory.models.map((m) => m.id)).toEqual(["m"])
+    expect(inventory.modes.map((m) => m.id)).toEqual(["build"])
+  })
+
+  test("an id absent from the fallback table is kept, but matches no category", () => {
+    // Reported rather than dropped: the option is real, we simply do not know
+    // what it means. Guessing a category would publish variants the agent never
+    // offered.
+    const inventory = parseInventory([
+      { id: "sunny", name: "Sunny", type: "select", currentValue: "yes", options: [{ value: "yes", name: "Yes" }] },
+    ])
+    expect(inventory.options).toHaveLength(1)
+    expect(inventory.options[0]?.category).toBe("")
+    expect(inventory.thoughtLevels).toEqual([])
+  })
+
+  test("an option id is never the category it stands for", () => {
+    // The invariant behind `applyOption`: the wire wants the agent's `id`, and
+    // no agent accepts its own category (`Unknown config option
+    // 'thought_level'` on copilot, `unknown config option` on opencode).
+    const inventory = parseInventory([
+      { id: "reasoning_effort", category: "thought_level", type: "select", currentValue: "high", options: [{ value: "high", name: "High" }] },
+      { id: "effort", category: "thought_level", type: "select", currentValue: "high", options: [{ value: "high", name: "High" }] },
+    ])
+    const ids = inventory.options.map((o) => o.id)
+    expect(ids).toEqual(["reasoning_effort", "effort"])
+    expect(ids).not.toContain("thought_level")
+  })
+
   test("expands a `boolean` option into textual values", () => {
     const inventory = parseInventory([
       { id: "telemetry", name: "Telemetry", type: "boolean", currentValue: true, category: "permissions" },

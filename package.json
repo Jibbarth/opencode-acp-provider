@@ -31,6 +31,7 @@
     "test": "bun test",
     "acp-run": "bun run src/adapters/cli.ts",
     "verify:real": "bun run verify-real.ts",
+    "verify:agent": "bun run verify-agent.ts",
     "verify:resume": "bun run verify-resume.ts",
     "verify:sessions": "bun run verify-sessions.ts",
     "verify:package": "node scripts/verify-package.mjs",

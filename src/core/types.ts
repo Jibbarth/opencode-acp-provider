@@ -237,7 +237,12 @@ export interface Inventory {
   thoughtLevels: readonly string[]
   /** `mode` category: OpenCode agents. */
   modes: readonly AcpMode[]
-  /** `permissions` category, pinned to `off` by the default policy. */
+  /**
+   * `permissions` category, when the agent publishes one. Read-only: the policy
+   * is not applied here. It answers `session/request_permission`, not this
+   * option, so an agent with no `permissions` category is not weaker - it simply
+   * never asks. `opencode acp` publishes none.
+   */
   permissions?: AcpOption
   /** All options, raw but normalised, for inspection. */
   options: readonly AcpOption[]

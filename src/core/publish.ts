@@ -228,20 +228,36 @@ const isPseudoModel = (id: string): boolean => {
 const displayName = (model: AcpModel): string => (model.name.trim() === "" ? model.id : model.name)
 
 /**
+ * Effort levels OpenCode can never deliver.
+ *
+ * `opencode acp` publishes a `default` level among its effort values. It cannot
+ * become a variant: OpenCode rewrites a variant named `default` to *no* variant
+ * before merging its `settings` (`variant === "default" ? undefined : variant`
+ * in its model resolution), so its `settings` would never be applied. It would
+ * also duplicate the synthetic "Default" entry its variant picker always shows
+ * first. Publishing it is a choice that looks available and does nothing, so it
+ * is dropped - the same treatment `auto` gets among models, and for the same
+ * reason: the level means "the agent's own default", which is what having no
+ * variant selected already does.
+ */
+const UNDELIVERABLE_EFFORT = "default"
+
+/**
  * ACP effort levels become `variants`.
  *
  * Note: each variant's `settings` is exactly `{ effort: <level> }`, the field
  * `src/settings.ts` reads; the adapter turns it into
- * `set_config_option("reasoning_effort", ...)` before the prompt. Levels are
- * **deduplicated and filtered**: an agent repeating a value would produce two
- * variants with the same id, and OpenCode then rejects the whole model when
- * resolving the variant.
+ * `set_config_option(<the agent's own option id>, ...)` before the prompt.
+ * Levels are **deduplicated and filtered**: an agent repeating a value would
+ * produce two variants with the same id, and OpenCode then rejects the whole
+ * model when resolving the variant.
  */
 export const effortVariants = (inventory: Inventory): readonly RawVariant[] => {
   const variants: RawVariant[] = []
   const seen = new Set<string>()
   for (const level of inventory.thoughtLevels) {
     if (level.trim() === "" || seen.has(level)) continue
+    if (level === UNDELIVERABLE_EFFORT) continue
     seen.add(level)
     variants.push({ id: level, settings: { effort: level } })
   }

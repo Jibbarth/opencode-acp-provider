@@ -216,6 +216,27 @@ describe("inventoryToModels (pure)", () => {
     ])
   })
 
+  test("the `default` effort level is not published: OpenCode would drop its settings", () => {
+    // Measured on `opencode acp`: `default` sits among the effort values.
+    // OpenCode rewrites a variant named `default` to *no* variant before
+    // merging its settings, so publishing it would show an entry in `/model`
+    // that applies nothing - and duplicate the synthetic "Default" its own
+    // variant picker always offers. No variant means the agent's own announced
+    // value, which is what `default` asks for.
+    const variants = effortVariants({ ...copilotInventory(), thoughtLevels: ["low", "default", "high"] })
+    expect(variants).toEqual([
+      { id: "low", settings: { effort: "low" } },
+      { id: "high", settings: { effort: "high" } },
+    ])
+  })
+
+  test("an agent whose only effort level is `default` gets no variant at all", () => {
+    const variants = effortVariants({ ...copilotInventory(), thoughtLevels: ["default"] })
+    expect(variants).toEqual([])
+    const models = inventoryToModels({ ...copilotInventory(), thoughtLevels: ["default"] })
+    expect(models[0]?.variants).toEqual([])
+  })
+
   test("an empty inventory gives an empty list, not an error", () => {
     expect(inventoryToModels(emptyInventory())).toEqual([])
   })

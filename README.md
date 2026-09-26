@@ -303,6 +303,103 @@ le **provider** (le champ `package` du `Provider.Info`, qui pointe sur
 `src/index.ts` en local ou `dist/index.js` après un build). L'URL est calculée
 depuis `import.meta.url`, donc les deux layouts fonctionnent.
 
+### En une commande
+
+Pas de publication npm : on clone, puis on lance le script.
+
+```bash
+git clone <url> opencode-acp-provider
+cd opencode-acp-provider
+bun install
+./install.sh
+```
+
+`install.sh` écrit `~/.config/opencode/opencode.jsonc` (créé s'il n'existe pas).
+C'est tout : il n'y a rien à compiler, le plugin est chargé depuis `src/`.
+
+| Option | Effet |
+| --- | --- |
+| *(aucune)* | `--global` : `~/.config/opencode/opencode.jsonc` |
+| `--local` | `./opencode.jsonc`, dans le répertoire courant |
+| `--config <chemin>` | fichier de configuration explicite |
+| `--status` | rapporte l'état, n'écrit rien |
+| `--uninstall` | retire l'entrée de ce dépôt |
+| `--agent "<cmd> [args…]"` | agent à configurer, répétable (défaut : `copilot --acp` **à la création seulement**) |
+| `--no-agent` | n'écrit aucun agent, à vous de les ajouter |
+| `--force` | autorise la réécriture d'une configuration **commentée** |
+| `--yes` | ne demande pas confirmation |
+
+```bash
+./install.sh --local --agent "opencode acp" --agent "copilot --acp"
+```
+
+Le résultat, pour cette commande :
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "/chemin/absolu/vers/opencode-acp-provider/src/plugin.ts",
+      "options": {
+        "agents": [
+          { "command": "opencode", "args": ["acp"] },
+          { "command": "copilot", "args": ["--acp"] }
+        ]
+      }
+    }
+  ]
+}
+```
+
+⚠️ **Le chemin est absolu, et il est calculé depuis le script.** Il ne dépend
+donc pas du répertoire depuis lequel OpenCode est lancé. En contrepartie, il
+devient faux si le dépôt est déplacé : relancez `install.sh`, qui répare le
+chemin sans dupliquer l'entrée.
+
+### Ce que le script refuse de faire
+
+Il ne remplace jamais une configuration. Chacune de ces situations s'arrête avec
+un message, **sans rien écrire** :
+
+| Situation | Pourquoi on refuse |
+| --- | --- |
+| `plugins` n'est pas un tableau | une fusion suppose un tableau ; l'écraser prendrait un choix à votre place |
+| une entrée de `plugins` n'est pas un objet | même raison, et le curseur du champ serait perdu |
+| deux entrées pointent déjà sur ce dépôt | le script en laisse **une** ; choisir à votre place serait arbitraire |
+| le fichier contient des commentaires | la réécriture les perdrait. `--force` passe outre, et le dit |
+
+Quand il écrit, il **sauvegarde d'abord** (`opencode.jsonc.bak-<horodatage>`),
+puis **relit** le fichier et vérifie que l'entrée a bien survécu ; une
+configuration illisible ou une écriture ratée est restaurée. Enfin, il
+reconnaît une entrée déjà présente sous une autre écriture — chemin relatif,
+chemin vers `dist/plugin.js`, nom npm `opencode-acp-provider` — et la met à jour
+au lieu d'en ajouter une seconde. Relancer le script ne duplique donc rien.
+
+⚠️ **`copilot --acp` n'est le défaut qu'à la création.** Relancer `./install.sh`
+sans `--agent` **conserve** les agents déjà déclarés, y compris une liste
+écrite à la main : un ré-installateur qui remettait `copilot --acp` par-dessus
+vos agents l'aurait fait silencieusement. Pour changer la liste, on le demande
+explicitement avec `--agent`.
+
+### Prérequis
+
+Vérifiés par le script, qui signale ce qui manque :
+
+- **`node_modules` complet** — sinon `bun install` d'abord. Le provider est
+  importé par le serveur OpenCode, qui résout ses dépendances : sans elles, le
+  premier tour échoue sur un import.
+- **Un runtime JavaScript** (`bun` ou `node`) — c'est lui qui fusionne la
+  configuration.
+- **La version d'OpenCode** doit correspondre à celle de `@opencode/plugin`
+  (voir « Versions »). Le plugin est chargé par le serveur : c'est sa version
+  qui fait foi, pas la vôtre.
+- **L'agent ACP** installé et authentifié — `copilot`, `opencode`, `gemini`…
+
+### Écrire la configuration à la main
+
+Rien n'oblige à passer par le script.
+
 En local, sans build (un chemin relatif est résolu depuis le fichier de
 configuration) :
 
@@ -524,9 +621,9 @@ permissions.
 | Catégorie ACP | Cible OpenCode | Détail |
 | --- | --- | --- |
 | `model` | **un `Model.Info` par valeur** | `acp/gpt-5.6-terra`, `acp/claude-sonnet-5`… |
-| `thought_level` | **un `variant` par valeur** | `settings: { effort: "high" }` → `set_config_option("reasoning_effort")` avant le prompt |
+| `thought_level` | **un `variant` par valeur** | `settings: { effort: "high" }` → `set_config_option(<l'`id` de l'agent>)` avant le prompt |
 | `mode` | *(rien)* | les modes ACP sont des agents, pas des modèles : hors périmètre pour l'instant |
-| `permissions` | *(rien)* | épinglée côté agent ; la politique est dans `allowedTools` |
+| `permissions` | *(rien)* | non utilisée par la politique — voir « Portabilité » |
 
 Le `Model.ID` est **exactement** la valeur ACP : c'est ce que l'adaptateur
 renvoie à `set_config_option`, sans table de correspondance.
@@ -535,6 +632,87 @@ Le provider s'appelle `acp`, ou `acp-<id>` pour un agent nommé (voir « Plusieu
 agents »), et son `name` est `ACP — <agentInfo.name>`. Son
 `package` est une URL `file://` **absolue** vers le module exportant `model`,
 calculée depuis `import.meta.url` (`resolvePackageURL` dans `src/plugin.ts`).
+
+## Portabilité — deux agents, le même code
+
+`verify:agent` qualifie un agent quelconque et rapporte une capacité par ligne :
+`ok` (on le fait), `degrade` (l'agent le fait autrement et on s'en accommode),
+`absent` (l'agent ne le propose pas). **Aucun de ces trois vericts n'est un
+échec** ; seul `BROKEN`, qui signifie que *notre* code ne sait pas faire, change
+le code de sortie.
+
+```bash
+npm run verify:agent -- copilot --acp
+npm run verify:agent -- opencode acp
+```
+
+Relevé réel, côte à côte :
+
+| Capacité | `copilot --acp` 1.0.88 | `opencode acp` 2.0.16 |
+| --- | --- | --- |
+| `id` de l'option `model` | `model` | `model` |
+| `id` de l'option d'effort | `reasoning_effort` | **`effort`** |
+| `id` de l'option `mode` | `mode` | `mode` |
+| catégorie `permissions` | `allow_all` | **aucune** |
+| ids de mode | 3 **URL** | 2 **chaînes simples** |
+| niveaux d'effort | `none … max` (6) | `low … max` + **`default`** (6) |
+| ids de modèle | `claude-sonnet-5` | **`opencode/big-pickle`** |
+| `set_config_option(effort)` | `ok` | `ok` |
+| `set_config_option(model)` | `ok` | `ok` |
+| contrat de sortie JSON | `ok` | `ok` |
+| `request_permission` | `ok` (3 options) | `absent` (ne demande rien) |
+| annulation | `absent` (tour trop court) | `ok` (`stopReason=cancelled`) |
+| **verdict** | **CONFORME** | **CONFORME** |
+
+Aucune hypothèse sur `copilot` n'a dû être retirée : les cinq différences se
+logent déjà dans le code, et la sonde le prouve sur les deux.
+
+### Le `configId` est un `id`, jamais une catégorie
+
+C'est la distinction qui tient tout le reste. Une `ConfigOption` porte un
+`category` **et** un `id`, et seul l'`id` est un `configId` valide — mesuré, les
+deux agents **refusent** leur propre catégorie (`Unknown config option
+'thought_level'`, `unknown config option`). Le code résout donc l'option par
+catégorie dans l'inventaire, puis envoie son `id` : `applyOption` dans
+`adapters/opencode-transport.ts`, et les deux autres appelants (`setModel` dans
+`acp/agent.ts`, `--effort` dans `adapters/cli.ts`).
+
+⚠️ `opencode acp` accepte `model` comme catégorie **par accident** : son `id`
+vaut `model`. Une sonde de conformité qui n'aurait testé que ce cas serait
+passée. `test/fake-acp.ts` refuse désormais un `configId` inconnu, comme le font
+les vrais agents, pour que la confusion ne puisse pas survivre en test.
+
+### Un `id` de modèle peut contenir un `/`
+
+C'est le point le plus sérieux, et **ce n'est pas un défaut**. `opencode acp`
+publie `opencode/big-pickle` ; le nommage `provider/model` d'OpenCode semble
+interdire le `/`, alors qu'il l'exige.
+
+La question est tranchée par le parseur d'OpenCode lui-même, pas par une
+heuristique : `Model.Ref.parse` coupe au **premier** `/` et prend tout le reste
+comme id. `acp/opencode/big-pickle` donne `{providerID: "acp", id:
+"opencode/big-pickle"}` — intact. Le catalogue qu'OpenCode embarque lui-même
+contient 4274 ids avec un `/` (`subconscious/subconscious/glm-5.2`,
+`tokengo/deepseek/deepseek-v4-flash`) : c'est une forme normale, pas un cas
+limite.
+
+**Décision : ne rien assainir.** Le `Model.ID` reste la valeur ACP exacte, pour
+trois raisons mesurées : le parseur d'OpenCode l'accepte tel quel ; l'agent
+accepte cette valeur dans `set_config_option` (relevé : `id=model →
+opencode/big-pickle`, `ok`) ; et un id modifié exigerait une table de
+correspondance à threading entre le plugin (qui publie) et le transport (qui
+envoie), pour un gain nul. `verify:agent` ne se fie plus à un motif : il passe
+chaque id publié à `Model.Ref.parse` et ne signale que ce que le parseur refuse
+vraiment.
+
+### Deux valeurs filtrées, pour la même raison
+
+`auto` parmi les modèles et `default` parmi les niveaux d'effort sont des
+pseudo-valeurs : elles signifient « laisse l'agent décider ». Les publier
+produirait une entrée dans `/model` dont les `settings` ne seraient jamais
+appliqués — OpenCode réécrit un variant nommé `default` en *aucun* variant avant
+d'en fusionner les réglages. Les deux sont donc filtrées, et l'absence de
+variant sélectionné laisse l'agent appliquer ce qu'il annonce lui-même.
 
 Le même module sert **tous** les providers ACP : OpenCode n'appelle qu'une chose
 d'un package provider, `model(modelID, settings)`, et rien d'autre n'y porte
@@ -554,8 +732,10 @@ automatique est la parade, pas encore la règle.
 Sans variant sélectionné, aucun `set_config_option` n'est envoyé : l'agent
 applique la valeur qu'il annonce lui-même dans `session/new`.
 
-Il n'existe volontairement **pas** de variant `default` : OpenCode interprète cet
-id comme « aucun variant » et n'en fusionne pas les `settings`.
+Il n'existe volontairement **pas** de variant `default` : OpenCode réécrit cet id
+en « aucun variant » et n'en fusionne donc pas les `settings`. Un agent qui
+publie ce niveau (`opencode acp`) le voit filtré — même traitement que `auto`
+parmi les modèles, et pour la même raison.
 
 ## Versions
 
@@ -599,12 +779,17 @@ trois outils avec schémas JSON, transcript avec appel et résultat d'outil.
 
 ```bash
 bun install
-bun test            # 330 tests, dont la chaîne ACP complète contre test/fake-acp.ts
+bun test            # 364 tests, dont la chaîne ACP complète contre test/fake-acp.ts
 bun run typecheck   # tsc --noEmit, strict + noUncheckedIndexedAccess
 npm run verify:package   # exécute le paquet pour vérifier son contrat (Node)
+npm run verify:agent -- copilot --acp   # qualifie un agent, une ligne par capacité
 npm run verify:real copilot --acp    # sonde hors suite : exige un agent installé
 npm run verify:resume copilot --acp  # idem, `session: "reuse"` mesuré contre `fresh`
 ```
+
+`verify:agent` est la sonde de **portabilité** : elle passe par le code du
+projet lui-même, elle accepte n'importe quel agent, et elle sort en `0` tant
+qu'aucun défaut n'est **le nôtre**. Voir « Portabilité ».
 
 ### `verify:package` — le contrat, vérifié **par exécution**
 

@@ -1199,6 +1199,38 @@ describe("end to end: the real route against the ACP agent", () => {
     ])
   })
 
+  test("the effort is applied by the agent's real option id, not by its category", async () => {
+    // The regression this pins: a `ConfigOption` carries a **category**
+    // (`thought_level`) and an `id` (`reasoning_effort` on copilot, `effort` on
+    // `opencode acp`), and only the `id` is a valid `configId` - no measured
+    // agent accepts its own category. The fake refuses an unknown `configId`
+    // like the real ones, so a category reaching the wire fails this test
+    // instead of being silently ignored.
+    const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1", FAKE_EFFORT_ID: "effort" }, { effort: "high" })
+    const languageModel = model("claude-sonnet-5", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "claude-sonnet-5", request)
+
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual([
+      "PONG claude-sonnet-5 high",
+    ])
+  })
+
+  test("an agent that publishes no `permissions` category still works", async () => {
+    // `opencode acp` has none. The default policy pins permissions to `off`
+    // where the agent offers them, and must simply have nothing to do otherwise.
+    const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1", FAKE_NO_PERMISSIONS: "1" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual([
+      "PONG gpt-5.6-terra medium",
+    ])
+  })
+
   test("without a variant, the agent keeps the value it announces itself", async () => {
     const settings = fakeSettings({ FAKE_ECHO_CONFIG: "1" })
     const languageModel = model("gpt-5.6-terra", settings)

@@ -25,17 +25,31 @@ const CATEGORY_MODE = "mode"
 const CATEGORY_PERMISSIONS = "permissions"
 
 /**
- * Fallback on `id` when the category is absent, which is the case for most
- * agents: they only send an `id` (`reasoning_effort`, `allow_all`...). These are
- * the names encountered in the wild.
+ * Fallback on `id` when the category is absent, which is the case for agents
+ * that only send an `id`. Every entry is an **id measured in the wild**:
+ * `model` and `mode` (both agents), `reasoning_effort` and `allow_all`
+ * (`copilot --acp`), `effort` (`opencode acp`).
+ *
+ * Note: a category name must never be added to this table. Classifying an
+ * option is precisely what makes `applyOption` send its `id`, and no measured
+ * agent accepts a category as a `configId` (`Unknown config option
+ * 'thought_level'` from `copilot`, `unknown config option` from `opencode
+ * acp`). `model` and `mode` are the exception that measures true: they are
+ * *really* the ids those agents use, and their category happens to match. That
+ * coincidence is recorded, not generalised.
+ *
+ * Note: an id absent from this table yields the empty category, so the option is
+ * parsed and kept, but matches no category - the probe reports it and it is
+ * never applied. Guessing a category would be worse: a miscategorised option
+ * would publish variants the agent never offered, and `applyOption` would then
+ * send a `configId` the agent refuses.
  */
 const CATEGORY_BY_ID: Readonly<Record<string, string>> = {
   model: CATEGORY_MODEL,
   reasoning_effort: CATEGORY_THOUGHT,
-  thought_level: CATEGORY_THOUGHT,
+  effort: CATEGORY_THOUGHT,
   mode: CATEGORY_MODE,
   allow_all: CATEGORY_PERMISSIONS,
-  permissions: CATEGORY_PERMISSIONS,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
