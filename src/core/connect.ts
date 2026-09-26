@@ -3,7 +3,7 @@ import type { RawAgent } from "./publish.js"
 export const CONNECT_INTEGRATION_ID = "acp"
 
 export const CONNECT_INTEGRATION_NAME = "ACP"
-export const CONNECT_METHOD_LABEL = "Ajouter un serveur ACP"
+export const CONNECT_METHOD_LABEL = "Add an ACP server"
 
 /** Splits a command line, keeping a quoted argument as one word. */
 export const splitCommand = (line: string): string[] =>
@@ -55,16 +55,16 @@ export const CONNECT_FORM_FIELDS = [
   {
     type: "string",
     key: "name",
-    title: "Nom",
-    description: "Le provider sera acp-<nom>.",
+    title: "Name",
+    description: "The provider will be acp-<name>.",
     placeholder: "copilot",
     required: true,
   },
   {
     type: "string",
     key: "command",
-    title: "Commande",
-    description: "La commande qui démarre l'agent en mode ACP.",
+    title: "Command",
+    description: "The command that starts the agent in ACP mode.",
     placeholder: "copilot --acp",
     required: true,
   },
