@@ -1,13 +1,16 @@
 /**
  * The OpenCode plugin - it is what makes the providers visible.
  *
- * It does three things, and **nothing else**:
+ * It does four things, and **nothing else**:
  *
- * 1. reads `ctx.options` (the agents declared in `opencode.jsonc`);
- * 2. launches each ACP agent, reads its `configOptions` inventory, and registers
- *    it in the catalogue: **one provider per agent**, with one `Model.Info` per
- *    model and its own effort variants;
- * 3. watches OpenCode's event stream and **republishes** when an inventory has
+ * 1. reads `ctx.options` (the agents declared in `opencode.jsonc`) and the
+ *    `/connect` connection, then publishes **one provider per agent**, with one
+ *    `Model.Info` per model and its own effort variants;
+ * 2. launches each ACP agent and reads its `configOptions` inventory, which is
+ *    what names the provider and fills its models;
+ * 3. registers the `/connect` entry itself, so an agent can be added from the
+ *    OpenCode UI, and resynchronises when that connection changes;
+ * 4. watches OpenCode's event stream and **republishes** when an inventory has
  *    moved, then closes every agent on shutdown.
  *
  * Note: **one provider per agent**, not one provider for the list. Credentials
@@ -40,10 +43,25 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { Model, Plugin, Provider } from "@opencode/plugin"
+import type { Form } from "@opencode/schema/form"
 
 import { createAcpAgent } from "./acp/agent.js"
+import {
+  CONNECT_FORM_FIELDS,
+  CONNECT_INTEGRATION_ID,
+  CONNECT_INTEGRATION_NAME,
+  CONNECT_METHOD_LABEL,
+  agentsFingerprint,
+  connectAgentToRawAgent,
+  diffAgents,
+  mergeAgents,
+  parseConnectCredential,
+} from "./core/connect.js"
 import type { AcpAgent, Inventory } from "./core/types.js"
 import {
+  DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
+  DEFAULT_REFRESH_MS,
   PROVIDER_ID,
   inventorySignature,
   inventoryToModels,
@@ -52,7 +70,7 @@ import {
   providerInfo,
   providerSettingsOf,
 } from "./core/publish.js"
-import type { PublishOptions, RawAgent, RawModelInfo, RawProviderInfo } from "./core/publish.js"
+import type { PluginConfig, PublishOptions, RawAgent, RawModelInfo, RawProviderInfo } from "./core/publish.js"
 import { parseSettings } from "./settings.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +90,10 @@ type Context = Plugin.Context
  */
 type ProviderEditor = Parameters<Parameters<Context["provider"]["transform"]>[0]>[0]
 type Registration = Awaited<ReturnType<Context["provider"]["transform"]>>
+type IntegrationEditor = Parameters<Parameters<Context["integration"]["transform"]>[0]>[0]
+
+/** How often the `/connect` connection is re-read, in milliseconds. */
+const CONNECT_POLL_MS = 5_000
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logging
@@ -662,15 +684,185 @@ const bringUp = async (
   }
 }
 
+/**
+ * Undoes one registration, in the only order that leaves nothing half-alive.
+ *
+ * Note: the watcher is stopped **before** the agent, otherwise a rediscovery in
+ * flight would fail on an already dead agent - and that error would mask the
+ * real cause.
+ *
+ * Note: every step is guarded. An agent whose `dispose` throws must still have
+ * its process killed, and must not keep the next agent from being lowered.
+ *
+ * Note: what it does **not** touch is the transport's own ACP sessions, which
+ * belong to the provider package and are closed once for all at shutdown: an
+ * agent removed from `/connect` mid-session keeps its open session until the
+ * pool reclaims it, and closing the whole pool here would cut the live turns of
+ * the agents that stay.
+ */
+const lower = async (entry: Registered): Promise<void> => {
+  entry.stop()
+  try {
+    await entry.dispose()
+  } catch (error) {
+    log(`« ${entry.id} » non retiré du catalogue : ${reason(error)}`)
+  }
+  try {
+    await entry.closeAgent()
+  } catch (error) {
+    log(`agent « ${entry.id} » non arrêté : ${reason(error)}`)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `/connect`
+// ─────────────────────────────────────────────────────────────────────────────
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+/**
+ * Is this array a form the host will read?
+ *
+ * Note: `core/connect.ts` cannot type its form - `Form.Fields` lives in
+ * `@opencode/schema`, which `core/` may not import - so the check belongs here,
+ * in the one file that knows the schema. A rejected form would leave `/connect`
+ * showing an entry that cannot be filled in, which is worse than no entry.
+ *
+ * Note: the check is stricter than the schema on purpose. A `string` field holds
+ * strings and booleans, and that is all the shipped form uses; a field carrying
+ * something else is a mistake to be reported, not published.
+ */
+const isFormFields = (fields: readonly unknown[]): fields is Form.Fields =>
+  fields.length > 0 &&
+  fields.every(
+    (field) =>
+      isRecord(field) &&
+      field["type"] === "string" &&
+      typeof field["key"] === "string" &&
+      Object.values(field).every((value) => typeof value === "string" || typeof value === "boolean"),
+  )
+
+/** The `/connect` form, or a failure the caller turns into a log line. */
+const connectForm = (): Form.Fields => {
+  if (!isFormFields(CONNECT_FORM_FIELDS)) throw new Error("le formulaire /connect est mal formé")
+  return CONNECT_FORM_FIELDS
+}
+
+/**
+ * Registers the `/connect` entry, so the user can add an agent without touching
+ * `opencode.json`.
+ *
+ * Note: a `key` method **carries no `id`** - unlike `oauth` and `command` - so
+ * this is the only key method the integration has, and `/connect` can hold one
+ * connection. `update` on both the integration and the method is an upsert, so
+ * a second load of the plugin re-registers rather than duplicates.
+ *
+ * Note: `reload` is what makes the entry appear in the UI. Registering without
+ * it would leave the provider list correct and `/connect` showing nothing.
+ *
+ * Returns whether the entry is there. `false` means the host has no integration
+ * domain, or refused the registration, and there is then nothing to poll: a poll
+ * that could only fail would fill the log with a line every five seconds.
+ */
+const registerConnect = async (ctx: Context): Promise<boolean> => {
+  if (typeof ctx.integration?.transform !== "function") {
+    log("hôte sans domaine `integration` : /connect indisponible")
+    return false
+  }
+  try {
+    await ctx.integration.transform((editor: IntegrationEditor) => {
+      editor.update(CONNECT_INTEGRATION_ID, (integration) => {
+        integration.name = CONNECT_INTEGRATION_NAME
+      })
+      editor.method.update({
+        integrationID: CONNECT_INTEGRATION_ID,
+        method: { type: "key", label: CONNECT_METHOD_LABEL, form: connectForm() },
+      })
+    })
+    await ctx.integration.reload()
+  } catch (error) {
+    log(`intégration /connect non enregistrée : ${reason(error)}`)
+    return false
+  }
+  return true
+}
+
+/**
+ * The agent `/connect` currently declares, if any.
+ *
+ * Note: an integration holds **one** active connection, hence one agent: the
+ * answer is a single agent, not a list.
+ *
+ * Note: `undefined` covers every "no agent" case - no connection at all, a
+ * credential of another type, a form half filled - because a `/connect` the
+ * plugin cannot read must cost the user his ACP agent and nothing else. A thrown
+ * error is logged: swallowing it would be indistinguishable from `/connect`
+ * never having registered.
+ */
+const readConnectAgent = async (ctx: Context): Promise<RawAgent | undefined> => {
+  try {
+    const connection = await ctx.integration.connection.active(CONNECT_INTEGRATION_ID)
+    if (connection === undefined) return undefined
+    const answers = parseConnectCredential(await ctx.integration.connection.resolve(connection))
+    if (answers === undefined) return undefined
+    return connectAgentToRawAgent(answers)
+  } catch (error) {
+    log(`connexion /connect illisible : ${reason(error)}`)
+    return undefined
+  }
+}
+
+/** Rebuilds the catalogue, so a provider published mid-session reaches `/model`. */
+const reloadCatalogue = async (ctx: Context): Promise<void> => {
+  try {
+    await ctx.provider.reload()
+  } catch (error) {
+    log(`catalogue non rechargé : ${reason(error)}`)
+  }
+}
+
+/**
+ * Re-reads the `/connect` connection every `CONNECT_POLL_MS`.
+ *
+ * Note: **polled, not pushed.** The host emits no `connection.updated`: the only
+ * `.updated` events are `session.*`, `message.part.updated`,
+ * `vcs.branch.updated`, `installation.updated` and `sdk.plugin.updated`, so a
+ * subscription could never fire on a new connection. A tick that finds the same
+ * list costs one credential read and nothing else.
+ *
+ * Note: `unref`. A periodic read must not be the reason the server stays alive
+ * once its last session has closed.
+ *
+ * Note: ticks never overlap - one discovery can take longer than the period, and
+ * two of them would bring the same agent up twice.
+ */
+const watchConnect = (resync: () => Promise<void>): (() => void) => {
+  const timer = setInterval(() => {
+    void resync()
+  }, CONNECT_POLL_MS)
+  timer.unref?.()
+  return () => clearInterval(timer)
+}
+
 /** `setup`'s work, without the safety net: `setup` is what carries it. */
 async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined> {
   // ── 1. Options ──────────────────────────────────────────────────────────
+  // A refused configuration is **not** a reason to stop there. Agents come from
+  // two sources, and `/connect` is one of them: stopping on a missing `agents`
+  // array would make `/connect` unusable exactly when the user has nothing in
+  // `opencode.json` yet, which is the case it is for. The refusal is logged, and
+  // the defaults apply to the rest of the options.
   const parsed = parsePluginConfig(ctx.options)
-  if (!parsed.ok) {
-    log(`configuration ignorée : ${parsed.message}`)
-    return
-  }
-  const { agents, refreshMs, discoveryTimeoutMs, discoveryIdleTimeoutMs } = parsed.value
+  if (!parsed.ok) log(`configuration ignorée : ${parsed.message}`)
+  const config: PluginConfig = parsed.ok
+    ? parsed.value
+    : {
+        agents: [],
+        refreshMs: DEFAULT_REFRESH_MS,
+        discoveryTimeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS,
+        discoveryIdleTimeoutMs: DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
+      }
 
   // ── 2. Provider package entry point ─────────────────────────────────────
   let packageURL: string
@@ -681,65 +873,144 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     return
   }
 
-  // ── 3. One provider per agent ────────────────────────────────────────────
+  // ── 3. `/connect` ───────────────────────────────────────────────────────
+  // Registered **before** the first discovery: an entry the user can already
+  // see while the providers are still being discovered is the difference between
+  // a feature and a feature one has to guess the timing of.
+  const connectable = await registerConnect(ctx)
+  const connectAgent = connectable ? await readConnectAgent(ctx) : undefined
+  const fromConnect = connectAgent === undefined ? [] : [connectAgent]
+  // `/connect` first: an agent the user typed in the UI is the one they last
+  // touched (see `mergeAgents`).
+  const wanted = mergeAgents(fromConnect, config.agents)
+
+  // ── 4. One provider per agent ────────────────────────────────────────────
+  const registered = new Map<string, Registered>()
+  const owned = new Set<string>()
+  const bounds = {
+    timeoutMs: config.discoveryTimeoutMs,
+    idleTimeoutMs: config.discoveryIdleTimeoutMs,
+    refreshMs: config.refreshMs,
+  }
+
+  /**
+   * Brings one agent up, unless its provider id is already spoken for.
+   *
+   * Note: two agents resolving to the same id would fight over one catalogue
+   * entry - `editor.add` replaces, so the second would silently take the first's
+   * models while `/model` still showed the first's name. First one wins, and the
+   * loser is named.
+   *
+   * Returns whether the agent reached the catalogue; a failure has already said
+   * why, in its own log line.
+   */
+  const raise = async (agent: RawAgent): Promise<boolean> => {
+    const id = providerIdOf(agent.providerSlug)
+    if (owned.has(id)) {
+      log(`agent « ${agent.id} » ignoré : l'identifiant « ${id} » est déjà pris par un agent enregistré`)
+      return false
+    }
+    const up = await bringUp(ctx, agent, id, packageURL, bounds, owned)
+    if (up === undefined) return false
+    registered.set(id, up)
+    return true
+  }
+
   // Agents are brought up **one after another**, and that is a decision rather
   // than an accident: each discovery spawns an agent that authenticates, and N
   // of them starting together at boot is exactly the burst `discoveryTimeoutMs`
   // exists to avoid. It also keeps the log in the order the user wrote.
-  const registered: Registered[] = []
-  const owned = new Set<string>()
-  for (const agent of agents) {
-    const id = providerIdOf(agent.providerSlug)
-    // Two agents resolving to the same id would fight over one catalogue entry:
-    // `editor.add` replaces, so the second would silently take the first's
-    // models while `/model` still showed the first's name. First one wins, and
-    // the loser is named.
-    if (owned.has(id)) {
-      log(`agent « ${agent.id} » ignoré : l'identifiant « ${id} » est déjà pris dans cette configuration`)
-      continue
-    }
-    const up = await bringUp(
-      ctx,
-      agent,
-      id,
-      packageURL,
-      { timeoutMs: discoveryTimeoutMs, idleTimeoutMs: discoveryIdleTimeoutMs, refreshMs },
-      owned,
-    )
-    if (up !== undefined) registered.push(up)
-  }
+  for (const agent of wanted) await raise(agent)
 
-  if (registered.length === 0) {
+  // ── 5. Resynchronisation ────────────────────────────────────────────────
+  /**
+   * Brings the catalogue to what `/connect` now says.
+   *
+   * Note: the config file is read once, for the lifetime of the process, so a
+   * difference between two wanted lists can only come from the connection.
+   *
+   * Note: the fingerprint compared against is that of the list **last attempted**,
+   * not of what is registered. Retrying an agent that failed to start would mean
+   * spawning a process every five seconds for an agent that cannot start; an
+   * agent is therefore retried when the list moves, which is what editing the
+   * `/connect` connection does.
+   */
+  let settled: readonly RawAgent[] = wanted
+  let fingerprint = agentsFingerprint(wanted)
+  let running = false
+  const resync = async (): Promise<void> => {
+    if (running) return
+    running = true
+    try {
+      const agent = await readConnectAgent(ctx)
+      const next = mergeAgents(agent === undefined ? [] : [agent], config.agents)
+      // Nothing moved: no comparison of the catalogue, no `reload`, no process.
+      if (agentsFingerprint(next) === fingerprint) return
+      const { added, removed } = diffAgents(settled, next)
+      // An agent that had never been published has nothing to tear down and
+      // nothing to announce: only what the catalogue really gained or lost is
+      // worth a `reload`.
+      let moved = false
+      for (const gone of removed) {
+        // The id is freed **before** the new agent claims it, and the two halves
+        // of a changed agent are exactly this order: `editor.add` would replace
+        // the entry of the old one silently.
+        const id = providerIdOf(gone.providerSlug)
+        const entry = registered.get(id)
+        if (entry === undefined) continue
+        registered.delete(id)
+        owned.delete(id)
+        await lower(entry)
+        moved = true
+        log(`agent « ${gone.id} » retiré : absent de /connect`)
+      }
+      for (const fresh of added) {
+        if (!(await raise(fresh))) continue
+        moved = true
+        log(`agent « ${fresh.id} » ajouté depuis /connect`)
+      }
+      settled = next
+      fingerprint = agentsFingerprint(next)
+      if (moved) await reloadCatalogue(ctx)
+    } catch (error) {
+      log(`resynchronisation /connect ignorée : ${reason(error)}`)
+    } finally {
+      running = false
+    }
+  }
+  const stopWatching = connectable ? watchConnect(resync) : undefined
+
+  // ── 6. What ended up published ──────────────────────────────────────────
+  // The source of a provider is the one thing `/model` cannot show: both sources
+  // publish under the same `acp-` ids, and nothing else says whether an agent
+  // was typed in `opencode.json` or in `/connect`.
+  const published = [...registered.keys()]
+  const connectIDs = new Set(fromConnect.map((agent) => providerIdOf(agent.providerSlug)))
+  const fromConnectCount = published.filter((id) => connectIDs.has(id)).length
+  if (published.length === 0) {
     log("aucun agent enregistré, aucun provider ACP publié")
-    return
+  } else {
+    const dropped = wanted.length - published.length
+    log(
+      `${published.length} provider(s) ACP : ${published.join(", ")}` +
+        (dropped > 0 ? ` — ${dropped} agent(s) écarté(s)` : "") +
+        ` — ${fromConnectCount} depuis /connect, ${published.length - fromConnectCount} depuis la configuration`,
+    )
   }
-  const dropped = agents.length - registered.length
-  log(
-    `${registered.length} provider(s) ACP : ${registered.map((entry) => entry.id).join(", ")}` +
-      (dropped > 0 ? ` — ${dropped} agent(s) écarté(s)` : ""),
-  )
 
-  // ── 4. Shutdown ─────────────────────────────────────────────────────────
-  // Every agent is stopped, disposed, then killed, and **all** of them even if
-  // one fails: a second agent whose `dispose` throws must not leave its process
-  // - and its ACP sessions - alive until the server exits.
+  // Nothing registered and nothing to watch: there is nothing for the host to
+  // unload, and a teardown that only clears a timer that does not exist would
+  // be a lie about the work done.
+  if (published.length === 0 && stopWatching === undefined) return
+
+  // ── 7. Shutdown ─────────────────────────────────────────────────────────
+  // Every agent is lowered even if one fails: `lower` guards each of its steps,
+  // so an agent whose `dispose` throws must not leave its process - and its ACP
+  // sessions - alive until the server exits.
   return async () => {
-    for (const entry of registered) entry.stop()
-    for (const entry of registered) {
-      try {
-        await entry.dispose()
-      } catch (error) {
-        log(`« ${entry.id} » non retiré du catalogue : ${reason(error)}`)
-      }
-    }
+    stopWatching?.()
+    for (const entry of registered.values()) await lower(entry)
     await closeProviderSessions()
-    for (const entry of registered) {
-      try {
-        await entry.closeAgent()
-      } catch (error) {
-        log(`agent « ${entry.id} » non arrêté : ${reason(error)}`)
-      }
-    }
   }
 }
 
@@ -749,9 +1020,9 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
  * Note: the `import` is **dynamic**, and deliberately so. A static `import` of
  * `adapters/opencode-transport.ts` would pull the whole `effect` +
  * `@opencode/ai` stack into the plugin's process - exactly what discovery avoids
- * (step "3. Launching the agent" of `runSetup`) - for a module only useful at
- * exit time. Dynamic, it costs nothing at load, and it cannot fail anyway: the
- * server has already imported the provider package (its `package` field did
+ * (the "one provider per agent" step of `runSetup`) - for a module only useful
+ * at exit time. Dynamic, it costs nothing at load, and it cannot fail anyway:
+ * the server has already imported the provider package (its `package` field did
  * that), so it is a plain module cache hit, in the same process.
  *
  * Note: the call must **never** make a shutdown fail: a recalcitrant session
