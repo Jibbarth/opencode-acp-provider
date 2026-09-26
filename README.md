@@ -776,7 +776,7 @@ tools with JSON schemas, transcript with a tool call and a tool result.
 
 ```bash
 bun install
-bun test            # 364 tests, including the full ACP chain against test/fake-acp.ts
+bun test            # 425 tests, including the full ACP chain against test/fake-acp.ts
 bun run typecheck   # tsc --noEmit, strict + noUncheckedIndexedAccess
 npm run verify:package   # runs the package to verify its contract (Node)
 npm run verify:agent -- copilot --acp   # qualifies an agent, one line per capability

@@ -309,6 +309,44 @@ export const agentKey = (settings: AcpProviderSettings): string =>
 export const allowsEveryTool = (settings: AcpProviderSettings): boolean =>
   settings.allowedTools?.includes("*") === true
 
+/**
+ * The extra spawn arguments reducing the agent's **native** tool surface, from
+ * the provider setting `allowedTools` — or none, when the setting leaves the
+ * surface alone or no reduction was requested.
+ *
+ * Note: the flag is `--available-tools`, whose documented syntax is a quoted,
+ * comma-separated list ("Only these tools will be available to the model" —
+ * GitHub Copilot CLI command reference). The setting maps as follows:
+ *
+ * - `["*"]` (allow-all): **no argument at all** — the surface is left alone;
+ * - an explicit list: `--available-tools a,b` — the surface is restricted to
+ *   exactly those tools;
+ * - `[]` (deny-all): `--available-tools ""` — the surface is reduced to
+ *   nothing, the empty list being the degenerate case of the comma-separated
+ *   syntax;
+ * - `undefined` — the agent does not accept the flag (no opt-in): **no
+ *   argument at all**. An unknown flag would kill the spawn, which is a worse
+ *   failure than no restriction; the permission policy, which refuses
+ *   everything by default, remains the only layer.
+ *
+ * Note: the flag is a property of the agent's own CLI, not of the ACP
+ * protocol. It is therefore only ever emitted behind an explicit opt-in (see
+ * `AcpAgentOptions.availableTools`).
+ */
+export const availableToolsArgs = (allowedTools: readonly string[] | undefined): readonly string[] => {
+  // No opt-in: no flag is invented. This is the default, and the only safe
+  // behaviour for an agent whose CLI is unknown.
+  if (allowedTools === undefined) return []
+  // allow-all: the surface is left alone — a flag restricting to "*" would be
+  // a restriction the setting does not ask for.
+  if (allowedTools.includes("*")) return []
+  // deny-all: the surface is reduced to nothing.
+  if (allowedTools.length === 0) return ["--available-tools", ""]
+  // An explicit list: restricted to exactly those tools, comma-separated per
+  // the flag's documented syntax.
+  return ["--available-tools", allowedTools.join(",")]
+}
+
 /** A readable agent label, present in **every** error message. */
 export const agentLabel = (settings: AcpProviderSettings): string =>
   [settings.command, ...(settings.args ?? [])].join(" ").trim()

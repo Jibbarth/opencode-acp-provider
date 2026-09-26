@@ -68,13 +68,17 @@ describe("plugin loading leaves a trace", () => {
     expect(stdout).toBe("")
   })
 
-  test("`setup` returns instead of bringing down the startup", async () => {
+  test("a configuration that is not an agent list is refused, not read as one", async () => {
     // Note: the invariant stated at the top of `src/plugin.ts`: an unreadable
     // configuration is logged and reduced to "nothing is registered". The process
     // must therefore **exit with 0**, letting nothing reject.
+    //
+    // Note: the value is an object, not the bare string the name once suggested.
+    // A bare string falls into the same refusal, but through a different rule, so
+    // the assertion would have passed for a reason other than the one named.
     const stderr = await evaluatePlugin([
       `const plugin = (await import(${JSON.stringify(PLUGIN)})).default;`,
-      `await plugin.setup({ options: { agents: "not an array" } });`,
+      `await plugin.setup({ options: { agents: { command: "copilot" } } });`,
     ])
     expect(stderr).toContain("module evaluated")
     // The marker is **present** => the module really was evaluated, and the next

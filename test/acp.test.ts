@@ -86,6 +86,45 @@ const spawnTrackedFake = async (
     env: { ...env, FAKE_PID_FILE: pidFile },
   })
 
+/**
+ * Launches the fake agent with `FAKE_ARGV_FILE`, and returns the arguments
+ * `createAcpAgent` spawned it with.
+ *
+ * Note: the spawn arguments are the only part of the contract **not**
+ * observable through the ACP protocol — the policy, the capabilities and the
+ * prompt all travel on the wire, the command line does not. The fake records
+ * its own argv (see `fake-acp.ts`), and the `[bun, script]` prefix that
+ * `bun run` leaves in `process.argv` is sliced off: what remains is exactly
+ * what `createAcpAgent` appended to `options.args`.
+ */
+const spawnFakeArgv = async (
+  availableTools?: readonly string[],
+): Promise<readonly string[]> => {
+  const dir = await mkdtemp(join(tmpdir(), "acp-argv-"))
+  pidFiles.push(dir)
+  const argvFile = join(dir, "argv.json")
+  const local = await createAcpAgent({
+    command: process.execPath,
+    args: ["run", FAKE],
+    stderr: "ignore",
+    ...(availableTools === undefined ? {} : { availableTools }),
+    env: { FAKE_ARGV_FILE: argvFile },
+  })
+  try {
+    const raw = await readFile(argvFile, "utf8")
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) throw new Error(`argv record is not an array: ${raw}`)
+    const argv: string[] = []
+    for (const item of parsed) {
+      if (typeof item !== "string") throw new Error(`argv record holds a non-string: ${raw}`)
+      argv.push(item)
+    }
+    return argv.slice(2)
+  } finally {
+    await local.close()
+  }
+}
+
 /** A disposable temporary directory, for pid files. */
 const pidFiles: string[] = []
 const tmpPidFile = async (label: string): Promise<string> => {
@@ -793,6 +832,35 @@ describe("permissions", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors: typed, naming, and always followed by a `done`.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Surface reduction at spawn: the sibling layer of the permission policy, not
+// its replacement. The policy only binds an agent that asks; this one reduces
+// what it can even propose.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("surface reduction at spawn", () => {
+  test("an agent that does not accept the flag is spawned without it", async () => {
+    // The default is **off**: no opt-in, no flag. An unknown argument would
+    // kill the spawn — a worse failure than no restriction.
+    expect(await spawnFakeArgv()).toEqual([])
+  })
+
+  test("deny-all reduces the surface to nothing at spawn", async () => {
+    expect(await spawnFakeArgv([])).toEqual(["--available-tools", ""])
+  })
+
+  test("allow-all leaves the surface alone at spawn", async () => {
+    expect(await spawnFakeArgv(["*"])).toEqual([])
+  })
+
+  test("an explicit list restricts the surface at spawn", async () => {
+    expect(await spawnFakeArgv(["read_file", "write_file"])).toEqual([
+      "--available-tools",
+      "read_file,write_file",
+    ])
+  })
+})
 
 describe("declared capabilities", () => {
   test("initialize announces no lying fs capability", async () => {

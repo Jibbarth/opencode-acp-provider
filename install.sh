@@ -131,6 +131,12 @@ if [ "$SCOPE" = "local" ]; then
   [ -n "$CONFIG" ] || CONFIG="$PWD/opencode.jsonc"
   SHIM_DIR="$PWD/.opencode/plugins"
 else
+  # The global target is the file OpenCode itself reads, and it may be either
+  # name: `opencode.json` wins over `opencode.jsonc` when both exist. Without a
+  # default, `--config ""` reached the merge step as an empty path, which
+  # `resolve()` turned into the current directory and read as a file.
+  [ -n "$CONFIG" ] || CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+  [ -f "$CONFIG" ] || CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc"
   SHIM_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
 fi
 
@@ -254,8 +260,11 @@ if [ "$MODE" = "status" ]; then
   exit 0
 fi
 
-exit 0
-
+# `install-config.mjs` is what merges the agent list into the user's config: it
+# reads the JSONC, writes a backup, refuses a commented config without --force,
+# then reads the merge back and checks it. It never ran - the unconditional
+# `exit 0` below this comment returned before the `exec`, so an install wrote
+# the shim and stopped there, leaving the configuration merge silently undone.
 exec "$RUNNER" "$ROOT/scripts/install-config.mjs" \
   "$MODE" \
   --config "$CONFIG" \

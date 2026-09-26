@@ -59,6 +59,7 @@
  * | `FAKE_CANCEL_FILE=<path>`      | records every `session/cancel` received (dated proof of the cancellation) |
  * | `FAKE_OUTPUT=<x>`              | answer shape: `contract` (default), `raw`, `fenced`, `hallucinated`, `bad-type` |
  * | `FAKE_PROMPT_FILE=<path>`      | writes the prompt **received**, character by character, to this file |
+ * | `FAKE_ARGV_FILE=<path>`        | writes our argv (JSON): the only observable of the spawn arguments, which the protocol cannot carry |
  */
 
 import { appendFileSync, writeFileSync } from "node:fs"
@@ -610,6 +611,16 @@ const agent = new FakeAgent()
 const PID_FILE = process.env["FAKE_PID_FILE"]
 if (PID_FILE !== undefined) {
   writeFileSync(PID_FILE, `${process.pid}\n`)
+}
+
+// `FAKE_ARGV_FILE=<path>`: our argv is written to disk, as JSON. The spawn
+// arguments are the only part of the provider's contract that the ACP
+// protocol **cannot** observe - the policy, the capabilities and the prompt
+// all travel on the wire, the command line does not - so the fake records its
+// own argv, as it already records its pid and the capabilities it was handed.
+const ARGV_FILE = process.env["FAKE_ARGV_FILE"]
+if (ARGV_FILE !== undefined) {
+  writeFileSync(ARGV_FILE, JSON.stringify(process.argv))
 }
 
 // `FAKE_NOISY_STDOUT=1`: a chatty agent writes before starting the protocol, on

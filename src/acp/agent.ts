@@ -36,6 +36,7 @@ import type {
   PermissionRequest,
 } from "../core/types.js"
 import { denyAllPermissions } from "../core/types.js"
+import { availableToolsArgs } from "../settings.js"
 
 /** Construction options of an ACP agent. */
 export interface AcpAgentOptions {
@@ -52,6 +53,24 @@ export interface AcpAgentOptions {
    * Note: default is **refuse everything**.
    */
   policy?: AcpPermissionPolicy
+  /**
+   * The agent's native tool surface restriction, applied **at spawn** through
+   * the flag the agent itself provides (`--available-tools` for copilot:
+   * "Only these tools will be available to the model").
+   *
+   * Note: the value is the provider setting `allowedTools`, reused verbatim —
+   * no second setting, no conversion. The field's **presence** is an explicit,
+   * per-agent opt-in: absent (the default), no flag is added, because an agent
+   * that does not implement the flag would die on an unknown argument — a
+   * worse failure than no restriction.
+   *
+   * Note: an **additional** layer over {@link policy}, not a replacement — a
+   * refusal only binds an agent that asks, and an agent can ignore it; a
+   * reduced surface cannot be ignored. The mapping is {@link availableToolsArgs}:
+   * `[]` (deny-all) reduces the surface to nothing, `["*"]` (allow-all) leaves
+   * it alone, an explicit list restricts it to those tools.
+   */
+  availableTools?: readonly string[]
   /** Name announced by the ACP client in `initialize`. */
   clientName?: string
   /**
@@ -504,6 +523,13 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
   // own journal. Only the CLI asks for `"inherit"`.
   const stderrMode = options.stderr ?? "pipe"
   const args = [...(options.args ?? [])]
+  // Surface reduction at spawn — an **additional** layer over the permission
+  // policy, not a replacement: a refusal only binds an agent that asks, and an
+  // agent can ignore it; a reduced surface cannot be ignored. Emitted only in
+  // the shapes `availableToolsArgs` maps, and only ever behind the explicit
+  // opt-in (`availableTools`) — never invented for an agent that would not
+  // accept the flag.
+  args.push(...availableToolsArgs(options.availableTools))
   // A readable label present in **every** error message: without it a failure
   // reduces to "ACP connection closed", with no command name.
   const label = [options.command, ...args].join(" ").trim()
