@@ -1,152 +1,157 @@
-# Plan — `opencode-acp-provider`
+# Plan - `opencode-acp-provider`
 
-Exposer un agent ACP (codex, copilot, gemini, qwen…) comme **model provider OpenCode**,
-afin de l'utiliser dans l'interface TUI d'OpenCode.
+Expose an ACP agent (codex, copilot, gemini, qwen...) as an **OpenCode model
+provider**, so that it can be used from OpenCode's TUI.
 
-- Cible d'implémentation : `/home/barth/Projects/opencode-acp-provider` (dossier vide, non versionné)
-- Versions de référence vérifiées : `opencode v2.0.16`, `@opencode/ai 2.0.3`, `@opencode/plugin 2.0.3`, `effect 4.0.0-rc.112`, `bun 1.3.14`
+- Implementation target: `/home/barth/Projects/opencode-acp-provider` (empty directory, not versioned)
+- Reference versions verified: `opencode v2.0.16`, `@opencode/ai 2.0.3`, `@opencode/plugin 2.0.3`, `effect 4.0.0-rc.112`, `bun 1.3.14`
 
 ---
 
-## 0. Faisabilité — validée par exécution réelle
+## 0. Feasibility - validated by real execution
 
-Avant de planifier, chaque hypothèse a été testée dans un REPL `bun` contre
-`~/.config/opencode/node_modules`. Résultats :
+Before planning, every hypothesis was tested in a `bun` REPL against
+`~/.config/opencode/node_modules`. Results:
 
-| Hypothèse | Résultat |
+| Hypothesis | Result |
 | --- | --- |
-| `providers.<id>.package` accepte un module arbitraire | ✅ `Provider.Info.package: Schema.String` (aucun enum) ; doc : « an absolute `file://` URL for a local package » |
-| `Route.make` accepte un `transport` non-HTTP | ✅ surcharge `MakeTransportInput` (`route/client.d.ts`) |
-| `Transport.execute` peut émettre ses propres frames | ✅ testé : transport custom → `Stream<Frame>` |
-| Le pipeline réduit nos frames en `LLMEvent` valides | ✅ testé : `["step-start","text-start","text-delta","text-end","step-finish","finish"]` |
-| Une séquence d'événements mal formée est rejetée | ✅ `AI.Error: The provider response ended unexpectedly.` → **le mapping doit être exact** |
+| `providers.<id>.package` accepts an arbitrary module | ✅ `Provider.Info.package: Schema.String` (no enum); doc: "an absolute `file://` URL for a local package" |
+| `Route.make` accepts a non-HTTP `transport` | ✅ `MakeTransportInput` overload (`route/client.d.ts`) |
+| `Transport.execute` can emit its own frames | ✅ tested: custom transport → `Stream<Frame>` |
+| The pipeline reduces our frames into valid `LLMEvent`s | ✅ tested: `["step-start","text-start","text-delta","text-end","step-finish","finish"]` |
+| A malformed event sequence is rejected | ✅ `AI.Error: The provider response ended unexpectedly.` → **the mapping must be exact** |
 
-Code qui a produit la preuve :
+The code that produced the evidence:
 
 ```ts
 const route = make({
   id: "acp", provider: "acp", protocol,
   endpoint: E.path("/", { baseURL: "http://acp.local" }),  // placeholder
-  auth: A.none,                                             // stdio ⇒ pas d'auth
-  transport,                                                // ← nôtre
+  auth: A.none,                                             // stdio ⇒ no auth
+  transport,                                                // ← ours
   compact: undefined,
 })
 ```
 
-⚠️ Le placeholder `http://acp.local` est requis : le core rend l'URL dans
-`compileRequest` (accès à `request.model.provider`) même si le transport l'ignore.
+⚠️ The `http://acp.local` placeholder is required: the core renders the URL in
+`compileRequest` (it accesses `request.model.provider`) even if the transport
+ignores it.
 
 ---
 
-## 1. Décision d'architecture — Option B
+## 1. Architecture decision - Option B
 
-**Choix : package provider custom avec `Transport` ACP sur stdio.**
+**Choice: custom provider package with an ACP `Transport` over stdio.**
 
-L'agent et le provider tournent dans le **même processus Bun** : le plugin est chargé par
-le serveur OpenCode, et le champ `package` est importé par ce même serveur. Communication
-directe, aucun port, aucun proxy.
+The agent and the provider run in the **same Bun process**: the plugin is loaded
+by the OpenCode server, and the `package` field is imported by that same server.
+Direct communication, no port, no proxy.
 
-### Comparatif honnête B vs A
+### An honest B vs A comparison
 
-| | **B — Transport natif** | A — Bridge HTTP |
+| | **B - Native transport** | A - HTTP bridge |
 | --- | --- | --- |
-| Client ACP (JSON-RPC stdio) | identique | identique |
-| Code en plus | 0 | serveur HTTP + encodage SSE + mapping format OpenAI (~200 l.) |
-| Coût par token | nul | 2 sérialisations + 1 saut loopback |
-| Cycle de vie process | `Scope` natif → kill propre | à gérer (idle timeout, ports, collisions) |
+| ACP client (JSON-RPC stdio) | identical | identical |
+| Extra code | 0 | HTTP server + SSE encoding + OpenAI format mapping (~200 lines) |
+| Cost per token | none | 2 serialisations + 1 loopback hop |
+| Process lifecycle | native `Scope` → clean kill | to be handled (idle timeout, ports, collisions) |
 | `session/cancel` | direct | indirect |
-| Erreurs / retry hook | ⚠️ **dégradé** (voir §8) | ✅ statut HTTP réel |
-| Réduction `LLMEvent` | à nous écrire, **strictement validée** | déjà faite par le runtime |
-| Couplage | ⚠️ internals `@opencode/ai` + `effect` RC | API publique seulement |
+| Errors / retry hook | ⚠️ **degraded** (see §8) | ✅ real HTTP status |
+| `LLMEvent` reduction | ours to write, **strictly validated** | already done by the runtime |
+| Coupling | ⚠️ `@opencode/ai` internals + `effect` RC | public API only |
 
-Le code client ACP est identique dans les deux cas : B n'ajoute pas de couche, elle évite
-celle de A. Le vrai coût de B n'est pas le code, c'est le **couplage** aux internals.
+The ACP client code is identical in both cases: B adds no layer, it avoids A's.
+B's real cost is not the code, it is the **coupling** to the internals.
 
-**Mitigation : l'architecture en couches du §2.** Le client ACP et le cœur métier ne
-contiennent **aucun import** de `@opencode/ai` ni d'`effect`. L'adaptateur
-`opencode-transport` est une coquille mince (~150 l.) au-dessus. Si les internels bougent,
-on ne réécrit que cette coquille — ou on bascule sur l'adaptateur HTTP, déjà écrit.
+**Mitigation: §2's layered architecture.** The ACP client and the business core
+contain **no import** of `@opencode/ai` nor of `effect`. The
+`opencode-transport` adapter is a thin shell (~150 lines) on top. If the internals
+move, only that shell is rewritten - or we switch to the HTTP adapter, already
+written.
 
-**Pinning :** versions exactes de `@opencode/ai` et `effect` dans `package.json` + un test de fumée
-qui échoue bruyamment si le contrat change.
+**Pinning:** exact versions of `@opencode/ai` and `effect` in `package.json` + a
+smoke test that fails loudly if the contract changes.
 
 ---
 
-## 2. Architecture en couches — le cœur est portable
+## 2. Layered architecture - the core is portable
 
-> ⚠️ **§2 révisé après recherche** : un SDK officiel existe et couvre toute la couche `acp/`.
-> Voir **§2.0**. L'architecture en couches tient, mais la couche ACP devient une coquille
-> d'une centaine de lignes au lieu de ~400.
+> ⚠️ **§2 revised after research**: an official SDK exists and covers the whole
+> `acp/` layer. See **§2.0**. The layered architecture holds, but the ACP layer
+> becomes a shell of a hundred-odd lines instead of ~400.
 
-**Le contrat central du projet est `AsyncIterable<AcpEvent>`.** Tout ce qui est en dessous
-parle ACP, tout ce qui est au-dessus est un adaptateur interchangeable.
+**The project's central contract is `AsyncIterable<AcpEvent>`.** Everything below
+speaks ACP, everything above is an interchangeable adapter.
 
 ```
    ┌──────────────────────────────┐  ┌──────────────────────────┐  ┌──────────────┐
    │ adapters/opencode-transport   │  │ adapters/openai-http      │  │ adapters/cli  │
-   │  Effect Transport + Protocol  │  │  serveur /v1 SSE          │  │  acp-run      │
+   │  Effect Transport + Protocol  │  │  /v1 SSE server          │  │  acp-run      │
    │  → LLMEvent   (~150 l.)       │  │  → OpenAI SSE   (~150 l.) │  │  (~60 l.)     │
-   │  ⚠️ couplé aux internals      │  │  ✅ portable               │  │  ✅ portable  │
+   │  ⚠️ coupled to internals      │  │  ✅ portable               │  │  ✅ portable  │
    └───────────────┬──────────────┘  └────────────┬─────────────┘  └──────┬───────┘
                    │                            │                       │
    ┌───────────────┴────────────────────────────┴───────────────────────┴───────┐
-   │  core/   —  AUCUNE dépendance à un framework                                │
-   │   • prompt.ts   construction du prompt (système + catalogue d'outils +       │
-   │                 transcript + contrat JSON)   ← §7.3, partagé par tous        │
-   │   • normalize   modèle commun de requête (system / tools / messages)        │
-   │   • models.ts   découverte d'inventaire via configOptions (§5)                │
+   │  core/   -  NO dependency on any framework                                   │
+   │   • prompt.ts   prompt construction (system + tool catalogue +              │
+   │                 transcript + JSON contract)   <- §7.3, shared by all         │
+   │   • normalize   common request model (system / tools / messages)             │
+   │   • models.ts   inventory discovery via configOptions (§5)                  │
    └───────────────────────────────┬─────────────────────────────────────────────┘
                                    │
    ┌───────────────────────────────┴─────────────────────────────────────────────┐
-   │  acp/   —  protocole ACP, zéro import de quoi que ce soit                   │
-│   │   ├── agent.ts          #   spawn + ndJsonStream + client() + handlers
+   │  acp/   -  ACP protocol, zero import of anything                            │
+ │   │   ├── agent.ts          #   spawn + ndJsonStream + client() + handlers
    └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.0 Le SDK officiel — `@agentclientprotocol/sdk`
+### 2.0 The official SDK - `@agentclientprotocol/sdk`
 
-**Il existe et il est très complet.** Package npm `@agentclientprotocol/sdk`, **v1.5.0**,
-édité par l'équipe ACP (repository : `agentclientprotocol/typescript-sdk`).
+**It exists and it is very complete.** npm package `@agentclientprotocol/sdk`,
+**v1.5.0**, published by the ACP team (repository: `agentclientprotocol/typescript-sdk`).
 
-Il fournit **les deux côtés** du protocole (agent *et* client). Côté client, ce qu'il couvre :
+It provides **both sides** of the protocol (agent *and* client). On the client
+side, what it covers:
 
-| Besoin | API du SDK | Lignes économisées |
+| Need | SDK API | Lines saved |
 | --- | --- | --- |
-| Framing JSON-RPC NDJSON sur stdio | `acp.ndJsonStream(input, output)` | ~150 |
-| Client typé, enregistrement de handlers | `acp.client({name}).onRequest(method, fn).connectWith(stream, fn)` | ~80 |
-| Cycle de vie de session | `ctx.buildSession(cwd).withSession(s => …)`, `withMcpServer()`, `withAdditionalDirectories()` | ~150 |
-| Boucle prompt ↔ updates | `session.prompt(...)`, `session.nextUpdate()` → `{kind:"update"\|"stop"}`, `session.readText()` | ~100 |
+| NDJSON JSON-RPC framing over stdio | `acp.ndJsonStream(input, output)` | ~150 |
+| Typed client, handler registration | `acp.client({name}).onRequest(method, fn).connectWith(stream, fn)` | ~80 |
+| Session lifecycle | `ctx.buildSession(cwd).withSession(s => …)`, `withMcpServer()`, `withAdditionalDirectories()` | ~150 |
+| Prompt ↔ updates loop | `session.prompt(...)`, `session.nextUpdate()` → `{kind:"update"\|"stop"}`, `session.readText()` | ~100 |
 | Permissions | `.onRequest(acp.methods.client.session.requestPermission, fn)` | ~80 |
-| Types du protocole | `schema/schema.json` + types générés | ~120 |
-| `initialize`, `set_config_option`, `cancel` | `ctx.request(acp.methods.agent.…)` typé par méthode | ~60 |
+| Protocol types | `schema/schema.json` + generated types | ~120 |
+| `initialize`, `set_config_option`, `cancel` | `ctx.request(acp.methods.agent.…)` typed per method | ~60 |
 
-**Validé en exécution réelle** contre `copilot --acp` (voir `probe/sdk-inspect.mjs`) :
-initialize, session, inventaire, prompt, permission, `stopReason` et `usage` — **sous Node
-ET sous Bun**, ce qui compte puisque le provider tourne dans le runtime Bun d'OpenCode.
+**Validated in real execution** against `copilot --acp` (see `probe/sdk-inspect.mjs`):
+initialize, session, inventory, prompt, permission, `stopReason` and `usage` -
+**under Node AND under Bun**, which matters since the provider runs in OpenCode's
+Bun runtime.
 
-#### Ce que ça change
+#### What it changes
 
-- La couche `acp/` du projet passe de **~400 lignes à ~120** de glue.
-- Le typage du protocole n'est plus à notre charge.
-- **Le transport devient interchangeable** : `ndJsonStream` (stdio) par défaut, mais le SDK
-  exporte aussi `experimental/ws-client` (`createWebSocketStream`) et
-  `experimental/http-client`. Si un agent expose un jour ACP sur WebSocket/HTTP, on change
-  **une fonction** — le reste du code est inchangé. Cela confirme la décision stdio (§13, Q5).
-- Il y a même des exemples `ws-client` / `http-client` / `http-server` dans le SDK.
+- The project's `acp/` layer goes from **~400 lines to ~120** of glue.
+- The protocol typing is no longer our burden.
+- **The transport becomes interchangeable**: `ndJsonStream` (stdio) by default,
+  but the SDK also exports `experimental/ws-client` (`createWebSocketStream`) and
+  `experimental/http-client`. If an agent ever exposes ACP over WebSocket/HTTP,
+  we change **one function** - the rest of the code is unchanged. That confirms
+  the stdio decision (§13, Q5).
+- There are even `ws-client` / `http-client` / `http-server` examples in the SDK.
 
-#### Ce que ça introduit
+#### What it introduces
 
-- **`zod` est un `peerDependency`** (`^3.25 || ^4`) → à installer explicitement.
-- Dépendance externe supplémentaire à pinner (comme `@opencode/ai`).
-- `AgentSideConnection` / `ClientSideConnection` sont **dépréciés** au profit des API fluides
-  `client()` / `agent()` : ne pas s'appuyer sur les classes anciennes.
+- **`zod` is a `peerDependency`** (`^3.25 || ^4`) → to be installed explicitly.
+- One more external dependency to pin (like `@opencode/ai`).
+- `AgentSideConnection` / `ClientSideConnection` are **deprecated** in favour of
+  the fluid `client()` / `agent()` APIs: do not rely on the old classes.
 
 #### Verdict
 
-**On utilise le SDK.** Écrire notre propre client JSON-RPC serait du gaspillage. Le cœur
-`core/` (prompt, parse, modèles) reste entièrement à nous — c'est là qu'est la vraie valeur.
+**We use the SDK.** Writing our own JSON-RPC client would be a waste. The `core/`
+(prompt, parse, models) stays entirely ours - that is where the real value is.
 
-### 2.1 L'API du cœur (le point de bascule)
+### 2.1 The core API (the pivot point)
 
 ```ts
 // core/types.ts
@@ -168,13 +173,13 @@ export interface AcpAgent {
 export interface AcpSession {
   setModel(modelID: string): Promise<void>
   setOption(configId: string, value: string): Promise<void>
-  /** Le SEUL point que les trois adaptateurs ont en commun. */
+  /** The ONLY point the three adapters have in common. */
   prompt(request: NormalizedRequest, options?: { signal?: AbortSignal }): AsyncIterable<AcpEvent>
   close(): Promise<void>
 }
 ```
 
-`core/prompt.ts` prend une `NormalizedRequest` **independante d'OpenCode** :
+`core/prompt.ts` takes a `NormalizedRequest` **independent of OpenCode**:
 
 ```ts
 interface NormalizedRequest {
@@ -186,79 +191,82 @@ interface NormalizedRequest {
 }
 ```
 
-L'adaptateur OpenCode convertit `LLMRequest` → `NormalizedRequest` ;
-l'adaptateur HTTP convertit le corps OpenAI → `NormalizedRequest`. **La logique métier
-(construction du prompt, parsing de la sortie JSON, politique de permissions) n'existe
-qu'une seule fois.**
+The OpenCode adapter converts `LLMRequest` → `NormalizedRequest`; the HTTP
+adapter converts the OpenAI body → `NormalizedRequest`. **The business logic
+(prompt construction, JSON output parsing, permission policy) exists only
+once.**
 
-### 2.2 Que reste-t-il si on quitte OpenCode ?
+### 2.2 What is left if we leave OpenCode?
 
-| Composant | Lignes | Portable ? |
+| Component | Lines | Portable? |
 | --- | --- | --- |
-| `acp/` (glue au SDK : spawn + stream + handlers) | ~120 | ✅ totalement |
-| `core/` (prompt, parse, models, events) | ~300 | ✅ totalement |
-| `adapters/openai-http` | ~150 | ✅ réutilisable tel quel |
+| `acp/` (glue to the SDK: spawn + stream + handlers) | ~120 | ✅ entirely |
+| `core/` (prompt, parse, models, events) | ~300 | ✅ entirely |
+| `adapters/openai-http` | ~150 | ✅ reusable as is |
 | `adapters/cli` | ~60 | ✅ |
-| `adapters/opencode-transport` (Transport + Protocol + LLMEvent) | ~150 | ❌ **le seul à jeter** |
-| `plugin.ts` | ~120 | ❌ **le seul à jeter** |
+| `adapters/opencode-transport` (Transport + Protocol + LLMEvent) | ~150 | ❌ **the only one to throw away** |
+| `plugin.ts` | ~120 | ❌ **the only one to throw away** |
 
-Soit **~800 lignes dont ~630 survivent**, et les 270 à jeter sont eux-mêmes
-remplaçables par l'adaptateur HTTP en ~150 lignes.
+That is **~800 lines of which ~630 survive**, and the 270 to be thrown away are
+themselves replaceable by the HTTP adapter in ~150 lines.
 
-### 2.3 Pourquoi le bridge HTTP n'est pas un plan B, c'est un **outiller**
+### 2.3 Why the HTTP bridge is not a plan B, it is a **tool**
 
-Les deux ne sont pas exclusifs, ils se cumulent :
+The two are not exclusive, they add up:
 
-- **Débogage** : `curl` contre le bridge pour voir ce que l'agent produit vraiment.
-- **Partage d'un seul agent** entre opencode, Zed, Claude Code, etc.
-- **Compatibilité large** : tout client OpenAI-compatible (Cline, Continue, Aider…)
-  peut consommer l'agent ACP sans installer de plugin.
-- ** filet de sécurité** : si les internals `@opencode/ai` bougent (§1), on bascule
-  `package` sur `@opencode/ai/providers/openai-compatible` + `baseURL` sans réécrire le cœur.
+- **Debugging**: `curl` against the bridge to see what the agent really
+  produces.
+- **Sharing a single agent** between opencode, Zed, Claude Code, etc.
+- **Broad compatibility**: any OpenAI-compatible client (Cline, Continue,
+  Aider...) can consume the ACP agent without installing a plugin.
+- **A safety net**: if the `@opencode/ai` internals move (§1), we switch
+  `package` to `@opencode/ai/providers/openai-compatible` + `baseURL` without
+  rewriting the core.
 
-Et le cas le plus simple reste ouvert : **si l'alternative est un autre client ACP** (Zed,
-Gemini CLI), il n'y a rien à écrire — on pointe le client ACP sur l'agent directement.
+And the simplest case stays open: **if the alternative is another ACP client**
+(Zed, Gemini CLI), there is nothing to write - we point the ACP client at the
+agent directly.
 
-### 2.4 Structure du dépôt
+### 2.4 Repository structure
 
 ```
 opencode-acp-provider/
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── acp/                  # couche 3 — glue sur le SDK officiel (~120 l., cf. §2.0)
+│   ├── acp/                  # layer 3 - glue on the official SDK (~120 l., cf. §2.0)
 │   │   ├── agent.ts          #   spawn + ndJsonStream + client() + handlers
 │   │   ├── transport.ts      #   ndJsonStream | ws-stream | http-stream  (§2.0)
-│   │   └── policy.ts         #   config d'options (allow_all, effort, modèle)
-│   ├── core/                 # couche 2 — logique métier partagée, 100% à nous
+│   │   └── policy.ts         #   options config (allow_all, effort, model)
+│   ├── core/                 # layer 2 - shared business logic, 100% ours
 │   │   ├── types.ts          #   AcpEvent / AcpAgent / AcpSession / NormalizedRequest
-│   │   ├── agent.ts          #   AcpAgent construit sur le SDK
-│   │   ├── prompt.ts         #   §7.3 — construction du prompt + contrat de sortie
-│   │   ├── parse.ts          #   extraction/validation de la sortie JSON de l'agent
-│   │   └── models.ts         #   §5 — inventaire via configOptions
-│   ├── adapters/             # couche 1 — interchangeables
+│   │   ├── agent.ts          #   AcpAgent built on the SDK
+│   │   ├── prompt.ts         #   §7.3 - prompt construction + output contract
+│   │   ├── parse.ts          #   extraction/validation of the agent's JSON output
+│   │   └── models.ts         #   §5 - inventory via configOptions
+│   ├── adapters/             # layer 1 - interchangeable
 │   │   ├── opencode-transport.ts   # Effect Transport + Protocol + LLMEvent
 │   │   ├── opencode-protocol.ts    #   LLMEvent ↔ AcpEvent
-│   │   ├── openai-http.ts          #   serveur /v1/chat/completions (SSE)
-│   │   └── cli.ts                  #   binaire `acp-run`
-│   ├── index.ts              # point d'entrée provider  → exporte `model`
-│   ├── plugin.ts             # point d'entrée plugin OpenCode
+│   │   ├── openai-http.ts          #   /v1/chat/completions server (SSE)
+│   │   └── cli.ts                  #   `acp-run` binary
+│   ├── index.ts              # provider entry point  → exports `model`
+│   ├── plugin.ts             # OpenCode plugin entry point
 │   └── settings.ts
 ├── bin/
 │   └── acp-run.ts
-├── probe/                    # sondes ACP réutilisables (inspect / switch-option / sdk-inspect)
+├── probe/                    # reusable ACP probes (inspect / switch-option / sdk-inspect)
 └── test/
-    ├── smoke.test.ts         # contrat Route/Transport vs @opencode/ai pinné
-    └── fake-acp.ts           # agent ACP factice (stdio)
+    ├── smoke.test.ts         # Route/Transport contract vs pinned @opencode/ai
+    └── fake-acp.ts           # fake ACP agent (stdio)
 ```
 
 ---
 
-## 3. Contrats
+## 3. Contracts
 
-### 3.1 `package` provider — minimalisme
+### 3.1 Provider `package` - minimalism
 
-`@opencode/ai/dist/provider-package.d.ts` :
+`@opencode/ai/dist/provider-package.d.ts`:
 
 ```ts
 interface Definition<ProviderSettings, Options, Compact> {
@@ -266,7 +274,7 @@ interface Definition<ProviderSettings, Options, Compact> {
 }
 ```
 
-`src/index.ts` :
+`src/index.ts`:
 
 ```ts
 import type { LanguageModel } from "@opencode/ai/schema/index"
@@ -279,7 +287,7 @@ export const model = (modelID: string, settings: Settings): LanguageModel => {
 }
 ```
 
-### 3.2 `Settings` (JSON plat — `ProviderPackage.Settings` interdit les callbacks)
+### 3.2 `Settings` (flat JSON - `ProviderPackage.Settings` forbids callbacks)
 
 ```ts
 export interface Settings {
@@ -287,13 +295,14 @@ export interface Settings {
   args?: string[]              // ["--acp"]
   cwd?: string
   env?: Record<string, string>
-  tools?: "none" | "all"       // "none" = mode cerveau brut (défaut)
+  tools?: "none" | "all"       // "none" = raw-brain mode (default)
   session?: "reuse" | "fresh"
   systemSuffix?: string
 }
 ```
 
-Transmis via `providers.<id>.settings` ou, par agent, via `models.<id>.settings` dans le plugin.
+Passed through `providers.<id>.settings` or, per agent, through
+`models.<id>.settings` in the plugin.
 
 ### 3.3 `Transport`
 
@@ -310,8 +319,9 @@ export const transport: Transport<Body, AcpPrepared, string> = {
 }
 ```
 
-`execute` est typé `Effect<…, AIError, Scope>` : la fin du `Scope` (stream interrompu,
-`session.cancel`) tue le process. `TransportExecution.http` est omis → aucun faux contexte HTTP.
+`execute` is typed `Effect<…, AIError, Scope>`: the end of the `Scope`
+(interrupted stream, `session.cancel`) kills the process.
+`TransportExecution.http` is omitted → no fake HTTP context.
 
 ### 3.4 `Protocol`
 
@@ -320,7 +330,7 @@ const protocol = Protocol.make({
   id: "acp",
   body: { schema: PromptBody, from: (request) => Effect.succeed(flatten(request)) },
   stream: {
-    event: Protocol.jsonEvent(AcpNotification),  // une ligne JSON stdout
+    event: Protocol.jsonEvent(AcpNotification),  // one JSON line on stdout
     initial: () => ({ text: null, reasoning: null, step: 0, toolcalls: new Map() }),
     step: (state, ev) => Effect.succeed(reduce(state, ev)),
     onHalt: (state) => Effect.succeed(closeOpenBlocks(state)),
@@ -330,61 +340,64 @@ const protocol = Protocol.make({
 
 ---
 
-## 4. Mapping ACP → `LLMEvent`
+## 4. ACP -> `LLMEvent` mapping
 
-Séquence **obligatoire** (vérifiée) : `step-start` → (`text-start` → `text-delta`* → `text-end` | `reasoning-*` | `tool-*`) → `step-finish` → `finish`.
-`tout` doit être fermé, sinon `The provider response ended unexpectedly.`
+**Mandatory** sequence (verified): `step-start` → (`text-start` → `text-delta`* →
+`text-end` | `reasoning-*` | `tool-*`) → `step-finish` → `finish`.
+Everything must be closed, otherwise `The provider response ended unexpectedly.`
 
-| Notification ACP (`session/update`) | `LLMEvent` |
+| ACP notification (`session/update`) | `LLMEvent` |
 | --- | --- |
-| `agent_message_chunk` (contenu `text`) | ouvre `text-start{id}` si fermé ; `text-delta{id, text}` |
+| `agent_message_chunk` (`text` content) | opens `text-start{id}` if closed; `text-delta{id, text}` |
 | `agent_thought_chunk` | `reasoning-start{id}` / `reasoning-delta{id,text}` / `reasoning-end{id}` |
-| `tool_call` (statut `pending`/`in_progress`) | `tool-input-start` + `tool-input-delta`(streaming de `rawInput`) + `tool-input-end`, puis `tool-call{ id, name, input, providerExecuted }` |
+| `tool_call` (`pending`/`in_progress` status) | `tool-input-start` + `tool-input-delta` (streaming `rawInput`) + `tool-input-end`, then `tool-call{ id, name, input, providerExecuted }` |
 | `tool_call_update` → `completed`/`failed` | `tool-result{ id, name, result: {type:"text"\|"error", value} }` |
-| `tool_call_update` → `diff` | `tool-call.locations` / contenu `rawOutput` |
-| `plan` | `reasoning-*` (ou tool `plan` dédié) |
-| `config_option_update` | ignoré côté `LLMEvent` ; déclenche `ctx.provider.reload()` (§5) |
-| `usage_update` | compteur cumulé ; `finish.usage` à la fin du tour (voir ci-dessous) |
-| `session_info_update` | ignoré (métadonnées de session) |
-| `available_commands_update` | ignoré, ou exposé comme commandes OpenCode (§6) |
-| `session/prompt` terminé | `step-finish` puis `finish` (voir §5 pour `usage`) |
+| `tool_call_update` → `diff` | `tool-call.locations` / `rawOutput` content |
+| `plan` | `reasoning-*` (or a dedicated `plan` tool) |
+| `config_option_update` | ignored on the `LLMEvent` side; triggers `ctx.provider.reload()` (§5) |
+| `usage_update` | cumulative counter; `finish.usage` at the end of the turn (see below) |
+| `session_info_update` | ignored (session metadata) |
+| `available_commands_update` | ignored, or exposed as OpenCode commands (§6) |
+| `session/prompt` finished | `step-finish` then `finish` (see §5 for `usage`) |
 
-`finish.reason.normalized` : `stopReason` ACP → `"stop"` / `"tool-calls"` (selon config) / `"error"`.
-`step-finish` et `finish` portent tous deux `reason` + `index`.
+`finish.reason.normalized`: ACP `stopReason` → `"stop"` / `"tool-calls"` (depending
+on config) / `"error"`. Both `step-finish` and `finish` carry `reason` + `index`.
 
-### 4.0 Séquences d'événements — validées une par une
+### 4.0 Event sequences - validated one by one
 
-Chaque forme a été soumise au pipeline réel (`Route` + `Transport` custom) sous Bun.
-Résultats :
+Each shape was submitted to the real pipeline (`Route` + custom `Transport`)
+under Bun. Results:
 
-| Séquence émise | Verdict |
+| Emitted sequence | Verdict |
 | --- | --- |
 | `step-start` → `text-*` → `step-finish` → `finish` | ✅ |
-| `reasoning-*` puis `text-*` | ✅ |
+| `reasoning-*` then `text-*` | ✅ |
 | `tool-input-*` → `tool-call` → `tool-result` | ✅ |
-| **`tool-call` seul, sans `tool-result`** | ✅ |
-| `tool-call` + `tool-result` avec `providerExecuted: true` | ✅ |
-| `text-*` puis `tool-call` dans le même step | ✅ |
-| `tool-call` puis `tool-error` | ✅ |
+| **`tool-call` alone, without `tool-result`** | ✅ |
+| `tool-call` + `tool-result` with `providerExecuted: true` | ✅ |
+| `text-*` then `tool-call` in the same step | ✅ |
+| `tool-call` then `tool-error` | ✅ |
 
-> 🔎 **Les deux résultats les plus importants pour la conception :**
+> 🔎 **The two results most important for the design:**
 >
-> 1. **`tool-call` seul est accepté.** C'est exactement ce dont le mécanisme §7.3 a besoin :
->    le provider **propose**, OpenCode **exécute** et renvoie le résultat au tour suivant.
->    On ne doit donc pas émettre de `tool-result` dans ce mode — le core s'en charge.
+> 1. **A lone `tool-call` is accepted.** That is exactly what §7.3's mechanism
+>    needs: the provider **proposes**, OpenCode **executes** and returns the
+>    result on the next turn. So we must not emit a `tool-result` in that mode -
+>    the core takes care of it.
 >
-> 2. **`usage` doit être une instance de la classe `Usage`**, pas un objet littéral.
->    Un objet plat échoue avec `The provider response ended unexpectedly.` — un message
->    **identique** à celui d'un flux tronqué, donc quasiment impossible à diagnostiquer.
->    Toujours construire via `new Usage({ … })` importé de `@opencode/ai/schema/index`.
+> 2. **`usage` must be an instance of the `Usage` class**, not a literal object.
+>    A plain object fails with `The provider response ended unexpectedly.` - a
+>    message **identical** to the one of a truncated stream, hence almost
+>    impossible to diagnose. Always build it via `new Usage({ … })` imported
+>    from `@opencode/ai/schema/index`.
 
-Cet état-machine (`open`/`text`/`reasoning`/`tool`) est la spec de référence pour
-`adapters/opencode-protocol.ts` en P1/P2.
+This state machine (`open`/`text`/`reasoning`/`tool`) is the reference spec for
+`adapters/opencode-protocol.ts` in P1/P2.
 
-### 4.1 `usage` — mesuré, ça marche
+### 4.1 `usage` - measured, it works
 
-`PromptResponse` transporte un `usage` complet, et une notification `usage_update` le met à jour
-en cours de tour. Relevé réel sur `copilot --acp` :
+`PromptResponse` carries a complete `usage`, and a `usage_update` notification
+updates it during the turn. Real reading on `copilot --acp`:
 
 ```json
 { "stopReason": "end_turn",
@@ -392,36 +405,38 @@ en cours de tour. Relevé réel sur `copilot --acp` :
              "thoughtTokens": 0, "cachedReadTokens": 0, "cachedWriteTokens": 15073 } }
 ```
 
-Le mapping vers `Usage` d'OpenCode est donc **direct** : `inputTokens`/`outputTokens`,
-et `cachedReadTokens`/`cachedWriteTokens` alimentent les paliers de `Cache` du schéma
-`Model.Info.cost` (§6). Le risque « pas de comptage des tokens » est **levé**.
+The mapping to OpenCode's `Usage` is therefore **direct**:
+`inputTokens`/`outputTokens`, and `cachedReadTokens`/`cachedWriteTokens` feed the
+`Cache` tiers of the `Model.Info.cost` schema (§6). The "no token counting" risk
+is **lifted**.
 
-**`providerExecuted: true`** — le champ existe sur `tool-call`, `tool-result` et `tool-error`
-(`schema/events.d.ts`) et est déjà consommé par les protocols de lowering
-(`protocols/anthropic-messages.js:657`, `protocols/open-responses.js:505`). C'est le mécanisme
-officiel pour « le provider a déjà exécuté l'outil ». **À spike-er** (§11, P3) : vérifier que la
-boucle agent du core ne ré-exécute pas ces appels.
+**`providerExecuted: true`** - the field exists on `tool-call`, `tool-result` and
+`tool-error` (`schema/events.d.ts`) and is already consumed by the lowering
+protocols (`protocols/anthropic-messages.js:657`,
+`protocols/open-responses.js:505`). It is the official mechanism for "the
+provider already executed the tool". **To spike** (§11, P3): check that the
+core's agent loop does not re-execute those calls.
 
 ---
 
-## 5. `configOptions` ACP → `/model` et variants
+## 5. ACP `configOptions` → `/model` and variants
 
-**Vérifié empiriquement** contre `copilot --acp` (agent `Copilot` v1.0.88), cf. §5.1.
+**Verified empirically** against `copilot --acp` (agent `Copilot` v1.0.88), cf. §5.1.
 
-`session/new` renvoie `configOptions` ; `session/set_config_option` les modifie.
-Catégories (`ConfigOptionCategory`) :
+`session/new` returns `configOptions`; `session/set_config_option` modifies them.
+Categories (`ConfigOptionCategory`):
 
-| Catégorie ACP | Cible OpenCode |
+| ACP category | OpenCode target |
 | --- | --- |
-| `model` | **un modèle OpenCode par valeur** → `acp-copilot/claude-sonnet-5`… |
-| `thought_level` | **variants** du modèle (effort / reasoning) |
-| `model_config` | **variants** (taille de contexte, compromis vitesse/qualité) |
-| `mode` | **agents OpenCode** (build ↔ `#agent`, plan ↔ `#plan`…) |
-| *(hors spec)* `permissions` | épinglé à `off` en mode cerveau brut (sécurité, §7.4) |
+| `model` | **one OpenCode model per value** → `acp-copilot/claude-sonnet-5`... |
+| `thought_level` | **variants** of the model (effort / reasoning) |
+| `model_config` | **variants** (context size, speed/quality trade-off) |
+| `mode` | **OpenCode agents** (build ↔ `#agent`, plan ↔ `#plan`...) |
+| *(outside the spec)* `permissions` | pinned to `off` in raw-brain mode (security, §7.4) |
 
-### 5.1 Relevé réel — `copilot --acp`
+### 5.1 Real reading - `copilot --acp`
 
-`initialize` :
+`initialize`:
 
 ```json
 { "protocolVersion": 1,
@@ -433,7 +448,7 @@ Catégories (`ConfigOptionCategory`) :
   "authMethods": [ { "id": "copilot-login", "_meta": { "terminal-auth": {...} } } ] }
 ```
 
-`session/new` → 4 options, réparties ainsi :
+`session/new` → 4 options, distributed as follows:
 
 ```
 [mode]           id=mode                current=#agent   values=[#agent, #plan, #autopilot]
@@ -447,41 +462,43 @@ Catégories (`ConfigOptionCategory`) :
 [permissions]    id=allow_all           current=off       values=[on, off]
 ```
 
-Le champ `modes` (API v1 héritée) est aussi présent, avec `currentModeId`.
+The `modes` field (inherited v1 API) is also present, with `currentModeId`.
 
-**Changement de modèle — testé et fonctionnel :**
+**Model switch - tested and working:**
 
 ```
 session/set_config_option { sessionId, configId: "model", value: "claude-sonnet-5" }
-  → model = claude-sonnet-5   (la réponse renvoie TOUT l'état, comme le spécifie la doc)
+  → model = claude-sonnet-5   (the response returns the WHOLE state, as the doc specifies)
 session/set_config_option { sessionId, configId: "reasoning_effort", value: "max" }
-  → effort = max, model inchangé
-session/set_config_option { configId: "model", value: "pas-un-modele" }
-  → ERREUR JSON-RPC -32602, "Invalid model", avec la liste des valeurs supportées
+  → effort = max, model unchanged
+session/set_config_option { configId: "model", value: "not-a-model" }
+  → JSON-RPC ERROR -32602, "Invalid model", with the list of supported values
 ```
 
-### 5.2 Conséquences pour la conception
+### 5.2 Consequences for the design
 
-- **L'inventaire est dynamique** : 19 valeurs au premier `session/new`, **20** après un
-  `set_config_option`. L'agent peut ajouter/retirer des modèles. Il faut donc gérer la
-  notification `config_option_update` et appeler `ctx.provider.reload()` — un inventaire figé
-  au démarrage serait faux.
-- **`auto`** est une pseudo-valeur : à exposer telle quelle ou à filtrer.
-- Les identifiants de mode sont des **URL** (`https://agentclientprotocol.com/...#agent`) —
-  à raccourcir pour l'affichage côté OpenCode.
-- `mcpCapabilities.http: true` ⇒ l'agent accepte des serveurs **MCP sur HTTP/SSE** dans
-  `session/new.mcpServers`. Cela raviverait la piste B du §7.2 (exposer les outils OpenCode à
-  l'agent), mais elle reste **bloquée** : l'API plugin n'a toujours aucun moyen d'**invoquer**
-  un outil OpenCode. À réexaminer si cette API évolue.
-- Le changement de modèle doit être appliqué **avant** `session/prompt`, dans `transport.execute`.
+- **The inventory is dynamic**: 19 values on the first `session/new`, **20**
+  after a `set_config_option`. The agent can add/remove models. The
+  `config_option_update` notification must therefore be handled and
+  `ctx.provider.reload()` called - an inventory frozen at startup would be wrong.
+- **`auto`** is a pseudo-value: either expose it as is or filter it out.
+- The mode identifiers are **URLs** (`https://agentclientprotocol.com/...#agent`)
+  - to be shortened for OpenCode's display.
+- `mcpCapabilities.http: true` ⇒ the agent accepts **MCP servers over HTTP/SSE**
+  in `session/new.mcpServers`. That would revive §7.2's track B (exposing
+  OpenCode's tools to the agent), but it remains **blocked**: the plugin API
+  still has no way to **invoke** an OpenCode tool. To be re-examined if that API
+  evolves.
+- The model switch must be applied **before** `session/prompt`, in
+  `transport.execute`.
 
-Découverte de l'inventaire : le plugin lance l'agent, appelle `initialize` + `session/new`,
-lit `configOptions`, puis publie un `Model.Info` par valeur de catégorie `model`. Puis
-`ctx.provider.reload()`.
+Inventory discovery: the plugin starts the agent, calls `initialize` +
+`session/new`, reads `configOptions`, then publishes one `Model.Info` per
+`model` category value. Then `ctx.provider.reload()`.
 
 ---
 
-## 6. Plugin — enregistrement du provider
+## 6. Plugin - provider registration
 
 ```ts
 import { Plugin, Provider, Model } from "@opencode/plugin"
@@ -490,7 +507,7 @@ import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const here = dirname(fileURLToPath(import.meta.url))
-const PACKAGE = pathToFileURL(resolve(here, "../dist/index.js")).href  // chemin absolu
+const PACKAGE = pathToFileURL(resolve(here, "../dist/index.js")).href  // absolute path
 
 export default Plugin.define({
   id: "opencode-acp-provider",
@@ -514,12 +531,12 @@ export default Plugin.define({
 })
 ```
 
-`Provider.Info.empty(id)` fournit `id`/`name`/`activation` ; on ajoute `package`.
-`package` pointe sur un **chemin absolu calculé depuis `import.meta.url`** → portable, et le même
-spécifier `file://` garantit l'identité de module entre plugin et provider (utile si on veut
-partager un registre in-process, §9).
+`Provider.Info.empty(id)` provides `id`/`name`/`activation`; we add `package`.
+`package` points at an **absolute path computed from `import.meta.url`** →
+portable, and the same `file://` specifier guarantees the module identity between
+plugin and provider (useful if we want to share an in-process registry, §9).
 
-Config :
+Config:
 
 ```jsonc
 {
@@ -534,296 +551,319 @@ Config :
 
 ---
 
-## 7. Le problème central : qui exécute les outils ?
+## 7. The central problem: who executes the tools?
 
-En ACP v1, **l'agent exécute ses propres outils** ; le client ne fait qu'*afficher* et *autoriser*.
-OpenCode fait l'inverse : le modèle **émet** des `tool-call` et **OpenCode les exécute**.
+In ACP v1, **the agent executes its own tools**; the client only *displays* and
+*authorises*. OpenCode does the opposite: the model **emits** `tool-call`s and
+**OpenCode executes them**.
 
-### 7.1 Le trou du mode « cerveau brut » naïf
+### 7.1 The hole in the naive "raw-brain" mode
 
-Si on bloque les outils de l'agent ACP et qu'on ne lui transmet pas d'outils, l'agent répond en
-texte → on n'émet que `text-delta` + `finish` → **la boucle OpenCode ne voit aucun `tool-call`
-et termine le tour. Aucun outil OpenCode n'est jamais déclenché.**
+If we block the ACP agent's tools and pass it no tools, the agent answers in text
+→ we only emit `text-delta` + `finish` → **the OpenCode loop sees no
+`tool-call` and ends the turn. No OpenCode tool is ever triggered.**
 
-Bloquer les outils ACP ne suffit donc pas : il faut que l'agent **propose** des appels d'outils
-OpenCode, sans les exécuter lui-même.
+Blocking the ACP tools is therefore not enough: the agent must **propose**
+OpenCode tool calls, without executing them itself.
 
-### 7.2 Les trois pistes évaluées
+### 7.2 The three tracks evaluated
 
-| Piste | Verdict | Raison |
+| Track | Verdict | Reason |
 | --- | --- | --- |
-| **A. Pont à sortie structurée** | ✅ **retenu** | universel, aucune coopération de l'agent requise |
-| B. Exposer les outils OpenCode comme serveur MCP à l'agent (`session/new.mcpServers`) | ❌ bloqué | l'API plugin n'expose que `tool.list` / `tool.transform` / `tool.reload` — **aucun moyen d'invoquer un outil** |
-| C. Faire exécuter fs/terminal par le client ACP (`fs/*`, `terminal/*`) | ❌ mort en amont | l'RFD **ACP v2 supprime cette surface** : « it has not been widely adopted ». Et les agents ne l'utilisent pas. |
+| **A. Bridge with structured output** | ✅ **retained** | universal, no agent cooperation required |
+| B. Expose OpenCode's tools as an MCP server to the agent (`session/new.mcpServers`) | ❌ blocked | the plugin API only exposes `tool.list` / `tool.transform` / `tool.reload` - **no way to invoke a tool** |
+| C. Have the ACP client run fs/terminal (`fs/*`, `terminal/*`) | ❌ dead upstream | the ACP v2 RFC **removes that surface**: "it has not been widely adopted". And agents do not use it. |
 
-> Note : B est pourtant la direction annoncée d'ACP v2 (« expose a special MCP server to the
-> agent »). Elle resterait la plus élégante le jour où l'API plugin exposera l'invocation d'outils.
+> Note: B is nevertheless ACP v2's announced direction ("expose a special MCP
+> server to the agent"). It would remain the most elegant the day the plugin API
+> exposes tool invocation.
 
-### 7.3 Mécanisme retenu — pont à sortie structurée
+### 7.3 Retained mechanism - bridge with structured output
 
-`body.from(request)` construit le prompt ACP à partir de la requête OpenCode :
+`body.from(request)` builds the ACP prompt from the OpenCode request:
 
-1. **Système** : `request.system` (donc AGENTS.md, instructions, skills injectées) + un contrat
-   de sortie strict.
-2. **Catalogue d'outils** : les `request.tools` avec leurs **vrais noms et JSON schemas**.
-3. **Transcript** : les `request.messages` rendus en texte, y compris les résultats d'outils.
-4. **Contrat de sortie** : « Réponds **uniquement** par un objet JSON, sans texte autour :
-   `{ "type":"text", "text":"…" }` ou `{ "type":"tool", "name":"<un des outils ci-dessus>",
-   "arguments":{…} }` ».
+1. **System**: `request.system` (hence AGENTS.md, instructions, injected skills)
+   + a strict output contract.
+2. **Tool catalogue**: the `request.tools` with their **real names and JSON
+   schemas**.
+3. **Transcript**: the `request.messages` rendered as text, including tool
+   results.
+4. **Output contract**: "Answer **only** with a JSON object, no text around it:
+   `{ "type":"text", "text":"…" }` or `{ "type":"tool", "name":"<one of the tools
+   above>", "arguments":{…} }`".
 
-Côté `protocol.ts`, on parse cette sortie :
+On the `protocol.ts` side, we parse that output:
 
 - `{type:"text"}` → `text-start` / `text-delta` / `text-end`
-- `{type:"tool"}` → `tool-input-start` / `tool-input-delta` / `tool-input-end` puis
-  `tool-call{ id, name, input }` — **sans `providerExecuted`**, donc la boucle OpenCode
-  l'exécute réellement (permissions, snapshots, undo, journalisation).
-- Au tour suivant, le message `role:"tool"` de `request.messages` contient le résultat → on le
-  replie dans le prompt ACP.
+- `{type:"tool"}` → `tool-input-start` / `tool-input-delta` / `tool-input-end`
+  then `tool-call{ id, name, input }` - **without `providerExecuted`**, so the
+  OpenCode loop really executes it (permissions, snapshots, undo, logging).
+- On the next turn, the `role:"tool"` message of `request.messages` holds the
+  result → we fold it back into the ACP prompt.
 
-**Avantage clé :** les noms d'outils sont imposés par notre JSON, donc il n'y a **aucun problème
-de mapping** entre les noms d'outils ACP (explicitement « opaques ») et ceux d'OpenCode.
+**Key advantage:** the tool names are imposed by our JSON, so there is **no
+mapping problem** between the ACP tool names (explicitly "opaque") and
+OpenCode's.
 
-> ✅ **Validé empiriquement.** Sur `copilot --acp`, l'agent a obéi au contrat :
-> pour l'instruction « réponds uniquement par un objet JSON `{"type":"text",…}` », il a
-> produit exactement `{"type":"text","text":"pong"}`, streamé caractère par caractère,
-> puis `stopReason: end_turn`. Le taux de conformité reste à mesurer sur d'autres agents
-> et sur des prompts plus complexes (Q13.3), mais le principe est démontré.
+> ✅ **Validated empirically.** On `copilot --acp`, the agent obeyed the
+> contract: for the instruction "answer only with a JSON object
+> `{"type":"text",…}`", it produced exactly `{"type":"text","text":"pong"}`,
+> streamed character by character, then `stopReason: end_turn`. The conformance
+> rate still has to be measured on other agents and on more complex prompts
+> (Q13.3), but the principle is demonstrated.
 
-**Coût :** du prompt-shaping (l'agent gaspille des tokens à formater du JSON), et il faut gérer
-une sortie malformée (réparation/répétition bornée).
+**Cost:** some prompt-shaping (the agent wastes tokens formatting JSON), and
+malformed output has to be handled (bounded repair/retry).
 
-### 7.4 Empêcher l'agent d'agir tout de même
+### 7.4 Preventing the agent from acting anyway
 
-En parallèle du mécanisme 7.3, on neutralise sa surface d'outils natifs :
+In parallel with mechanism 7.3, we neutralise its native tool surface:
 
-1. **Réponse systématique à `session/request_permission`** → `optionId` de type `reject_*`.
-   Demandé à chaque outil ⇒ blocage effectif même si l'agent ignore les instructions.
-2. **Réduction de la surface au `spawn`** quand l'agent le supporte :
-   - copilot : `--available-tools` (« Only these tools will be available »)
+1. **Systematic answer to `session/request_permission`** → `optionId` of type
+   `reject_*`. Requested for every tool ⇒ effective blocking even if the agent
+   ignores the instructions.
+2. **Surface reduction at spawn** when the agent supports it:
+   - copilot: `--available-tools` ("Only these tools will be available")
    - configurable via `settings.tools: "none" | "all"`.
-3. **Instruction** : « n'appelle aucun outil natif » — filet de sécurité, pas garantie.
+3. **Instruction**: "do not call any native tool" - safety net, not a guarantee.
 
-### 7.5 Ce qu'on forwarde
+### 7.5 What we forward
 
-| Élément OpenCode | Transmission à l'agent ACP |
+| OpenCode element | Transmission to the ACP agent |
 | --- | --- |
-| `request.system` (AGENTS.md, instructions) | ✅ inline en tête de prompt — ACP n'a pas de champ « system » |
-| `request.tools` (+ JSON schemas) | ✅ cœur du mécanisme 7.3 |
-| `request.messages` (transcript, résultats d'outils) | ✅ rendu texte |
-| **Skills** | ⚠️ pas d'invocation possible ; seul le texte déjà injecté dans `system` profite |
-| **Serveurs MCP OpenCode** | ✅ `session/new.mcpServers` — lus via `ctx.mcp.list()`, passés via le registre in-process (§9) |
+| `request.system` (AGENTS.md, instructions) | ✅ inline at the head of the prompt - ACP has no "system" field |
+| `request.tools` (+ JSON schemas) | ✅ the core of mechanism 7.3 |
+| `request.messages` (transcript, tool results) | ✅ text rendering |
+| **Skills** | ⚠️ no invocation possible; only the text already injected into `system` benefits |
+| **OpenCode MCP servers** | ✅ `session/new.mcpServers` - read via `ctx.mcp.list()`, passed via the in-process registry (§9) |
 
 ---
 
-## 8. Erreurs, retries, cancellation — limites identifiées
+## 8. Errors, retries, cancellation - identified limits
 
-Trois frictions réelles, à documenter et contourner :
+Three real frictions, to be documented and worked around:
 
-**(a) `TransportError.transport` est un union fermé `["http", "websocket"]`** (`schema/errors.d.ts`).
-Pas de valeur `stdio` ⇒ impossible de signaler proprement une panne de pipe. Contournement :
-échouer avec `ProviderInternalError` / `UnknownProviderError`, qui reste dans le même union
-`AIError` mais sans `status`.
+**(a) `TransportError.transport` is a closed union `["http", "websocket"]`**
+(`schema/errors.d.ts`). No `stdio` value ⇒ impossible to report a pipe failure
+cleanly. Workaround: fail with `ProviderInternalError` / `UnknownProviderError`,
+which stays in the same `AIError` union but without `status`.
 
-**(b) Le hook `session.hook("retry")` raisonne en HTTP** : `event.error.status === 429`,
-`error.type === "provider.invalid-request"`. Conséquence : **pas de retry sur 429/rate-limit ACP**.
-À compenser côté plugin : on mape les erreurs ACP connues (rate limit, quota) vers
-`RateLimitError` / `QuotaExceededError` quand l'agent les signale dans `_meta` ou son texte.
+**(b) The `session.hook("retry")` hook reasons in HTTP**: `event.error.status ===
+429`, `error.type === "provider.invalid-request"`. Consequence: **no retry on
+429/rate-limit for ACP**. To be compensated on the plugin side: we map the known
+ACP errors (rate limit, quota) to `RateLimitError` / `QuotaExceededError` when
+the agent flags them in `_meta` or in its text.
 
-**(c) `http.request` / `http.response` / `experimental.ws.*` ne se déclencheront jamais.**
-Observableabilité à assurer autrement (log vers stderr, ou `ctx.event`).
+**(c) `http.request` / `http.response` / `experimental.ws.*` will never fire.**
+Observability has to be ensured another way (log to stderr, or `ctx.event`).
 
-**Annulation :** le `Scope` de `execute` se ferme quand le stream est interrompu → on y branche
-`session/cancel` (notification ACP) puis le kill du process. `TransportExecution.complete`
-n'est pas utilisé par HTTP mais est disponible : bon point pour libérer la session.
+**Cancellation:** `execute`'s `Scope` closes when the stream is interrupted → we
+hook `session/cancel` (ACP notification) there, then the process kill.
+`TransportExecution.complete` is not used by HTTP but is available: a good point
+to release the session.
 
 ---
 
 ## 9. Permissions
 
-`session/request_permission` est un appel **serveur → client** pendant le stream, dans `execute`.
-Le package provider n'a **pas** accès à `ctx.permission` (`Settings` = JSON plat).
+`session/request_permission` is a **server → client** call during the stream, in
+`execute`. The provider package has **no** access to `ctx.permission` (`Settings`
+= flat JSON).
 
-Trois options, de la plus simple à la plus integrates :
+Three options, from the simplest to the most integrated:
 
-1. **Auto-policy** (défaut) : `reject` pour `tools: "none"`, `allow-once` pour `tools: "all"`.
-2. **Registre in-process** : le plugin exporte un bus (`permissions.request()`) ; le package
-   provider l'importe via le **même chemin `file://` absolu** → identité de module garantie
-   dans Bun. Permet d'afficher une vraie permission OpenCode.
-3. ~~**Délégation fs/terminal**~~ — **abandonnée** : la RFD ACP v2 supprime cette surface
-   client, et les agents ne l'utilisaient pas (§7.2).
+1. **Auto-policy** (default): `reject` for `tools: "none"`, `allow-once` for
+   `tools: "all"`.
+2. **In-process registry**: the plugin exports a bus (`permissions.request()`);
+   the provider package imports it via the **same absolute `file://` path** →
+   module identity guaranteed in Bun. Makes it possible to display a real
+   OpenCode permission.
+3. ~~**fs/terminal delegation**~~ - **abandoned**: the ACP v2 RFC removes that
+   client surface, and agents were not using it (§7.2).
 
-Les permissions OpenCode sur les **outils OpenCode** sont nativement couvertes par le mécanisme
-7.3 : ce sont de vrais `tool-call` de la boucle OpenCode, qui passent par le système de
-permissions d'OpenCode sans code supplémentaire.
+OpenCode's permissions on **OpenCode tools** are natively covered by mechanism
+7.3: those are real `tool-call`s of the OpenCode loop, which go through
+OpenCode's permission system without extra code.
 
 ---
 
-## 9bis. cwd — le point non résolu
+## 9bis. cwd - the unresolved point
 
-`Transport.execute` ne reçoit **aucun contexte de session**, et `LLMRequest` n'a pas de champ
-`cwd` (champs disponibles : `id?`, `model`, `system`, `messages`, `tools`, `toolChoice`,
-`generation`, `providerOptions`, `http`, `cache`, `promptCacheKey`, `metadata`).
+`Transport.execute` receives **no session context**, and `LLMRequest` has no
+`cwd` field (available fields: `id?`, `model`, `system`, `messages`, `tools`,
+`toolChoice`, `generation`, `providerOptions`, `http`, `cache`, `promptCacheKey`,
+`metadata`).
 
-Options :
+Options:
 
-1. **`settings.cwd` statique**, renseigné par le plugin depuis `ctx.location.directory`.
-   ⚠️ Le registre de providers est **global** alors que `ctx.location` est **par projet** : un
-   serveur unique servant plusieurs projets partagerait le même cwd. À trancher (provider
-   suffixé par projet, ou refus explicite en multi-projets).
-2. **`request.metadata`** : champ « application-defined ». **À vérifier empiriquement en P0** —
-   brancher un log de `JSON.stringify(request)` dans `body.from` pour voir ce que le core y
-   place. Si le répertoire de session y figure, c'est la solution propre.
-3. **`process.cwd()`** du serveur : correspond au répertoire de lancement d'OpenCode, pas
-   nécessairement au répertoire de la session.
+1. **Static `settings.cwd`**, filled in by the plugin from
+   `ctx.location.directory`. ⚠️ The provider registry is **global** while
+   `ctx.location` is **per project**: a single server serving several projects
+   would share the same cwd. To be decided (provider suffixed per project, or
+   explicit refusal in multi-project setups).
+2. **`request.metadata`**: an "application-defined" field. **To be verified
+   empirically in P0** - hook a `JSON.stringify(request)` log in `body.from` to
+   see what the core puts there. If the session directory is in it, that is the
+   clean solution.
+3. **The server's `process.cwd()`**: matches OpenCode's launch directory, not
+   necessarily the session's directory.
 
-Tant que (2) n'est pas vérifié, on implémente (1) et on journalise.
+As long as (2) is not verified, we implement (1) and we log.
 
 ---
 
 ## 9ter. Distribution
 
-Le projet se publie comme **un seul package npm** exposant deux points d'entrée :
+The project is published as **a single npm package** exposing two entry points:
 
-- le **plugin** (`plugins: ["opencode-acp-provider"]` dans `opencode.jsonc`)
-- le **provider** (`package` du `Provider.Info`), chemin absolu `file://` calculé depuis
-  `import.meta.url` → fonctionne aussi installé dans `node_modules`, pas seulement en local.
+- the **plugin** (`plugins: ["opencode-acp-provider"]` in `opencode.jsonc`)
+- the **provider** (`Provider.Info`'s `package`), absolute `file://` path computed
+  from `import.meta.url` → works installed in `node_modules` too, not only
+  locally.
 
-Prérequis : un build vers `dist/`, et le pinning de `@opencode/ai` + `effect` (cf. §1).
-Le smoke test (P5) sert de garde-fou : il échoue bruyamment si le contrat des internals change
-après une mise à jour d'OpenCode, plutôt que de laisser le provider casser silencieusement.
+Prerequisite: a build into `dist/`, and the pinning of `@opencode/ai` + `effect`
+(cf. §1). The smoke test (P5) serves as a guard rail: it fails loudly if the
+internals' contract changes after an OpenCode update, rather than letting the
+provider break silently.
 
 ---
 
-## 10. Sessions & continuité
+## 10. Sessions & continuity
 
-`LLMRequest` ne contient **pas** de `sessionID` OpenCode — champs disponibles :
-`id?`, `model`, `system`, `messages`, `tools`, `toolChoice`, `generation`, `providerOptions`,
-`http`, `cache`, `promptCacheKey`, `metadata`.
+`LLMRequest` contains **no** OpenCode `sessionID` - available fields: `id?`,
+`model`, `system`, `messages`, `tools`, `toolChoice`, `generation`,
+`providerOptions`, `http`, `cache`, `promptCacheKey`, `metadata`.
 
-Conséquence : impossible de mapper 1:1 une session OpenCode ↔ une session ACP par identifiant.
-Deux stratégies :
+Consequence: impossible to map 1:1 an OpenCode session ↔ an ACP session by
+identifier. Two strategies:
 
-- **`session: "fresh"`** (défaut, correct) : 1 `session/new` par requête, on rejoue l'historique
-  OpenCode complet via `body.from`. Simple, sans état, mais lent (l'agent relit le dépôt).
-- **`session: "reuse"`** : clé de cache = empreinte du **préfixe** de conversation + `cwd`
-  (`sha256(cwd + ids des N premiers messages)`). Si la clé matche une session ACP vivante,
-  on réutilise et on n'envoie que le delta. Heuristique : correct pour une conversation linéaire,
-  à invalider sur `/compact`, fork ou changement de modèle.
+- **`session: "fresh"`** (default, correct): 1 `session/new` per request, the
+  full OpenCode history is replayed via `body.from`. Simple, stateless, but slow
+  (the agent re-reads the repository).
+- **`session: "reuse"`**: cache key = fingerprint of the conversation **prefix**
+  + `cwd` (`sha256(cwd + ids of the first N messages)`). If the key matches a
+  live ACP session, we reuse it and send only the delta. Heuristic: correct for
+  a linear conversation, to be invalidated on `/compact`, fork or model change.
 
 ---
 
 ## 11. Phases
 
-| Phase | Livrable | Critère de fin |
+| Phase | Deliverable | End criterion |
 | --- | --- | --- |
-| **P0** | Scaffolding : `package.json`, `tsconfig.json`, versions pinnées, `acp/client.ts` + `acp/types.ts` | `initialize` + `session/new` marchent contre `copilot --acp` |
-| **P0b** | **Spike cwd** : log de `JSON.stringify(request)` dans `body.from` | savoir si `request.metadata` porte le cwd de session (§9bis) |
-| **P1** | `transport.ts` : spawn, JSON-RPC, `session/prompt`, stream de frames | les notifications ACP arrivent brutes dans `frames` |
-| **P2** | `protocol.ts` : mapping `LLMEvent` (§4) + `errors.ts` | un `text-delta` s'affiche dans le TUI, `finish` propre, pas d'*ended unexpectedly* |
-| **P2b** | **Mécanisme 7.3** : prompt (système + catalogue d'outils + transcript) et parsing de la sortie JSON | un `tool-call` émis **sans** `providerExecuted` déclenche un vrai outil OpenCode |
-| **P3** | `plugin.ts` : enregistrement provider, découverte `configOptions` (§5), cleanup | `acp-copilot/<modèle>` visible dans `/model`, un chat fonctionne de bout en bout |
-| **P4** | Policy permissions (§7.4), `session/cancel`, Errors §8 | aucune écriture par l'agent ; `Esc` interrompt proprement |
-| **P5** | Tests : `smoke.test.ts` (contrat vs `@opencode/ai` pinné) + `fake-acp.ts` | le smoke échoue bruyamment si les internals changent |
-| **P5b** | `probe/` : sondes ACP réutilisables (initialize, inventaire, set_config_option) | un agent ACP inconnu se qualifie en une commande |
-| **P6** | Variants `thought_level`/`model_config` ; forward des serveurs MCP via `session/new` | `/model` effort switch ; MCP OpenCode visible depuis l'agent |
-| **P7** | `adapters/openai-http` : serveur `/v1/chat/completions` (SSE) au-dessus du même cœur | `curl` un chat complet ; le plugin bascule sur `openai-compatible` si les internaux bougent |
+| **P0** | Scaffolding: `package.json`, `tsconfig.json`, pinned versions, `acp/client.ts` + `acp/types.ts` | `initialize` + `session/new` work against `copilot --acp` |
+| **P0b** | **cwd spike**: `JSON.stringify(request)` log in `body.from` | find out whether `request.metadata` carries the session cwd (§9bis) |
+| **P1** | `transport.ts`: spawn, JSON-RPC, `session/prompt`, frame stream | ACP notifications arrive raw in `frames` |
+| **P2** | `protocol.ts`: `LLMEvent` mapping (§4) + `errors.ts` | a `text-delta` displays in the TUI, a clean `finish`, no *ended unexpectedly* |
+| **P2b** | **7.3 mechanism**: prompt (system + tool catalogue + transcript) and JSON output parsing | a `tool-call` emitted **without** `providerExecuted` triggers a real OpenCode tool |
+| **P3** | `plugin.ts`: provider registration, `configOptions` discovery (§5), cleanup | `acp-copilot/<model>` visible in `/model`, one chat works end to end |
+| **P4** | Permission policy (§7.4), `session/cancel`, §8 errors | no write by the agent; `Esc` interrupts cleanly |
+| **P5** | Tests: `smoke.test.ts` (contract vs pinned `@opencode/ai`) + `fake-acp.ts` | the smoke fails loudly if the internals change |
+| **P5b** | `probe/`: reusable ACP probes (initialize, inventory, set_config_option) | an unknown ACP agent qualifies in one command |
+| **P6** | `thought_level`/`model_config` variants; forwarding MCP servers via `session/new` | `/model` effort switch; OpenCode MCP visible from the agent |
+| **P7** | `adapters/openai-http`: `/v1/chat/completions` server (SSE) on top of the same core | `curl` a full chat; the plugin switches to `openai-compatible` if the internals move |
 
-P3 est le jalon de valeur. Si le mapping P2 se révèle trop strict, repli : revenir à l'Option A
-en réutilisant `acp/` tel quel (le client ACP est identique).
+P3 is the value milestone. If the P2 mapping proves too strict, the fallback is to
+go back to Option A reusing `acp/` as is (the ACP client is identical).
 
 ---
 
-## 12. Risques
+## 12. Risks
 
-| Risque | Impact | Mitigation |
+| Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Internals `@opencode/ai` non documentés | Cassure sur mise à jour mineure | pin exact + smoke test bruyant ; client ACP isolé |
-| `effect@4.0.0-rc.112` (release candidate) | Instabilité des `Schema.Codec` | pin ; éviter les APIs `Schema` avancées, rester sur `Struct`/`String` |
-| Séquence `LLMEvent` strictement validée | Crash silencieux | tests dédiés par type de notification ACP |
-| Agent ACP qui ignore le refus d'outils | Écritures non souhaitées | `--available-tools` + policy + supervision ; `tools: "all"` pour la délégation |
-| Sortie JSON malformée par l'agent | Boucle bloquée ou `tool-call` invalide | extraction tolérante (bloc ```json```, premier objet balanced), 1 tentative de réparation bornée, sinon `provider-error` explicite |
-| L'agent dépense trop de tokens à formater du JSON | Qualité / coût | prompt compact, examples, ettemplage par agent si besoin |
-| `providerExecuted` non géré par la boucle core | Double exécution | spike P2b : on émet **sans** `providerExecuted`, donc non concerné — sauf si on active un jour la délégation |
-| `cwd` non disponible dans la requête | L'agent travaille dans le mauvais répertoire | spike P0b ; repli `settings.cwd` (§9bis) |
-| Registre de providers global vs `ctx.location` par projet | cwd partagé entre projets | à trancher avant P3 |
-| `codex` n'a pas de sous-commande `acp` en 0.154.0 | Nécessite l'adaptateur | `npx @agentclientprotocol/codex-acp` ; `copilot --acp` est natif |
-| `usage` à mapper correctement | Coût/token absents de l'UI | **résolu** : `usage` ACP mesuré, cf. §4.1 |
-| Ports/processus qui fuient | Fuite de sous-processus | `Scope` + finalizer ; P4 |
+| Undocumented `@opencode/ai` internals | Breakage on a minor update | exact pin + loud smoke test; isolated ACP client |
+| `effect@4.0.0-rc.112` (release candidate) | `Schema.Codec` instability | pin; avoid advanced `Schema` APIs, stay on `Struct`/`String` |
+| Strictly validated `LLMEvent` sequence | Silent crash | dedicated tests per ACP notification type |
+| ACP agent that ignores the tool refusal | Unwanted writes | `--available-tools` + policy + supervision; `tools: "all"` for delegation |
+| Malformed JSON output from the agent | Blocked loop or invalid `tool-call` | tolerant extraction (```json``` block, first balanced object), 1 bounded repair attempt, otherwise an explicit `provider-error` |
+| The agent spends too many tokens formatting JSON | Quality / cost | compact prompt, examples, per-agent templating if needed |
+| `providerExecuted` not handled by the core loop | Double execution | P2b spike: we emit **without** `providerExecuted`, hence not concerned - unless delegation is ever enabled |
+| `cwd` not available in the request | The agent works in the wrong directory | P0b spike; `settings.cwd` fallback (§9bis) |
+| Global provider registry vs per-project `ctx.location` | cwd shared between projects | to be decided before P3 |
+| `codex` has no `acp` subcommand in 0.154.0 | Requires the adapter | `npx @agentclientprotocol/codex-acp`; `copilot --acp` is native |
+| `usage` mapped correctly | Cost/token missing from the UI | **resolved**: ACP `usage` measured, cf. §4.1 |
+| Leaking ports/processes | Subprocess leak | `Scope` + finalizer; P4 |
 
 ---
 
-## 13. Questions ouvertes
+## 13. Open questions
 
-1. **`copilot --acp` est-il stable ?** La doc indique *public preview* (janv. 2026). Le format
-   `configOptions` peut encore bouger. À figer avec un adaptateur si possible.
-2. **Le refus des permissions suffit-il à empêcher l'agent d'écrire ?** Certains agents
-   traitent un refus comme fatal et abandonnent le tour. P0 doit tester ce comportement sur
-   copilot **et** codex avant d'investir dans P2.
-3. **L'agent accepte-t-il de produire du JSON de manière fiable ?** C'est **la** question la plus
-   risquée du mécanisme 7.3, qui est désormais le cœur du design. P0b doit le mesurer sur copilot
-   et codex : taux de sorties exploitables, Need de réparation, coût en tokens.
-4. **`request.metadata` porte-t-il le cwd de session ?** Détermine si on peut se passer d'un
-   `settings.cwd` statique (§9bis).
-5. **Un provider ou plusieurs ?** Un seul `acp` avec plusieurs modèles est plus simple pour
-   l'UX `/model`, mais credentials distinctes par agent (le token copilot n'est pas celui de
-   codex) plaident pour un provider par agent (`acp-copilot`, `acp-codex`).
-6. **Faut-il gérer le streaming de `rawInput` des tool calls ACP ?** Hors du chemin 7.3 (où la
-   sortie est un bloc JSON), donc non bloquant.
+1. **Is `copilot --acp` stable?** The doc says *public preview* (Jan. 2026). The
+   `configOptions` format may still move. To be frozen with an adapter if
+   possible.
+2. **Is refusing permissions enough to stop the agent from writing?** Some agents
+   treat a refusal as fatal and abandon the turn. P0 must test that behaviour on
+   copilot **and** codex before investing in P2.
+3. **Does the agent reliably produce JSON?** That is **the** riskiest question
+   of mechanism 7.3, which is now the heart of the design. P0b must measure it on
+   copilot and codex: rate of usable outputs, need for repair, cost in tokens.
+4. **Does `request.metadata` carry the session cwd?** It determines whether we can
+   do without a static `settings.cwd` (§9bis).
+5. **One provider or several?** A single `acp` with several models is simpler
+   for the `/model` UX, but distinct credentials per agent (the copilot token is
+   not codex's) argue for one provider per agent (`acp-copilot`, `acp-codex`).
+6. **Should we handle `rawInput` streaming for ACP tool calls?** Outside the 7.3
+   path (where the output is a JSON block), hence not blocking.
 
 ---
 
-## 14. Feuille de route après P3b
+## 14. Roadmap after P3b
 
-P3b est validé : dans un vrai `opencode serve`, le plugin se charge, le provider `acp` est
-enregistré, **19 modèles** paraissent dans `/model`, et un tour via `acp/claude-sonnet-5`
-renvoie la réponse attendue. La chaîne complète est donc prouvée de bout en bout.
+P3b is validated: in a real `opencode serve`, the plugin loads, the `acp` provider
+is registered, **19 models** appear in `/model`, and one turn through
+`acp/claude-sonnet-5` returns the expected answer. The full chain is therefore
+proven end to end.
 
-> ⚠️ **Piège de recette à retenir.** `opencode models` sort **avant** que les plugins aient
-> fini de charger : il affiche zéro modèle `acp/` sans que quoi que ce soit soit faux, et le
-> résultat est intermittent. Pour vérifier, il faut un serveur persistant
-> (`opencode serve --port N`) puis `/api/plugin` et `/api/model` en basic auth
-> `opencode:<mot de passe>`.
+> ⚠️ **Acceptance pitfall to remember.** `opencode models` exits **before** the
+> plugins have finished loading: it shows zero `acp/` model without anything
+> being wrong, and the result is flaky. To verify, you need a persistent server
+> (`opencode serve --port N`) then `/api/plugin` and `/api/model` with the basic
+> auth `opencode:<password>`.
 
-Les priorités ci-dessous viennent d'une analyse de `intellectronica/opencode-acpx` (MIT,
-compatible), un projet qui atteint le même objectif mais **sur OpenCode 1.x** et avec un
-choix de conception différent (voir §14.1).
+The priorities below come from an analysis of `intellectronica/opencode-acpx`
+(MIT, compatible), a project that reaches the same goal but **on OpenCode 1.x**
+and with a different design choice (see §14.1).
 
-| # | Action | Pourquoi | V/E |
+| # | Action | Why | V/E |
 | --- | --- | --- | --- |
-| **R1** | **Sessions ACP persistantes** | Le plus grand écart fonctionnel : aujourd'hui une session neuve par requête, donc **l'agent oublie tout entre deux tours** | très haute / L |
-| **R2** | **Plusieurs agents** (`acp-copilot`, `acp-codex`, …) | Lève la limite n°1 du README ; credentials distinctes par agent | haute / M |
-| **R3** | **Aligner `@opencode/ai` sur 2.0.16** | Supprime le risque de double instance `LanguageModel`/`Usage` entre notre provider (2.0.3) et l'hôte (2.0.16) | haute / XS |
-| **R4** | **Rendre les échecs de chargement visibles** | Un package qui ne se charge ne produit **aucune** erreur : journaliser **hors de `setup()`** | haute / S |
-| **R5** | **`verify:package` qui exécute le module** (leur `prepack`) | Import réel de `dist/plugin.js` + `dist/index.js`, vérification des exports, de l'URL `file://` et des candidats | haute / M |
-| **R6** | **Annulation : `session/cancel`** | Condition de « `Esc` interrompt proprement » (§8) | haute / XS |
-| **R7** | **Borner la découverte** (`discoveryTimeoutMs`) | `setup()` appelle `acp.inventory()` : un agent muet bloquerait le chargement d'OpenCode | moyenne / S |
-| **R8** | **Agents internes servis localement** | `title`/`summary`/`compaction` ne doivent pas déclencher un agent ACP complet | moyenne / M |
-| **R9** | **Supprimer les cartes outils vides** | Notre parseur peut produire un `tool-call` sans information utile | moyenne / XS |
-| **R10** | **Catalogue de secours** | Éviter qu'un agent lent au démarrage fasse disparaître le provider | faible / S |
-| **R11** | **Adaptateur HTTP** (§P7) | `core/` est déjà prêt ; débogage et compatibilité large | moyenne / M |
+| **R1** | **Persistent ACP sessions** | The biggest functional gap: today a fresh session per request, hence **the agent forgets everything between two turns** | very high / L |
+| **R2** | **Several agents** (`acp-copilot`, `acp-codex`, ...) | Lifts the README's #1 limit; distinct credentials per agent | high / M |
+| **R3** | **Align `@opencode/ai` on 2.0.16** | Removes the risk of a double `LanguageModel`/`Usage` instance between our provider (2.0.3) and the host (2.0.16) | high / XS |
+| **R4** | **Make loading failures visible** | A package that does not load produces **no** error: log **outside of `setup()`** | high / S |
+| **R5** | **`verify:package` that runs the module** (their `prepack`) | Real import of `dist/plugin.js` + `dist/index.js`, verification of the exports, of the `file://` URL and of the candidates | high / M |
+| **R6** | **Cancellation: `session/cancel`** | Condition for "`Esc` interrupts cleanly" (§8) | high / XS |
+| **R7** | **Bound the discovery** (`discoveryTimeoutMs`) | `setup()` calls `acp.inventory()`: a silent agent would block OpenCode's loading | medium / S |
+| **R8** | **Internal agents served locally** | `title`/`summary`/`compaction` must not trigger a full ACP agent | medium / M |
+| **R9** | **Drop empty tool cards** | Our parser can produce a `tool-call` with no useful information | medium / XS |
+| **R10** | **Fallback catalogue** | Prevent a slow-starting agent from making the provider disappear | low / S |
+| **R11** | **HTTP adapter** (§P7) | `core/` is already ready; debugging and broad compatibility | medium / M |
 
-### 14.1 Ce que `opencode-acpx` fait différemment — et pourquoi on ne le copie pas
+### 14.1 What `opencode-acpx` does differently - and why we do not copy it
 
-Leur mécanisme central est **`providerExecuted: true`** : ils laissent l'agent ACP agir,
-et marquent ses appels comme déjà exécutés pour qu'OpenCode ne les rejoue pas. Conséquence :
-**OpenCode n'a ni snapshot, ni undo, ni permissions sur ces actions**.
+Their central mechanism is **`providerExecuted: true`**: they let the ACP agent
+act, and mark its calls as already executed so that OpenCode does not replay
+them. Consequence: **OpenCode has neither snapshot, nor undo, nor permissions on
+those actions**.
 
-Nous faisons l'inverse (§7.3) : l'agent **propose**, OpenCode **exécute**. C'est un produit
-différent — un modèle dans un éditeur, pas un agent autonome dans un éditeur — et c'est un
-choix assumé, à garder.
+We do the opposite (§7.3): the agent **proposes**, OpenCode **executes**. That
+is a different product - a model in an editor, not an autonomous agent in an
+editor - and it is a deliberate choice, to be kept.
 
-En revanche, deux de leurs techniques méritent d'être étudiées quand R1 sera fait :
+On the other hand, two of their techniques deserve a study once R1 is done:
 
-- **la segmentation de tour** : `session/prompt` ACP *bloque* en attendant une permission, alors
-  que la boucle OpenCode attend un `tool-call`. Ils ferment le segment, laissent OpenCode
-  rendre l'interaction, puis **reprennent le tour ACP à son curseur d'événements** ;
-- **les tours persistants avec file FIFO par session** : c'est exactement R1.
+- **turn segmentation**: ACP's `session/prompt` *blocks* waiting for a
+  permission, whereas the OpenCode loop waits for a `tool-call`. They close the
+  segment, let OpenCode render the interaction, then **resume the ACP turn at its
+  event cursor**;
+- **persistent turns with a per-session FIFO queue**: that is exactly R1.
 
-Leur `session/identity.ts` et `session/keyed-queue.ts` sont **MIT** et adaptables.
+Their `session/identity.ts` and `session/keyed-queue.ts` are **MIT** and
+adaptable.
 
-### 14.2 Un point à vérifier en priorité
+### 14.2 One point to verify in priority
 
-Le tour de recette rapporte `tokens=2/24`. C'est peut-être le seul comptage non mis en cache
-de l'agent (le `cacheWrite` est mesuré séparément), mais **si notre reconstruction de
-`LLMRequest` perd le system prompt ou les outils, c'est un vrai bug** qui n'apparaîtrait pas
-sur une réponse courte. À vérifier avant R1.
+The acceptance turn reports `tokens=2/24`. That may be the agent's only
+non-cached count (the `cacheWrite` is measured separately), but **if our
+`LLMRequest` reconstruction loses the system prompt or the tools, it is a real
+bug** that would not show up on a short answer. To be checked before R1.

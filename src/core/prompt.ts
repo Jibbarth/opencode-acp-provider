@@ -34,30 +34,29 @@ import type { NormalizedMessage, NormalizedRequest, NormalizedTool } from "./typ
  * to call its native tools instead of answering the contract.
  */
 const ROLE = [
-  "## Rôle",
+  "## Role",
   "",
-  "Tu es le moteur de raisonnement d'un éditeur de code. Tu n'as **aucun outil** : tu ne peux",
-  "ni lire un fichier, ni exécuter une commande, ni écrire quoi que ce soit. Ton unique",
-  "puissance est de produire la réponse attendue par l'éditeur, et tu ne la produis qu'en",
-  "respectant le format décrit à la toute fin de ce message.",
+  "You are the reasoning engine of a code editor. You have **no tool**: you can neither",
+  "read a file, nor run a command, nor write anything. Your only power is to produce the",
+  "answer the editor expects, and you produce it only by respecting the format described",
+  "at the very end of this message.",
   "",
-  "Les outils listés plus bas ne sont pas les tiens : c'est l'éditeur qui les exécutera, et",
-  "uniquement si tu le demandes dans ta réponse. Tu ne dois donc jamais tenter de les",
-  "exécuter toi-même.",
+  "The tools listed below are not yours: the editor is what runs them, and only if you",
+  "ask for it in your answer. You must therefore never try to run them yourself.",
 ].join("\n")
 
-const SYSTEM_HEADER = "## Instructions système"
+const SYSTEM_HEADER = "## System instructions"
 
-const TOOLS_HEADER = "## Outils disponibles"
+const TOOLS_HEADER = "## Available tools"
 
 const TOOLS_RULE = [
-  "Ces outils appartiennent à l'éditeur, pas à toi. Le nom que tu renvois doit reproduire",
-  "**exactement** l'un de ceux listés ci-dessous, caractère pour caractère : c'est cet",
-  "exact nom que l'éditeur utilisera pour exécuter l'appel.",
+  "These tools belong to the editor, not to you. The name you return must reproduce",
+  "**exactly** one of those listed below, character for character: that exact name is",
+  "what the editor will use to run the call.",
 ].join("\n")
 
 /** Honest message when the request carries no tool: never imply there are some. */
-const NO_TOOLS = "(aucun outil n'est disponible pour cette requête)"
+const NO_TOOLS = "(no tool is available for this request)"
 
 const TRANSCRIPT_HEADER = "## Conversation"
 
@@ -73,18 +72,18 @@ const TRANSCRIPT_HEADER = "## Conversation"
  * output contract itself does not change: the agent always answers with one
  * JSON object.
  */
-const RESUME_HEADER = "## Conversation — suite"
+const RESUME_HEADER = "## Conversation - continued"
 
 /** Clarification rendered under the resume header. */
 const RESUME_NOTE = [
-  "(les messages qui précèdent sont déjà échangés : ils sont dans ta mémoire de session,",
-  "ne les répète pas et ne les reformule pas — réponds à la suite ci-dessous.)",
+  "(the messages that precede are already exchanged: they are in your session memory,",
+  "do not repeat them and do not rephrase them - carry on from here.)",
 ].join("\n")
 
 /** Honest message when the transcript is empty. */
-const EMPTY_TRANSCRIPT = "(aucun message précédent)"
+const EMPTY_TRANSCRIPT = "(no previous message)"
 
-const TOOL_SCHEMA_HEADER = "Schéma des arguments (JSON Schema) :"
+const TOOL_SCHEMA_HEADER = "Argument schema (JSON Schema):"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool rendering
@@ -111,16 +110,16 @@ const renderTool = (tool: NormalizedTool): string => {
  */
 const renderSchema = (schema: unknown): string => {
   if (schema === undefined || schema === null) {
-    return "(aucun schéma : passe un objet d'arguments, par exemple {})"
+    return "(no schema: pass an arguments object, for example {})"
   }
   try {
     const json = JSON.stringify(schema)
     if (json === undefined) {
-      return "(schéma non sérialisable : passe un objet d'arguments, par exemple {})"
+      return "(schema not serialisable: pass an arguments object, for example {})"
     }
     return json
   } catch {
-    return "(schéma non sérialisable en JSON : passe un objet d'arguments, par exemple {})"
+    return "(schema not serialisable as JSON: pass an arguments object, for example {})"
   }
 }
 
@@ -130,14 +129,14 @@ const renderSchema = (schema: unknown): string => {
 
 /** Sample value for a property, deduced from its type and its `enum`. */
 const sampleValue = (property: unknown): unknown => {
-  if (!isJsonObject(property)) return "exemple"
+  if (!isJsonObject(property)) return "example"
   // An `enum` is the best available source of examples: the first value is
   // *guaranteed* accepted by the schema, which an invented `string` is not.
   const allowed = property["enum"]
   if (Array.isArray(allowed) && allowed.length > 0) return allowed[0]
   switch (property["type"]) {
     case "string":
-      return "exemple"
+      return "example"
     case "number":
     case "integer":
       return 0
@@ -148,7 +147,7 @@ const sampleValue = (property: unknown): unknown => {
     case "object":
       return {}
     default:
-      return "exemple"
+      return "example"
   }
 }
 
@@ -193,21 +192,20 @@ const sampleArguments = (schema: unknown): Record<string, unknown> => {
  */
 const renderContract = (tools: readonly NormalizedTool[]): string => {
   const lines = [
-    "## Format de sortie — impératif",
+    "## Output format - mandatory",
     "",
-    "Réponds par **un seul objet JSON**, et par rien d'autre : aucun texte avant, aucun",
-    "texte après, aucun commentaire, aucune explication. Pas de bloc de code, pas de",
-    "formules de politesse.",
+    "Answer with **a single JSON object**, and nothing else: no text before, no text",
+    "after, no comment, no explanation. No code block, no pleasantries.",
     "",
-    "Deux formes sont acceptées, et aucune autre :",
+    "Two shapes are accepted, and no other:",
     "",
-    '1. une réponse en texte : {"type":"text","text":"<ta réponse>"}',
-    '2. une demande d\'appel d\'outil : {"type":"tool","name":"<nom exact d\'un outil listé ' +
-      'plus haut>","arguments":{…}}',
+    '1. a text answer: {"type":"text","text":"<your answer>"}',
+    '2. a tool call request: {"type":"tool","name":"<exact name of a tool listed ' +
+      'above>","arguments":{…}}',
     "",
-    "Exemples :",
+    "Examples:",
     "",
-    '{"type":"text","text":"Le fichier contient 42 lignes."}',
+    '{"type":"text","text":"The file contains 42 lines."}',
   ]
   const tool = tools[0]
   if (tool !== undefined) {
@@ -219,13 +217,13 @@ const renderContract = (tools: readonly NormalizedTool[]): string => {
   }
   lines.push(
     "",
-    "Règles impératives :",
+    "Mandatory rules:",
     "",
-    "- Un seul objet par réponse. Jamais deux, jamais un objet par ligne.",
-    '- La clé "name" doit reproduire exactement un nom de la section « Outils disponibles ».',
-    '- La clé "arguments" doit contenir un objet JSON conforme au schéma de l\'outil.',
-    "- Si tu n'as rien à demander à l'éditeur, réponds avec la forme « text ».",
-    "- N'appelle aucun outil natif : tu n'en as aucun, et toute tentative serait rejetée.",
+    "- One single object per answer. Never two, never one object per line.",
+    '- The "name" key must reproduce exactly a name from the "Available tools" section.',
+    '- The "arguments" key must hold a JSON object conforming to the tool\'s schema.',
+    "- If you have nothing to ask the editor for, answer with the \"text\" shape.",
+    "- Do not call any native tool: you have none, and any attempt would be rejected.",
   )
   return lines.join("\n")
 }
@@ -241,7 +239,7 @@ const renderContract = (tools: readonly NormalizedTool[]): string => {
  * transcript is rendered **flat**. Without it the agent cannot tell its own
  * earlier output from a user instruction - yet it must respect a JSON output
  * contract, and confusing the two is the worst invariant to break. The role is
- * therefore explicit, in French, like the rest of the prompt.
+ * therefore explicit, like the rest of the prompt.
  *
  * Note: a tool result's `id` is deliberately **not** rendered. It exists for
  * the OpenCode round-trip; showing it to the model would invite it to invent or
@@ -252,11 +250,11 @@ const renderContract = (tools: readonly NormalizedTool[]): string => {
 const rolePrefix = (message: NormalizedMessage): string => {
   switch (message.role) {
     case "user":
-      return "Utilisateur"
+      return "User"
     case "assistant":
       return "Assistant"
     case "tool":
-      return `Outil ${message.name}`
+      return `Tool ${message.name}`
   }
 }
 

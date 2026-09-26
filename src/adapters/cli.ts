@@ -36,27 +36,27 @@ interface CliOptions {
 }
 
 /** Usage printed on stderr. */
-const usage = (): string => `acp-run — lance un agent ACP et montre ce qu'il produit
+const usage = (): string => `acp-run - runs an ACP agent and shows what it produces
 
-  --command <cmd>     commande de l'agent (obligatoire, ex. "copilot")
-  --arg <value>       argument de la commande, répétable (ex. --acp)
-  --cwd <dir>         répertoire de travail (défaut: cwd courant)
-  --model <id>        valeur d'option appliquée avant le prompt (catégorie "model")
-  --effort <value>    valeur d'option appliquée avant le prompt (catégorie "thought_level")
-  --prompt <text>     texte envoyé à l'agent ; la réponse est affichée en JSONL
-  --list-models       affiche l'inventaire (modèles, efforts, modes, permissions)
-  --allow-tools       autorise les outils natifs de l'agent au lieu de tout refuser
-  -h, --help          cette aide
+  --command <cmd>     the agent command (mandatory, e.g. "copilot")
+  --arg <value>       a command argument, repeatable (e.g. --acp)
+  --cwd <dir>         working directory (default: current cwd)
+  --model <id>        option value applied before the prompt (category "model")
+  --effort <value>    option value applied before the prompt (category "thought_level")
+  --prompt <text>     text sent to the agent; the answer is printed as JSONL
+  --list-models       prints the inventory (models, efforts, modes, permissions)
+  --allow-tools       allows the agent's native tools instead of denying everything
+  -h, --help          this help
 
-Exemples :
+Examples:
   acp-run --command copilot --arg --acp --list-models
   acp-run --command copilot --arg --acp --model claude-sonnet-5 --list-models
   acp-run --command copilot --arg --acp --prompt '{"type":"text","text":"pong"}'
 
-Codes de sortie :
-  0  succès   1  le flux a émis un événement "error"
-  2  arguments invalides   3  l'agent n'a pas pu démarrer
-  4  l'agent a refusé une option (--model / --effort)
+Exit codes:
+  0  success   1  the stream emitted an "error" event
+  2  invalid arguments   3  the agent could not start
+  4  the agent refused an option (--model / --effort)
 `
 
 /** Minimal argument parser: no external dependency. */
@@ -76,7 +76,7 @@ const parseArgs = (argv: readonly string[]): CliOptions | { help: true } => {
     const value = (): string => {
       if (inlineValue !== undefined) return inlineValue
       const next = argv[i + 1]
-      if (next === undefined) throw new Error(`option ${flag} attend une valeur`)
+      if (next === undefined) throw new Error(`option ${flag} expects a value`)
       i++
       return next
     }
@@ -110,11 +110,11 @@ const parseArgs = (argv: readonly string[]): CliOptions | { help: true } => {
         options.allowTools = true
         break
       default:
-        throw new Error(`option inconnue : ${arg ?? ""}`)
+        throw new Error(`unknown option: ${arg ?? ""}`)
     }
   }
 
-  if (options.command === "") throw new Error("--command est obligatoire")
+  if (options.command === "") throw new Error("--command is mandatory")
   return options
 }
 
@@ -137,16 +137,16 @@ const printInventory = (report: InventoryReport): void => {
     process.stderr.write(`${label.padEnd(16)}${value}\n`)
   }
   const { inventory } = report
-  const version = `protocole v${report.protocolVersion}`
+  const version = `protocol v${report.protocolVersion}`
   line("agent", `${report.agentName} ${report.agentVersion} (${version})`)
-  line("modèles", inventory.models.map((m) => m.id).join(", ") || "(aucun)")
-  line("modèle actif", inventory.currentModel ?? "(aucun)")
-  line("efforts", inventory.thoughtLevels.join(", ") || "(aucun)")
-  line("modes", inventory.modes.map((m) => m.id).join(", ") || "(aucun)")
+  line("models", inventory.models.map((m) => m.id).join(", ") || "(none)")
+  line("active model", inventory.currentModel ?? "(none)")
+  line("efforts", inventory.thoughtLevels.join(", ") || "(none)")
+  line("modes", inventory.modes.map((m) => m.id).join(", ") || "(none)")
   const perms = inventory.permissions
   line(
     "permissions",
-    perms ? `${perms.id}=${perms.currentValue} [${perms.values.join(", ")}]` : "(aucune)",
+    perms ? `${perms.id}=${perms.currentValue} [${perms.values.join(", ")}]` : "(none)",
   )
 }
 
@@ -165,7 +165,7 @@ export const main = async (argv: readonly string[]): Promise<number> => {
   }
 
   if (!options.listModels && options.prompt === undefined) {
-    process.stderr.write("rien à faire : passe --list-models et/ou --prompt\n")
+    process.stderr.write("nothing to do: pass --list-models and/or --prompt\n")
     return 2
   }
 
@@ -217,8 +217,8 @@ export const main = async (argv: readonly string[]): Promise<number> => {
           .models.map((m) => m.id)
           .join(", ")
         process.stderr.write(
-          `option refusée par l'agent : ${detail}\n` +
-            (known === "" ? "" : `modèles connus : ${known}\n`),
+          `option refused by the agent: ${detail}\n` +
+            (known === "" ? "" : `known models: ${known}\n`),
         )
         return 4
       }

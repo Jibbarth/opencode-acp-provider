@@ -42,16 +42,16 @@ console.log(`# route    : id=${route.id} protocol=${route.protocol} transport=${
 // answers "pong" and the analysis fails, which would test the agent's
 // consistency rather than our code.
 const DEFAULT_TEXT =
-  'Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"pong"}'
+  'Answer ONLY with this JSON object, no text around it: {"type":"text","text":"pong"}'
 
 const request = new LLMRequest({
   model: languageModel,
-  system: [SystemPart.make("Tu es un assistant de test.")],
+  system: [SystemPart.make("You are a test assistant.")],
   messages: [Message.user(process.env.ACP_PROBE_TEXT ?? DEFAULT_TEXT)],
   tools: [
     ToolEntry.make({
       name: "read",
-      description: "Lit un fichier du projet",
+      description: "Reads a project file",
       inputSchema: {
         type: "object",
         properties: { filePath: { type: "string" } },
@@ -64,7 +64,7 @@ const request = new LLMRequest({
 
 // The ACP transport does no HTTP: an executor that dies if called is supplied,
 // so any regression is immediately visible.
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 const outcome = await Effect.runPromise(
   Effect.scoped(
@@ -77,7 +77,7 @@ const outcome = await Effect.runPromise(
 )
 
 if (Result.isFailure(outcome)) {
-  console.log(`\nECHEC : ${outcome.failure.message}`)
+  console.log(`\nFAILURE: ${outcome.failure.message}`)
   await closeCachedAgents()
   process.exit(1)
 }
@@ -94,12 +94,12 @@ for (const e of events) {
     case "tool-call":
       console.log(`\n[tool-call] ${e.name} ${JSON.stringify(e.input)} providerExecuted=${e.providerExecuted}`)
       if (e.providerExecuted !== undefined) {
-        console.log("  !! providerExecuted devrait etre absent en mode cerveau brut")
+        console.log("  !! providerExecuted should be absent in raw-brain mode")
         ok = false
       }
       break
     case "tool-result":
-      console.log(`\n[tool-result] ${e.name}  <-- ne devrait pas apparaitre en mode cerveau brut`)
+      console.log(`\n[tool-result] ${e.name}  <-- should not appear in raw-brain mode`)
       ok = false
       break
     case "step-finish":
@@ -113,7 +113,7 @@ for (const e of events) {
           `  usage: ${u.constructor.name} input=${u.inputTokens} output=${u.outputTokens} cacheWrite=${u.cacheWriteInputTokens}`,
         )
         if (!(u instanceof Usage)) {
-          console.log("  !! usage n'est pas une instance de Usage")
+          console.log("  !! usage is not a Usage instance")
           ok = false
         }
       }
@@ -135,7 +135,7 @@ const types = events.map((e) => e.type)
 const hasFinish = types.includes("finish")
 const hasStepFinish = types.includes("step-finish")
 if (!hasStepFinish) {
-  console.log("  !! aucun step-finish")
+  console.log("  !! no step-finish")
   ok = false
 }
 console.log(`\n# sequence : ${types.join(" -> ")}`)

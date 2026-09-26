@@ -105,7 +105,7 @@ const readPid = async (pidFile: string, timeoutMs = 5_000): Promise<number> => {
     const raw = await readFile(pidFile, "utf8").catch(() => "")
     const pid = Number(raw.trim())
     if (Number.isInteger(pid) && pid > 0) return pid
-    if (Date.now() >= deadline) throw new Error(`le faux agent n'a jamais écrit ${pidFile}`)
+    if (Date.now() >= deadline) throw new Error(`the fake agent never wrote ${pidFile}`)
     await Bun.sleep(20)
   }
 }
@@ -159,7 +159,7 @@ const captureError = async (promise: Promise<unknown>): Promise<Error> => {
     (reason: unknown) => reason,
   )
   if (!(error instanceof Error)) {
-    throw new Error(`un rejet était attendu, reçu : ${String(error)}`)
+    throw new Error(`a rejection was expected, received: ${String(error)}`)
   }
   return error
 }
@@ -171,7 +171,7 @@ const captureAgentError = async (promise: Promise<unknown>): Promise<AcpAgentErr
     (reason: unknown) => reason,
   )
   if (!(error instanceof AcpAgentError)) {
-    throw new Error(`une AcpAgentError était attendue, reçue : ${String(error)}`)
+    throw new Error(`an AcpAgentError was expected, received: ${String(error)}`)
   }
   return error
 }
@@ -204,7 +204,7 @@ const rawTextOf = (events: readonly AcpEvent[]): string =>
 const textOf = (events: readonly AcpEvent[]): string => {
   const parsed = parseAgentOutput(rawTextOf(events), [])
   if (!parsed.ok) throw new Error(parsed.error.message)
-  if (parsed.output.type !== "text") throw new Error("une demande d'outil n'a pas de texte visible")
+  if (parsed.output.type !== "text") throw new Error("a tool request has no visible text")
   return parsed.output.text
 }
 
@@ -245,9 +245,9 @@ describe("session closing", () => {
 
       // `dispose()` cut the update routing: no method talks to the agent any
       // more, and no promise is left dangling.
-      expect(() => session.prompt(request("PING"))).toThrow(/session fermée/)
-      await expect(session.setOption("model", "auto")).rejects.toThrow(/session fermée/)
-      await expect(session.setModel("auto")).rejects.toThrow(/session fermée/)
+      expect(() => session.prompt(request("PING"))).toThrow(/session closed/)
+      await expect(session.setOption("model", "auto")).rejects.toThrow(/session closed/)
+      await expect(session.setModel("auto")).rejects.toThrow(/session closed/)
 
       // The shared connection, on the other hand, is intact: a fresh session
       // works.
@@ -265,7 +265,7 @@ describe("inventory (configOptions)", () => {
     expect(models.map((m) => m.id)).toEqual(["auto", "gpt-5.6-terra", "claude-sonnet-5"])
     // The readable label accompanies the id, and the description when the agent
     // provides one.
-    expect(models[0]).toEqual({ id: "auto", name: "Auto", description: "Laisse l'agent choisir" })
+    expect(models[0]).toEqual({ id: "auto", name: "Auto", description: "Lets the agent choose" })
     expect(models[1]?.name).toBe("GPT-5.6 Terra")
     expect(models[2]?.name).toBe("Claude Sonnet 5")
   })
@@ -325,7 +325,7 @@ describe("inventory (configOptions)", () => {
     const session = await agent.open()
     try {
       await expect(session.setOption("pas-une-option", "x")).rejects.toThrow(
-        /option de configuration inconnue/,
+        /unknown config option/,
       )
     } finally {
       await session.close()
@@ -366,7 +366,7 @@ describe("inventory (configOptions)", () => {
 })
 
 describe("prompt -> AcpEvent", () => {
-  test('un prompt "PING" produit un texte conforme au contrat, puis usage et done', async () => {
+  test('a "PING" prompt produces contract-conforming text, then usage and done', async () => {
     const session = await agent.open()
     try {
       const events = await collect(session.prompt(request("PING")))
@@ -407,7 +407,7 @@ describe("prompt -> AcpEvent", () => {
         type: "plan",
         entries: [
           { content: "Analyser", priority: "high", status: "completed" },
-          { content: "Implémenter", priority: "medium", status: "in_progress" },
+          { content: "Implement", priority: "medium", status: "in_progress" },
         ],
       })
       expect(events.at(-1)).toEqual({ type: "done", stopReason: "end_turn" })
@@ -419,13 +419,13 @@ describe("prompt -> AcpEvent", () => {
   test("the requested text reaches the agent, prefixed with its role", async () => {
     const session = await agent.open()
     try {
-      const events = await collect(session.prompt(request("bonjour le monde")))
+      const events = await collect(session.prompt(request("hello world")))
       // Note: the role prefix is not cosmetic. ACP has no "system" field, the
       // transcript is rendered flat, and the agent must be able to tell an
       // instruction from its own earlier output.
       const answered = textOf(events)
       expect(answered.startsWith("ACK: ")).toBe(true)
-      expect(answered).toContain("Utilisateur : bonjour le monde")
+      expect(answered).toContain("User : hello world")
     } finally {
       await session.close()
     }
@@ -441,17 +441,17 @@ describe("prompt -> AcpEvent", () => {
         system: [],
         tools: [],
         messages: [
-          { role: "user", text: "relis" },
-          { role: "tool", id: "call-a", name: "read_file", output: "contenu A" },
-          { role: "tool", id: "call-b", name: "read_file", output: "contenu B" },
+          { role: "user", text: "re-read" },
+          { role: "tool", id: "call-a", name: "read_file", output: "content A" },
+          { role: "tool", id: "call-b", name: "read_file", output: "content B" },
         ],
       }
       const events = await collect(session.prompt(transcript))
       const echoed = textOf(events)
-      expect(echoed).toContain("Utilisateur : relis")
-      expect(echoed).toContain("Outil read_file : contenu A")
-      expect(echoed).toContain("Outil read_file : contenu B")
-      expect(echoed.indexOf("contenu A")).toBeLessThan(echoed.indexOf("contenu B"))
+      expect(echoed).toContain("User : re-read")
+      expect(echoed).toContain("Tool read_file : content A")
+      expect(echoed).toContain("Tool read_file : content B")
+      expect(echoed.indexOf("content A")).toBeLessThan(echoed.indexOf("content B"))
     } finally {
       await session.close()
     }
@@ -584,7 +584,7 @@ describe("tool_call", () => {
 
 describe("stopReason", () => {
   for (const reason of ["max_tokens", "refusal", "cancelled"] as const) {
-    test(`un stopReason « ${reason} » est relayé dans l'AcpEvent done`, async () => {
+    test(`a stopReason "${reason}" is relayed into the AcpEvent done`, async () => {
       const local = await spawnFake({ FAKE_STOP_REASON: reason })
       try {
         const session = await local.open()
@@ -724,7 +724,7 @@ describe("permissions", () => {
       if (decision?.type !== "permission") return
       expect(decision.request.sessionId).toBe(session.sessionId)
       expect(decision.request.toolCallId).toBe("call-perm-1")
-      expect(decision.request.title).toBe("Écrire dans config.json")
+      expect(decision.request.title).toBe("Write to config.json")
       expect(decision.request.options.map((o) => o.id)).toEqual(["allow-once", "reject-once"])
       expect(decision.decision).toEqual({ action: "select", optionId: "reject-once" })
       expect(decision.selectedOptionId).toBe("reject-once")
@@ -814,7 +814,7 @@ describe("declared capabilities", () => {
       const declared: unknown = JSON.parse(raw)
       expect(typeof declared).toBe("object")
       if (typeof declared !== "object" || declared === null || !("fs" in declared)) {
-        throw new Error(`clientCapabilities sans « fs » : ${raw}`)
+        throw new Error(`clientCapabilities without "fs": ${raw}`)
       }
       // The SDK adds its own defaults (`terminal`, `auth`): only what concerns
       // us is judged, that is, the promise made about the disk.
@@ -831,7 +831,7 @@ describe("errors", () => {
       createAcpAgent({ command: MISSING, stderr: "ignore" }),
     )
     if (!(error instanceof AcpAgentError)) {
-      throw new Error(`attendu une AcpAgentError, reçu ${error.name}: ${error.message}`)
+      throw new Error(`expected an AcpAgentError, received ${error.name}: ${error.message}`)
     }
     expect(error.name).toBe("AcpAgentError")
     // The message must be *useful*: the command's name AND the real cause,
@@ -839,7 +839,7 @@ describe("errors", () => {
     // $PATH" (Bun). Before, we got "ACP connection closed" and no command name
     // appeared anywhere.
     expect(error.message).toContain(MISSING)
-    expect(error.message).toMatch(/impossible de lancer l'agent/i)
+    expect(error.message).toMatch(/cannot start the agent/i)
     expect(error.message).toMatch(/ENOENT|not found/i)
     // The field is called `subject` and not `command`: depending on the origin it
     // holds the command **or** a `sessionId`, and `log(e.command)` printed a
@@ -867,7 +867,7 @@ describe("errors", () => {
     )
     expect(error.name).toBe("AcpAgentError")
     expect(error.message).toContain("fake-acp.ts")
-    expect(error.message).toMatch(/initialize a expiré/)
+    expect(error.message).toMatch(/initialize timed out/)
   })
 
   test("noise on stdout does not prevent speaking ACP", async () => {
@@ -895,7 +895,7 @@ describe("errors", () => {
     // stack, and without the list of accepted values.
     const proc = Bun.spawn(
       [process.execPath, "run", CLI, "--command", process.execPath, "--arg", "run",
-       "--arg", FAKE, "--model", "pas-un-modele", "--list-models"],
+       "--arg", FAKE, "--model", "not-a-model", "--list-models"],
       {
         stdout: "pipe",
         stderr: "pipe",
@@ -904,9 +904,9 @@ describe("errors", () => {
     )
     const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
     expect(code).toBe(4)
-    expect(stderr).toContain("option refusée par l'agent")
+    expect(stderr).toContain("option refused by the agent")
     expect(stderr).toContain("Invalid model")
-    expect(stderr).toContain("modèles connus")
+    expect(stderr).toContain("known models")
     // No `invalid model` must leak as an unhandled rejection.
     expect(stderr).not.toContain("promise rejection")
   })
@@ -943,7 +943,7 @@ describe("errors", () => {
       const session = await local.open()
       expect(textOf(await collect(session.prompt(request("PING"))))).toBe("PONG")
       await session.close()
-      expect(chunks.join("")).toContain("fake-acp: avertissement de démarrage")
+      expect(chunks.join("")).toContain("fake-acp: startup warning")
     } finally {
       await local.close()
     }
@@ -958,7 +958,7 @@ describe("errors", () => {
     )
     expect(error.name).toBe("AcpAgentError")
     expect(error.message).toContain("fake-acp.ts")
-    expect(error.message).toContain("fake-acp: avertissement de démarrage")
+    expect(error.message).toContain("fake-acp: startup warning")
   })
 
   test("an agent dying mid-turn emits error THEN done", async () => {
@@ -1094,7 +1094,7 @@ describe("turn concurrency", () => {
 
       const error = await captureAgentError(collect(session.prompt(request("PING"))))
       expect(error.name).toBe("AcpAgentError")
-      expect(error.message).toMatch(/tour est déjà en cours/)
+      expect(error.message).toMatch(/turn is already running/)
       // The error names the session, not a "command".
       expect(error.subject).toBe(session.sessionId)
 
@@ -1151,9 +1151,9 @@ describe("malformed configOptions", () => {
         // And above all: the following callers throw a **real** application
         // error, not a `TypeError` on `undefined`.
         await expect(session.setOption("model", "auto")).rejects.toThrow(
-          /option de configuration inconnue/,
+          /unknown config option/,
         )
-        await expect(session.setModel("auto")).rejects.toThrow(/options disponibles/)
+        await expect(session.setModel("auto")).rejects.toThrow(/available options/)
       } finally {
         await session.close()
       }
@@ -1193,7 +1193,7 @@ describe("malformed configOptions", () => {
         const error = await captureError(session.setModel("auto"))
         // "no option of category model" without the available ids does not tell
         // the user what to try instead.
-        expect(error.message).toContain("options disponibles")
+        expect(error.message).toContain("available options")
       } finally {
         await session.close()
       }
@@ -1345,16 +1345,16 @@ describe("parseInventory (pure)", () => {
 describe("renderRequest (pure)", () => {
   test("every message is prefixed with its role", () => {
     const messages: readonly NormalizedMessage[] = [
-      { role: "user", text: "bonjour" },
-      { role: "assistant", text: "salut" },
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "hi" },
       { role: "tool", id: "call-1", name: "read_file", output: "# README" },
     ]
     // The full rendering (role + system + catalogue + transcript + output
     // contract) is checked line by line in `test/parse.test.ts`. Only the
     // **transcript** is checked here, which is this file's share.
-    const rendered = renderRequest({ system: ["SYSTÈME"], tools: [], messages })
+    const rendered = renderRequest({ system: ["SYSTEM"], tools: [], messages })
     expect(rendered).toContain(
-      "Utilisateur : bonjour\n\nAssistant : salut\n\nOutil read_file : # README",
+      "User : hello\n\nAssistant : hi\n\nTool read_file : # README",
     )
   })
 
@@ -1365,16 +1365,16 @@ describe("renderRequest (pure)", () => {
     // `tool-result` left to close.
     const messages: readonly NormalizedMessage[] = [
       { role: "user", text: "lis deux fichiers" },
-      { role: "tool", id: "call-a", name: "read_file", output: "contenu A" },
-      { role: "tool", id: "call-b", name: "read_file", output: "contenu B" },
+      { role: "tool", id: "call-a", name: "read_file", output: "content A" },
+      { role: "tool", id: "call-b", name: "read_file", output: "content B" },
     ]
     const request: NormalizedRequest = { system: [], tools: [], messages }
     const rendered = renderRequest(request)
 
-    expect(rendered).toContain("Outil read_file : contenu A")
-    expect(rendered).toContain("Outil read_file : contenu B")
+    expect(rendered).toContain("Tool read_file : content A")
+    expect(rendered).toContain("Tool read_file : content B")
     // Order preserved, and above all **two** distinct blocks.
-    expect(rendered.split("Outil read_file : ")).toHaveLength(3)
+    expect(rendered.split("Tool read_file : ")).toHaveLength(3)
     // The rendering is stable: no identifier re-synthesised from one call to the
     // next.
     expect(renderRequest(request)).toBe(rendered)

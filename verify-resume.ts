@@ -58,7 +58,7 @@ const SECRET = "verglas-7741"
  * Filler in turn 1, so that "the history was replayed" is a **size** and not an
  * assumption. `fresh` must carry it again on turn 2; `reuse` must not.
  */
-const FILLER = `extrait d'un ticket : ${"l'anomalie reproduite est intermittente. ".repeat(200)}`
+const FILLER = `ticket excerpt: ${"the reproduced anomaly is intermittent. ".repeat(200)}`
 
 /**
  * The output contract, demanded in the user turn.
@@ -72,10 +72,10 @@ const FILLER = `extrait d'un ticket : ${"l'anomalie reproduite est intermittente
  * the question measurably lowers compliance, and a turn the parser refuses is a
  * turn that produces no data at all.
  */
-const JSON_ONLY = `Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"..."}`
+const JSON_ONLY = `Answer ONLY with this JSON object, no text around it: {"type":"text","text":"..."}`
 
-const TOUR_1 = `${JSON_ONLY} Retiens le nom de mon fichier de configuration : il s'appelle ${SECRET}. ${FILLER}`
-const TOUR_2 = `${JSON_ONLY} Comment s'appelle le fichier de configuration que je viens de te donner ? Réponds par le nom seul.`
+const TOUR_1 = `${JSON_ONLY} Remember the name of my configuration file: it is called ${SECRET}. ${FILLER}`
+const TOUR_2 = `${JSON_ONLY} What is the name of the configuration file I just gave you? Answer with the name only.`
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Reporting
@@ -101,10 +101,10 @@ interface TurnReport {
 
 const report = (label: string, turn: TurnReport): void => {
   line(`  ${label} : ${turn.ms} ms`)
-  line(`  ${label} réponse : ${turn.text.trim() || "(vide)"}`)
-  if (turn.complaint !== undefined) line(`  ${label} refus : ${turn.complaint}`)
+  line(`  ${label} answer: ${turn.text.trim() || "(empty)"}`)
+  if (turn.complaint !== undefined) line(`  ${label} refusal: ${turn.complaint}`)
   if (turn.usage === undefined) {
-    line(`  ${label} usage : absent`)
+    line(`  ${label} usage: absent`)
     return
   }
   line(
@@ -136,11 +136,11 @@ type Step = { readonly role: "user" | "assistant"; readonly text: string }
 const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMRequest =>
   new LLMRequest({
     model: languageModel,
-    system: [SystemPart.make("Tu es un assistant de test. Sois bref.")],
+    system: [SystemPart.make("You are a test assistant. Be brief.")],
     tools: [
       ToolEntry.make({
         name: "read",
-        description: "Lit un fichier du projet",
+        description: "Reads a project file",
         inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
       }),
     ],
@@ -149,7 +149,7 @@ const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMReq
   })
 
 /** The ACP transport does no HTTP: an executor that dies if called says so. */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 /** Runs one turn through the provider and reads the answer back. */
 const runTurn = async (settings: AcpProviderSettings, steps: readonly Step[]): Promise<TurnReport> => {
@@ -167,7 +167,7 @@ const runTurn = async (settings: AcpProviderSettings, steps: readonly Step[]): P
     ).pipe(Effect.result),
   )
   const ms = Date.now() - started
-  if (Result.isFailure(outcome)) throw new Error(`le flux a échoué : ${outcome.failure.message}`)
+  if (Result.isFailure(outcome)) throw new Error(`the stream failed: ${outcome.failure.message}`)
   return { ...readEvents(outcome.success), ms }
 }
 
@@ -200,7 +200,7 @@ const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
 
 /** One `reuse` or `fresh` run: turn 1 plants the fact, turn 2 asks for it. */
 const scenario = async (mode: "reuse" | "fresh"): Promise<void> => {
-  title(`Phase A — mode « ${mode} » — OpenCode → Transport → agent`)
+  title(`Phase A - mode "${mode}" - OpenCode -> Transport -> agent`)
   const settings = settingsOf({ session: mode })
 
   const first = await runTurn(settings, [{ role: "user", text: TOUR_1 }])
@@ -213,7 +213,7 @@ const scenario = async (mode: "reuse" | "fresh"): Promise<void> => {
   ])
   report("tour 2", second)
 
-  line(`  >>> l'agent se souvient du tour 1 : ${recalls(second.text) ? "OUI" : "NON"}`)
+  line(`  >>> the agent remembers turn 1: ${recalls(second.text) ? "YES" : "NO"}`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,13 +222,13 @@ const scenario = async (mode: "reuse" | "fresh"): Promise<void> => {
 
 /** The core's own view of a turn: the pool decides, the probe prints. */
 const wireScenario = async (agent: AcpAgent, mode: "reuse" | "fresh"): Promise<void> => {
-  title(`Phase B — mode « ${mode} » — le prompt reçu sur le fil`)
+  title(`Phase B - mode "${mode}" - the prompt received on the wire`)
   const pool = new SessionPool<AcpSession>()
-  const system = ["Tu es un assistant de test. Sois bref."]
+  const system = ["You are a test assistant. Be brief."]
   const tools = [
     {
       name: "read",
-      description: "Lit un fichier du projet",
+      description: "Reads a project file",
       schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
     },
   ]
@@ -238,7 +238,7 @@ const wireScenario = async (agent: AcpAgent, mode: "reuse" | "fresh"): Promise<v
   let previous: readonly NormalizedMessage[] = [{ role: "user", text: TOUR_1 }]
   for (const [index, history] of [
     previous,
-    [...previous, { role: "assistant" as const, text: "(réponse du tour 1)" }, { role: "user" as const, text: TOUR_2 }],
+    [...previous, { role: "assistant" as const, text: "(answer to turn 1)" }, { role: "user" as const, text: TOUR_2 }],
   ].entries()) {
     // `fresh` never consults the pool: it opens a session and sends everything.
     const lease =
@@ -256,10 +256,10 @@ const wireScenario = async (agent: AcpAgent, mode: "reuse" | "fresh"): Promise<v
     }
     const prompt = renderRequest(sent)
     line(`  tour ${index + 1} : ${lease.reused ? "session reprise" : "session neuve"}`)
-    line(`    messages envoyés : ${lease.delta.length} (historique : ${history.length})`)
-    line(`    prompt : ${prompt.length} caractères`)
-    line(`    le prompt contient-il le nom du fichier du tour 1 : ${prompt.includes(`il s'appelle ${SECRET}`) ? "OUI" : "NON"}`)
-    line(`    le prompt contient-il le remplissage du tour 1 : ${prompt.includes("anomalie reproduite") ? "OUI" : "NON"}`)
+    line(`    messages sent: ${lease.delta.length} (history: ${history.length})`)
+    line(`    prompt: ${prompt.length} characters`)
+    line(`    does the prompt hold the turn 1 file name: ${prompt.includes(`it is called ${SECRET}`) ? "YES" : "NO"}`)
+    line(`    does the prompt hold the turn 1 filler: ${prompt.includes("reproduced anomaly") ? "YES" : "NO"}`)
     previous = history
     if (mode === "reuse") {
       lease.release()
@@ -282,9 +282,9 @@ const wireScenario = async (agent: AcpAgent, mode: "reuse" | "fresh"): Promise<v
  * looking for the name, and a correct answer would read as an amnesia.
  */
 const FOLLOW_UPS: readonly string[] = [
-  "Rappelle-moi le nom du fichier, en majuscules.",
-  "Combien de lettres compte le nom de ce fichier ? Redonne-moi le nom ensuite.",
-  "Redonne-moi le nom du fichier, sans autre mot.",
+  "Remind me of the file name, in upper case.",
+  "How many letters does that file name have? Then give me the name again.",
+  "Give me the file name again, with no other word.",
 ]
 
 /**
@@ -297,19 +297,19 @@ const FOLLOW_UPS: readonly string[] = [
  * `reuse` the wrong default.
  */
 const growthScenario = async (mode: "reuse" | "fresh"): Promise<void> => {
-  title(`Phase C — mode « ${mode} » — coût par tour, sur ${FOLLOW_UPS.length + 1} tours`)
+  title(`Phase C - mode "${mode}" - cost per turn, over ${FOLLOW_UPS.length + 1} turns`)
   const settings = settingsOf({ session: mode })
   const history: Step[] = [{ role: "user", text: TOUR_1 }]
 
   const first = await runTurn(settings, history)
-  line(`  tour 1 : ${pad(first)}   se souvient : ${recalls(first.text) ? "OUI" : "non"}   ${flaw(first)}`)
+  line(`  turn 1: ${pad(first)}   remembers: ${recalls(first.text) ? "YES" : "no"}   ${flaw(first)}`)
   history.push({ role: "assistant", text: first.text })
 
   for (const [index, question] of FOLLOW_UPS.entries()) {
     history.push({ role: "user", text: `${question} ${JSON_ONLY}` })
     const turn = await runTurn(settings, history)
     line(
-      `  tour ${index + 2} : ${pad(turn)}   se souvient : ${recalls(turn.text) ? "OUI" : "non"}` +
+      `  turn ${index + 2}: ${pad(turn)}   remembers: ${recalls(turn.text) ? "YES" : "no"}` +
         `   ${flaw(turn)}« ${oneLine(turn.text)} »`,
     )
     history.push({ role: "assistant", text: turn.text })
@@ -323,7 +323,7 @@ const growthScenario = async (mode: "reuse" | "fresh"): Promise<void> => {
  * leave `text` empty - and the probe would quietly report "the agent forgot"
  * for a turn the agent actually answered in prose.
  */
-const flaw = (turn: TurnReport): string => (turn.complaint === undefined ? "" : "REFUS ")
+const flaw = (turn: TurnReport): string => (turn.complaint === undefined ? "" : "REFUSED ")
 
 /**
  * `1234 ms   input=18090   cacheWrite=18084   cacheRead=0`, `absent` where the
@@ -354,9 +354,9 @@ const oneLine = (text: string): string => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 line(`# agent    : ${command} ${args.join(" ")}`)
-line(`# modèle   : ${MODEL}`)
+line(`# model    : ${MODEL}`)
 line(`# secret   : ${SECRET}`)
-line(`# tour 1   : ${TOUR_1.length} caractères (dont ${FILLER.length} de remplissage)`)
+line(`# turn 1   : ${TOUR_1.length} characters (${FILLER.length} of them filler)`)
 
 let failure: string | undefined
 try {
@@ -372,7 +372,7 @@ try {
   await growthScenario("fresh")
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
-  line(`ECHEC (phase C) : ${message}`)
+  line(`FAILURE (phase C): ${message}`)
   failure = failure ?? message
 }
 
@@ -380,13 +380,13 @@ try {
 // the wire-level evidence down with it.
 try {
   const agent = await createAcpAgent({ command, args, cwd: CWD, stderr: "ignore" })
-  line(`# agent    : ${agent.info.name} v${agent.info.version} (protocole ${agent.protocolVersion})`)
+  line(`# agent    : ${agent.info.name} v${agent.info.version} (protocol ${agent.protocolVersion})`)
   await wireScenario(agent, "reuse")
   await wireScenario(agent, "fresh")
   await agent.close()
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
-  line(`ECHEC (phase B) : ${message}`)
+  line(`FAILURE (phase B): ${message}`)
   failure = failure ?? message
 }
 

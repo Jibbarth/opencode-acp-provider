@@ -1,42 +1,42 @@
-# Sondes ACP
+# ACP probes
 
-Utilitaires pour qualifier un agent ACP quelconque **sans** OpenCode ni le projet.
-Ils ont servi à valider le plan : inventaire, changement de modèle, flux de sortie.
+Utilities to qualify any ACP agent **without** OpenCode nor this project.
+They were used to validate the plan: inventory, model switch, output stream.
 
-## Prérequis
+## Prerequisites
 
 ```bash
 npm install @agentclientprotocol/sdk@1.5.0 zod
 ```
 
-## Lancement
+## Running
 
 ```bash
-node inspect.mjs        copilot --acp          # sonde brute, sans SDK
+node inspect.mjs        copilot --acp          # raw probe, no SDK
 node switch-option.mjs  copilot --acp          # initialize + set_config_option
-node sdk-inspect.mjs    copilot --acp          # sonde via le SDK officiel (+ un prompt)
+node sdk-inspect.mjs    copilot --acp          # probe via the official SDK (+ one prompt)
 ```
 
-Le premier argument est la commande, les suivants ses arguments. Fonctionne aussi sous Bun :
+The first argument is the command, the following ones its arguments. Works under Bun too:
 
 ```bash
 bun sdk-inspect.mjs copilot --acp
 ```
 
-## Agents connus pour speak ACP (stdio)
+## Agents known to speak ACP (stdio)
 
-| Agent | Commande | Remarque |
+| Agent | Command | Note |
 | --- | --- | --- |
-| GitHub Copilot CLI | `copilot --acp` | natif, preview publique |
-| Gemini CLI | `gemini --experimental-acp` | agent de référence ACP |
+| GitHub Copilot CLI | `copilot --acp` | native, public preview |
+| Gemini CLI | `gemini --experimental-acp` | ACP reference agent |
 | Qwen Code | `qwen --experimental-acp` | |
-| Codex CLI | `npx -y @agentclientprotocol/codex-acp` | **adaptateur requis**, pas de sous-commande `acp` |
-| Claude Code | `npx @zed-industries/claude-agent-acp` | via l'adaptateur de Zed |
-| Junie, Cursor, Cline, Goose… | voir la [liste ACP](https://agentclientprotocol.com/get-started/agents) | |
+| Codex CLI | `npx -y @agentclientprotocol/codex-acp` | **adapter required**, no `acp` subcommand |
+| Claude Code | `npx @zed-industries/claude-agent-acp` | via Zed's adapter |
+| Junie, Cursor, Cline, Goose… | see the [ACP list](https://agentclientprotocol.com/get-started/agents) | |
 
-## Sortie attendue
+## Expected output
 
-`inspect.mjs` / `sdk-inspect.mjs` affichent les `configOptions` par catégorie
-(`model`, `thought_level`, `mode`, `permissions`) et la liste des modèles.
-`switch-option.mjs` change de modèle et d'effort, et vérifie qu'une valeur invalide
-est bien rejetée en JSON-RPC `-32602`.
+`inspect.mjs` / `sdk-inspect.mjs` print the `configOptions` per category
+(`model`, `thought_level`, `mode`, `permissions`) and the list of models.
+`switch-option.mjs` switches the model and the effort, and checks that an invalid
+value is indeed rejected with the JSON-RPC `-32602` code.

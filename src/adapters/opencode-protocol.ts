@@ -782,7 +782,7 @@ const renderToolResult = (result: { readonly type: string; readonly value: unkno
       return blocks.length > 0 ? blocks.map((block) => block.text).join("\n") : renderJson(result.value)
     }
     case "error":
-      return `erreur : ${renderJson(result.value)}`
+      return `error: ${renderJson(result.value)}`
     default:
       return renderJson(result.value)
   }
@@ -790,7 +790,7 @@ const renderToolResult = (result: { readonly type: string; readonly value: unkno
 
 /** Renders a **transcript** tool call: what the agent proposed on the previous turn. */
 const renderToolCall = (name: string, input: unknown): string =>
-  `Appel d'outil ${name} : ${renderJson(input)}`
+  `Tool call ${name} : ${renderJson(input)}`
 
 /**
  * A catalogue tool with a flattened namespace - **namespace preserved**.

@@ -1,4 +1,4 @@
-// Sonde ACP 2 : changer de modèle + effort en cours de session.
+// ACP probe 2: change the model and the effort mid-session.
 import { spawn } from "node:child_process"
 
 const child = spawn(process.argv[2] ?? "copilot", process.argv.slice(3), { stdio: ["pipe", "pipe", "pipe"] })

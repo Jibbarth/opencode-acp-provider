@@ -114,7 +114,7 @@ type PermissionSink = (event: AcpEvent) => void
 const asAgentError = (error: unknown, label: string): AcpAgentError => {
   if (error instanceof AcpAgentError) return error
   const detail = error instanceof Error ? error.message : String(error)
-  return new AcpAgentError(`${label}: échec du protocole ACP : ${detail}`, label, {
+  return new AcpAgentError(`${label}: ACP protocol failure: ${detail}`, label, {
     cause: error,
   })
 }
@@ -311,7 +311,7 @@ const createSession = (
 
   const assertOpen = (): void => {
     if (closed) {
-      throw new AcpAgentError(`session ${session.sessionId}: session fermée`, session.sessionId)
+      throw new AcpAgentError(`session ${session.sessionId}: session closed`, session.sessionId)
     }
   }
 
@@ -320,7 +320,7 @@ const createSession = (
     const option = inventory().options.find((o) => o.id === configId)
     if (option === undefined) {
       throw new AcpAgentError(
-        `session ${session.sessionId}: option de configuration inconnue « ${configId} »`,
+        `session ${session.sessionId}: unknown config option "${configId}"`,
         session.sessionId,
       )
     }
@@ -359,7 +359,7 @@ const createSession = (
         // worst possible failure in the default deny-all mode.
         if (turnInFlight) {
           throw new AcpAgentError(
-            `session ${session.sessionId}: un tour est déjà en cours sur cette session`,
+            `session ${session.sessionId}: a turn is already running on this session`,
             session.sessionId,
           )
         }
@@ -473,10 +473,10 @@ const createSession = (
       if (modelOption === undefined) {
         // The existing `configId`s are listed: "no option of category model"
         // alone does not tell the user what to try instead.
-        const known = options.map((o) => o.id).join(", ") || "(aucune)"
+        const known = options.map((o) => o.id).join(", ") || "(none)"
         throw new AcpAgentError(
-          `session ${session.sessionId}: aucune option de catégorie « model »` +
-            ` ; options disponibles : ${known}`,
+          `session ${session.sessionId}: no option of category "model"` +
+            `; available options: ${known}`,
           session.sessionId,
         )
       }
@@ -574,13 +574,13 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
       reject(deathReason)
     }
     child.once("error", (error: Error) => {
-      die(fail(`impossible de lancer l'agent : ${error.message}`, error))
+      die(fail(`cannot start the agent: ${error.message}`, error))
     })
     child.once("exit", (code, signal) => {
-      die(fail(`l'agent s'est arrêté (code=${String(code)}, signal=${String(signal)})`))
+      die(fail(`the agent stopped (code=${String(code)}, signal=${String(signal)})`))
     })
     child.once("close", () => {
-      die(deathReason ?? fail("l'agent s'est arrêté sans code de sortie"))
+      die(deathReason ?? fail("the agent stopped without an exit code"))
     })
   })
   // `death` does not always reject: the agent can die later, at shutdown. Its
@@ -672,7 +672,7 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
 
   let closed = false
   const assertAlive = (): void => {
-    if (closed) throw new AcpAgentError(`${label}: agent fermé`, label)
+    if (closed) throw new AcpAgentError(`${label}: agent closed`, label)
   }
 
   const openSession = async (
@@ -729,7 +729,7 @@ const requireStream = <T>(stream: T | null, name: string): T => {
 const rejectOn = (signal: AbortSignal, subject: string): Promise<never> =>
   new Promise((_resolve, reject) => {
     const onAbort = (): void =>
-      reject(new AcpAgentError(`${subject}: initialize a expiré`, subject))
+      reject(new AcpAgentError(`${subject}: initialize timed out`, subject))
     if (signal.aborted) onAbort()
     else signal.addEventListener("abort", onAbort, { once: true })
   })

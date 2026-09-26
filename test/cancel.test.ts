@@ -46,7 +46,7 @@ const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 
 /** The ACP transport never does HTTP: the executor must die loudly. */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 afterAll(async () => {
   await closeCachedAgents()
@@ -83,7 +83,7 @@ const settingsOf = (env: Record<string, string>): AcpProviderSettings => {
 const requestFor = (languageModel: LanguageModel, text: string): LLMRequest =>
   new LLMRequest({
     model: languageModel,
-    system: [SystemPart.make("Tu es un assistant.")],
+    system: [SystemPart.make("You are an assistant.")],
     tools: [ToolEntry.make({ name: "read", description: "Lit", inputSchema: { type: "object" } })],
     messages: [Message.user(text)],
     generation: GenerationOptions.make({ maxTokens: 100 }),

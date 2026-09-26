@@ -118,11 +118,11 @@ const answer = (text: string): string => {
     case "raw":
       return text
     case "fenced":
-      return `Voici ma réponse :\n\`\`\`json\n${contract}\n\`\`\`\n`
+      return `Here is my answer:\n\`\`\`json\n${contract}\n\`\`\`\n`
     case "hallucinated":
       return JSON.stringify({ type: "tool", name: "outil_qui_nexiste_pas", arguments: {} })
     case "bad-type":
-      return JSON.stringify({ type: "réponse", text })
+      return JSON.stringify({ type: "response", text })
     default:
       return contract
   }
@@ -151,7 +151,7 @@ const PERMISSION_FLAVOR = ((): PermissionFlavor => {
 
 const ALLOW_OPTION: acp.PermissionOption = {
   optionId: "allow-once",
-  name: "Autoriser une fois",
+  name: "Allow once",
   kind: "allow_once",
 }
 const REJECT_OPTION: acp.PermissionOption = {
@@ -179,7 +179,7 @@ const PERMISSION_OPTIONS: readonly acp.PermissionOption[] = (() => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MODELS = [
-  { value: "auto", name: "Auto", description: "Laisse l'agent choisir" },
+  { value: "auto", name: "Auto", description: "Lets the agent choose" },
   { value: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
   { value: "claude-sonnet-5", name: "Claude Sonnet 5" },
 ]
@@ -296,7 +296,7 @@ const CONTEXT_USED = 12_345
  * only ever deposits one turn per file anyway - it is the robustness of the
  * deposit, not its slicing, that matters.
  */
-const PROMPT_SEPARATOR = "-----8<-- PROMPT REÇU --8<-----"
+const PROMPT_SEPARATOR = "-----8<-- PROMPT RECEIVED --8<-----"
 
 const chunk = (text: string): acp.SessionUpdate => ({
   sessionUpdate: "agent_message_chunk",
@@ -488,7 +488,7 @@ class FakeAgent {
         sessionId: params.sessionId,
         toolCall: {
           toolCallId: "call-perm-1",
-          title: "Écrire dans config.json",
+          title: "Write to config.json",
           kind: "edit",
           status: "pending",
         },
@@ -532,7 +532,7 @@ class FakeAgent {
         sessionUpdate: "plan",
         entries: [
           { content: "Analyser", priority: "high", status: "completed" },
-          { content: "Implémenter", priority: "medium", status: "in_progress" },
+          { content: "Implement", priority: "medium", status: "in_progress" },
         ],
       })
       await notify(chunk(answer("PLAN_OK")))
@@ -572,10 +572,10 @@ const promptText = (params: acp.PromptRequest): string =>
     .join("\n")
 
 /** What ends a user message: another role, or the next section. */
-const END_OF_USER_MESSAGE = /(?:\n## |\n(?:Utilisateur|Assistant|Outil [^\n]*) : )/
+const END_OF_USER_MESSAGE = /(?:\n## |\n(?:User|Assistant|Tool [^\n]*) : )/
 
 /** Start of line of the role prefix written by `renderRequest`. */
-const USER_LINE = /^Utilisateur : /gm
+const USER_LINE = /^User : /gm
 
 /**
  * The **last user message** of the prompt.
@@ -584,7 +584,7 @@ const USER_LINE = /^Utilisateur : /gm
  * the user actually asked for. Searching the whole prompt was tenable as long as
  * it held only the transcript; it now holds the **output contract**, its examples
  * and the name of every tool - any of those words would make the fake unable to
- * choose its branch. The segment is therefore isolated, from the "Utilisateur :"
+ * choose its branch. The segment is therefore isolated, from the "User :"
  * prefix up to the first line start that is another one, or to the start of the
  * next section.
  */
@@ -618,8 +618,8 @@ if (PID_FILE !== undefined) {
 // the agent died, and it was dead code as long as the CLI did not expose
 // `stderr: "pipe"`.
 if (flag("FAKE_NOISY_STDOUT")) {
-  process.stdout.write("Ceci n'est pas du JSON, désolé.\n")
-  process.stderr.write("fake-acp: avertissement de démarrage\n")
+  process.stdout.write("This is not JSON, sorry.\n")
+  process.stderr.write("fake-acp: startup warning\n")
 }
 
 if (flag("FAKE_EXIT_AT_INIT")) {

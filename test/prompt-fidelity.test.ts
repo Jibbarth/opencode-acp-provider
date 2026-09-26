@@ -67,7 +67,7 @@ import type { AcpProviderSettings } from "../src/settings.js"
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 
 /** Must stay in sync with `PROMPT_SEPARATOR` in `test/fake-acp.ts`. */
-const SEPARATOR = "-----8<-- PROMPT REÇU --8<-----"
+const SEPARATOR = "-----8<-- PROMPT RECEIVED --8<-----"
 
 afterAll(async () => {
   await closeCachedAgents()
@@ -78,7 +78,7 @@ afterAll(async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The ACP transport never does HTTP: the executor must therefore die loudly. */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 /** The fake agent's settings; fails loudly if the validation goes wrong. */
 function fakeSettings(env: Record<string, string> = {}): AcpProviderSettings {
@@ -109,7 +109,7 @@ const countOf = (haystack: string, needle: string): number => {
 const indexOfOrFail = (prompt: string, needle: string, what: string): number => {
   const at = prompt.indexOf(needle)
   if (at === -1) {
-    throw new Error(`${what} est absent du prompt : ${JSON.stringify(needle)}`)
+    throw new Error(`${what} is absent from the prompt: ${JSON.stringify(needle)}`)
   }
   return at
 }
@@ -129,7 +129,7 @@ const indexOfOrFail = (prompt: string, needle: string, what: string): number => 
 const TOOLS: readonly NormalizedTool[] = [
   {
     name: "read",
-    description: "Lit un fichier du projet",
+    description: "Reads a project file",
     schema: {
       type: "object",
       properties: { filePath: { type: "string" } },
@@ -138,7 +138,7 @@ const TOOLS: readonly NormalizedTool[] = [
   },
   {
     name: "grep",
-    description: "Cherche un motif dans le dépôt",
+    description: "Searches for a pattern in the repository",
     schema: {
       type: "object",
       properties: {
@@ -151,7 +151,7 @@ const TOOLS: readonly NormalizedTool[] = [
   },
   {
     name: "edit",
-    description: "Remplace un morceau de fichier",
+    description: "Replaces a chunk of a file",
     schema: {
       type: "object",
       properties: {
@@ -174,34 +174,34 @@ const TOOLS: readonly NormalizedTool[] = [
 const TOOL_ENTRIES = [
   ToolEntry.make({
     name: "read",
-    description: "Lit un fichier du projet",
+    description: "Reads a project file",
     inputSchema: TOOLS[0]?.schema as Record<string, unknown>,
   }),
   ToolEntry.make({
     name: "grep",
-    description: "Cherche un motif dans le dépôt",
+    description: "Searches for a pattern in the repository",
     inputSchema: TOOLS[1]?.schema as Record<string, unknown>,
   }),
   ToolEntry.make({
     name: "edit",
-    description: "Remplace un morceau de fichier",
+    description: "Replaces a chunk of a file",
     inputSchema: TOOLS[2]?.schema as Record<string, unknown>,
   }),
 ]
 
 /** The system parts, deliberately **multiple**: OpenCode's real case. */
 const SYSTEM_PARTS = [
-  "Tu es un assistant de programmation.",
-  "AGENTS.md : on ne modifie jamais un fichier généré.",
-  "Réponds en français, sans préambule.",
+  "You are a programming assistant.",
+  "AGENTS.md: a generated file is never modified.",
+  "Answer in English, without preamble.",
 ]
 
 /** The reference transcript: a tool call, its result, then a follow-up. */
 const MESSAGES: readonly NormalizedMessage[] = [
-  { role: "user", text: "révise le fichier config.json" },
-  { role: "assistant", text: 'Appel d\'outil read : {"filePath":"config.json"}' },
+  { role: "user", text: "review the file config.json" },
+  { role: "assistant", text: 'Tool call read : {"filePath":"config.json"}' },
   { role: "tool", id: "call-1", name: "read", output: '{ "port": 4096 }' },
-  { role: "user", text: "et le port ?" },
+  { role: "user", text: "and the port?" },
 ]
 
 /**
@@ -226,7 +226,7 @@ const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] =
     system: SYSTEM_PARTS.map((text) => SystemPart.make(text)),
     tools: [...tools],
     messages: [
-      Message.user("révise le fichier config.json"),
+      Message.user("review the file config.json"),
       Message.assistant([
         ToolCallPart.make({ id: "call-1", name: "read", input: { filePath: "config.json" } }),
       ]),
@@ -237,7 +237,7 @@ const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] =
           result: { type: "content", value: [{ type: "text", text: '{ "port": 4096 }' }] },
         }),
       ),
-      Message.user("et le port ?"),
+      Message.user("and the port?"),
     ],
     generation: GenerationOptions.make({ maxTokens: 512 }),
   })
@@ -259,16 +259,16 @@ const normalizedOf = (request: LLMRequest): NormalizedRequest =>
 
 /** The five expected sections, in this order. */
 const SECTION_ORDER = [
-  "## Rôle",
-  "## Instructions système",
-  "## Outils disponibles",
+  "## Role",
+  "## System instructions",
+  "## Available tools",
   "## Conversation",
-  "## Format de sortie — impératif",
+  "## Output format - mandatory",
 ] as const
 
 /** The contract's last line: the prompt must end with it. */
 const LAST_RULE =
-  "- N'appelle aucun outil natif : tu n'en as aucun, et toute tentative serait rejetée."
+  "- Do not call any native tool: you have none, and any attempt would be rejected."
 
 /**
  * The rendering invariants, applied to any prompt.
@@ -280,14 +280,14 @@ const LAST_RULE =
 const assertIntact = (prompt: string): void => {
   // 1. The five sections are present, once each, **in order**.
   const positions = SECTION_ORDER.map((header) =>
-    indexOfOrFail(prompt, header, `la section « ${header} »`),
+    indexOfOrFail(prompt, header, `the section "${header}"`),
   )
   for (let i = 1; i < positions.length; i += 1) {
     const previous = positions[i - 1] ?? 0
     const current = positions[i] ?? 0
     if (current <= previous) {
       throw new Error(
-        `ordre des sections cassé : « ${SECTION_ORDER[i - 1]} » avant « ${SECTION_ORDER[i]} »`,
+        `section order broken: "${SECTION_ORDER[i - 1]}" before "${SECTION_ORDER[i]}"`,
       )
     }
   }
@@ -298,8 +298,8 @@ const assertIntact = (prompt: string): void => {
   // 2. Every system part is there, **once**, in the request's order.
   let previous = -1
   for (const part of SYSTEM_PARTS) {
-    const at = indexOfOrFail(prompt, part, "une partie système")
-    if (at <= previous) throw new Error(`partie système hors ordre : ${part}`)
+    const at = indexOfOrFail(prompt, part, "a system part")
+    if (at <= previous) throw new Error(`system part out of order: ${part}`)
     previous = at
     expect(countOf(prompt, part)).toBe(1)
   }
@@ -309,7 +309,7 @@ const assertIntact = (prompt: string): void => {
   const toolsAt = positions[2] ?? 0
   const conversationAt = positions[3] ?? Number.MAX_SAFE_INTEGER
   for (const tool of TOOLS) {
-    const heading = indexOfOrFail(prompt, `### ${tool.name}\n`, `l'outil « ${tool.name} »`)
+    const heading = indexOfOrFail(prompt, `### ${tool.name}\n`, `the tool "${tool.name}"`)
     expect(countOf(prompt, `### ${tool.name}\n`)).toBe(1)
     expect(heading).toBeGreaterThan(toolsAt)
     expect(heading).toBeLessThan(conversationAt)
@@ -322,15 +322,15 @@ const assertIntact = (prompt: string): void => {
 
   // 4. Every message is there with its role, once, in order.
   const lines: readonly string[] = [
-    "Utilisateur : révise le fichier config.json",
-    'Assistant : Appel d\'outil read : {"filePath":"config.json"}',
-    'Outil read : { "port": 4096 }',
-    "Utilisateur : et le port ?",
+    "User : review the file config.json",
+    'Assistant : Tool call read : {"filePath":"config.json"}',
+    'Tool read : { "port": 4096 }',
+    "User : and the port?",
   ]
   previous = -1
   for (const line of lines) {
-    const at = indexOfOrFail(prompt, line, "un message du transcript")
-    if (at <= previous) throw new Error(`message hors ordre : ${line}`)
+    const at = indexOfOrFail(prompt, line, "a transcript message")
+    if (at <= previous) throw new Error(`message out of order: ${line}`)
     previous = at
     expect(countOf(prompt, line)).toBe(1)
   }
@@ -366,14 +366,14 @@ describe("renderRequest: nothing lost, nothing duplicated", () => {
       messages: [{ role: "user", text: "test" }],
     })
     expect(rendered).toContain("### mystere")
-    expect(rendered).toContain("aucun schéma")
+    expect(rendered).toContain("no schema")
     expect(rendered).not.toContain("undefined")
   })
 
   test("an empty transcript and an empty catalogue do not lie", () => {
     const rendered = renderRequest({ system: [], tools: [], messages: [] })
-    expect(rendered).toContain("(aucun outil n'est disponible pour cette requête)")
-    expect(rendered).toContain("(aucun message précédent)")
+    expect(rendered).toContain("(no tool is available for this request)")
+    expect(rendered).toContain("(no previous message)")
   })
 })
 
@@ -422,22 +422,22 @@ describe("fromRequest: the reconstruction is complete", () => {
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const request = new LLMRequest({
       model: languageModel,
-      system: [SystemPart.make("Système de base.")],
+      system: [SystemPart.make("Base system.")],
       tools: [],
       messages: [
-        Message.user("premier"),
-        Message.system("Rappel : ne jamais écraser un fichier verrouillé."),
-        Message.user("deuxième"),
+        Message.user("first"),
+        Message.system("Reminder: never overwrite a locked file."),
+        Message.user("second"),
       ],
     })
     const body = Effect.runSync(fromRequest(request, fakeSettings()))
     expect(body.request.system).toEqual([
-      "Système de base.",
-      "Rappel : ne jamais écraser un fichier verrouillé.",
+      "Base system.",
+      "Reminder: never overwrite a locked file.",
     ])
     expect(body.request.messages).toEqual([
-      { role: "user", text: "premier" },
-      { role: "user", text: "deuxième" },
+      { role: "user", text: "first" },
+      { role: "user", text: "second" },
     ])
   })
 })
@@ -511,7 +511,7 @@ describe("the prompt received on the wire is byte for byte the rendered prompt",
     // file the agent deposited is measured.
     const rich = await temporaryDirectory("rich")
     const poor = await temporaryDirectory("poor")
-    const extra = "Règle supplémentaire : ne cite jamais un fichier que tu n'as pas lu."
+    const extra = "Extra rule: never cite a file you have not read."
 
     for (const [file, system] of [
       [rich, [...SYSTEM_PARTS, extra]],
@@ -523,7 +523,7 @@ describe("the prompt received on the wire is byte for byte the rendered prompt",
         model: languageModel,
         system: system.map((text) => SystemPart.make(text)),
         tools: [...TOOL_ENTRIES],
-        messages: [Message.user("bonjour")],
+        messages: [Message.user("hello")],
       })
       const outcome = await Effect.runPromise(
         Effect.scoped(
@@ -570,7 +570,7 @@ describe("usage: why the recipe shows 2/24", () => {
     feed({ type: "usage", kind: "turn", input, output, total: input + output, cacheWrite, cacheRead })
     feed({ type: "done", stopReason: "end_turn" })
     const finish = events.find((e) => e.type === "finish")
-    if (finish?.type !== "finish") throw new Error("aucun finish")
+    if (finish?.type !== "finish") throw new Error("no finish")
     return finish.usage
   }
 

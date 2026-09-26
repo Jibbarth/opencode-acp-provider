@@ -32,7 +32,7 @@ const HOOK = fileURLToPath(new URL("../scripts/resolve-ts-extensions.mjs", impor
  */
 const NODE = Bun.which("node")
 if (NODE === null) {
-  throw new Error("node est requis pour tester scripts/verify-package.mjs")
+  throw new Error("node is required to test scripts/verify-package.mjs")
 }
 
 /** Runs the script and returns `{ code, stdout, stderr }`. */
@@ -63,7 +63,7 @@ describe("verify:package", () => {
     expect(stdout).toContain("default.setup")
     expect(stdout).toContain("model")
     expect(stdout).toContain("Provider.Info.package")
-    expect(stdout).toContain("contrat du paquet vérifié")
+    expect(stdout).toContain("package contract verified")
   })
 
   test("the script uses no Bun API, and lives in a `.mjs`", async () => {
@@ -151,7 +151,7 @@ describe("verify:package", () => {
       expect(code).not.toBe(0)
       // The offending field is named, and the summary lists them.
       expect(stderr).toContain('exports["."]')
-      expect(stderr).toContain("champ(s) en défaut")
+      expect(stderr).toContain("field(s) out of contract")
     } finally {
       await rm(scratch, { recursive: true, force: true })
     }

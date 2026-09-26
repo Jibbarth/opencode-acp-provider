@@ -283,7 +283,7 @@ export class SessionPool<S extends ManagedSession> {
     const family = conversationKey(identity)
     await this.dropRewritten(family, digests)
     this.evict()
-    return this.openNew(key, family, digests, messages, open, "inconnue")
+    return this.openNew(key, family, digests, messages, open, "unknown")
   }
 
   /**

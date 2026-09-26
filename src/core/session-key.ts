@@ -143,22 +143,22 @@ export const sessionKey = (
 /** Why a live session cannot be resumed. */
 export type ResumeRefusal =
   /** No session known for this key: one has to be opened. */
-  | "inconnue"
+  | "unknown"
   /** The incoming history is no longer an extension of the sent one. */
-  | "historique"
+  | "history"
   /** Nothing new to send: the prompt would be empty. */
-  | "vide"
+  | "empty"
 
 /** The decision, and what it implies for the prompt. */
 export type TurnPlan =
   | { readonly reuse: true; readonly delta: readonly NormalizedMessage[] }
   | { readonly reuse: false; readonly reason: ResumeRefusal }
 
-/** A readable reason, in French, for the logs. */
+/** A readable reason, for the logs. */
 export const refusalLabel: Readonly<Record<ResumeRefusal, string>> = {
-  inconnue: "aucune session ACP vivante pour cette conversation",
-  historique: "l'historique a été réécrit (édition, fork ou /compact)",
-  vide: "le tour n'apporte aucun message nouveau",
+  unknown: "no live ACP session for this conversation",
+  history: "the history was rewritten (edit, fork or /compact)",
+  empty: "the turn brings no new message",
 }
 
 /**
@@ -224,7 +224,7 @@ export const sharesMessage = (
  *
  * Note: since `isContinuous` already requires the history to have grown, the
  * `delta.length === 0` guard below is unreachable — a replay of the same turn
- * is refused as `"historique"`, one step earlier. The guard stays as a
+ * is refused as `"history"`, one step earlier. The guard stays as a
  * defence-in-depth: an empty delta would produce a prompt with neither
  * transcript nor message, and the agent would answer nothing — a mute `ACK:`,
  * inexplicable to the user. A fresh session receiving the whole history is
@@ -235,9 +235,9 @@ export const planTurn = (
   current: readonly string[],
   messages: readonly NormalizedMessage[],
 ): TurnPlan => {
-  if (previous === undefined) return { reuse: false, reason: "inconnue" }
-  if (!isContinuous(previous, current)) return { reuse: false, reason: "historique" }
+  if (previous === undefined) return { reuse: false, reason: "unknown" }
+  if (!isContinuous(previous, current)) return { reuse: false, reason: "history" }
   const delta = messages.slice(previous.length)
-  if (delta.length === 0) return { reuse: false, reason: "vide" }
+  if (delta.length === 0) return { reuse: false, reason: "empty" }
   return { reuse: true, delta }
 }

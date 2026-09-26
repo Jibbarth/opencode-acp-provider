@@ -97,7 +97,7 @@ const option = (id: string, category: string, currentValue: string, values: read
 const copilotInventory = (): Inventory => ({
   models: MODEL_IDS.map((id) =>
     id === "claude-sonnet-5"
-      ? { id, name: "Claude Sonnet 5", description: "Le meilleur modèle de codage" }
+      ? { id, name: "Claude Sonnet 5", description: "The best coding model" }
       : { id, name: id === "auto" ? "Auto" : id },
   ),
   thoughtLevels: [...EFFORTS],
@@ -274,7 +274,7 @@ describe("the provider id (pure)", () => {
   /** The parsed agents, or a failure that names what the test got wrong. */
   const agentsOf = (input: unknown): readonly RawAgent[] => {
     const result = parsePluginConfig(input)
-    if (!result.ok) throw new Error(`attendu ok, obtenu : ${result.message}`)
+    if (!result.ok) throw new Error(`expected ok, got: ${result.message}`)
     return result.value.agents
   }
 
@@ -323,7 +323,7 @@ describe("the provider id (pure)", () => {
     // package: this key is the sole channel, which is also why the default is
     // left out - a hand-written `providers.acp.settings` stays as written.
     const agent = agentsOf({ agents: [{ command: "copilot", args: ["--acp"] }] })[0]
-    if (agent === undefined) throw new Error("agent manquant")
+    if (agent === undefined) throw new Error("agent missing")
     expect(providerSettingsOf(agent)).toEqual({ command: "copilot", args: ["--acp"] })
     expect(providerSettingsOf(agent, "acp-copilot")).toEqual({
       command: "copilot",
@@ -336,7 +336,7 @@ describe("the provider id (pure)", () => {
     // The loop that must close: catalogue says `acp-copilot`, the route must
     // declare `acp-copilot`, and the two only meet through these settings.
     const agent = agentsOf({ agents: [{ id: "Copilot", command: "copilot", args: ["--acp"] }] })[0]
-    if (agent === undefined) throw new Error("agent manquant")
+    if (agent === undefined) throw new Error("agent missing")
     const parsed = parseSettings(providerSettingsOf(agent, providerIdOf(agent.providerSlug)))
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
@@ -387,7 +387,7 @@ describe("inventorySignature (pure)", () => {
     const removed = { ...copilotInventory(), models: copilotInventory().models.slice(1) }
     const renamed = {
       ...copilotInventory(),
-      models: copilotInventory().models.map((m) => (m.id === "gpt-5.4" ? { ...m, name: "Renommé" } : m)),
+      models: copilotInventory().models.map((m) => (m.id === "gpt-5.4" ? { ...m, name: "Renamed" } : m)),
     }
     expect(inventorySignature(added)).not.toBe(base)
     expect(inventorySignature(removed)).not.toBe(base)
@@ -408,12 +408,12 @@ describe("inventorySignature (pure)", () => {
 describe("parsePluginConfig (pure)", () => {
   const ok = (input: unknown) => {
     const result = parsePluginConfig(input)
-    if (!result.ok) throw new Error(`attendu ok, obtenu : ${result.message}`)
+    if (!result.ok) throw new Error(`expected ok, got: ${result.message}`)
     return result.value
   }
   const ko = (input: unknown): string => {
     const result = parsePluginConfig(input)
-    if (result.ok) throw new Error("attendu un refus, obtenu une configuration")
+    if (result.ok) throw new Error("expected a refusal, got a configuration")
     return result.message
   }
 
@@ -586,7 +586,7 @@ describe("parsePluginConfig (pure)", () => {
     const fresh = ok({ agents: [{ command: "copilot", session: "fresh" }] }).agents[0]
     const silent = ok({ agents: [{ command: "copilot" }] }).agents[0]
     if (reuse === undefined || fresh === undefined || silent === undefined) {
-      throw new Error("agent manquant")
+      throw new Error("agent missing")
     }
     expect(providerSettingsOf(reuse)).toEqual({ command: "copilot", session: "reuse" })
 
@@ -618,7 +618,7 @@ describe("parsePluginConfig (pure)", () => {
     const agent = ok({
       agents: [{ id: "copilot", command: "copilot", args: ["--acp"], env: { A: "1" } }],
     }).agents[0]
-    if (agent === undefined) throw new Error("agent manquant")
+    if (agent === undefined) throw new Error("agent missing")
     const parsed = parseSettings(providerSettingsOf(agent))
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
@@ -704,7 +704,7 @@ describe("discovery bounds", () => {
     [{ discoveryTimeoutMs: "10s" }, "options.discoveryTimeoutMs"],
     [{ discoveryIdleTimeoutMs: 0 }, "options.discoveryIdleTimeoutMs"],
     [{ discoveryIdleTimeoutMs: Number.NaN }, "options.discoveryIdleTimeoutMs"],
-  ])("une borne inutilisable est refusée : %o", (input, fragment) => {
+  ])("an unusable bound is refused: %o", (input, fragment) => {
     // Note: a `0`, negative or infinite bound bounds **nothing**: the worst case
     // for a timeout, and it must be refused when the configuration is read, not
     // discovered when OpenCode starts.

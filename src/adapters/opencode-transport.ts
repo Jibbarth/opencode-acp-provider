@@ -75,7 +75,7 @@ export const ROUTE_ID = "acp-stdio"
  *
  * Note: the parameter is the one field actually read, so that a **rejected**
  * configuration can still be named after the provider it came from - the error
- * a user reads is `acp-codex: settings.command est obligatoire`, not `acp: ...`.
+ * a user reads is `acp-codex: settings.command is mandatory`, not `acp: ...`.
  */
 export const providerIdOf = (settings: { readonly provider?: string | undefined }): ProviderID =>
   ProviderID.make(settings.provider ?? PROVIDER_ID)
@@ -407,8 +407,8 @@ const applyOption = async (
   if (option.currentValue === value) return
   if (!option.values.includes(value)) {
     throw new AcpAgentError(
-      `${labelOf(settings)}: ${label} « ${value} » n'est pas proposé par cet agent ` +
-        `(valeurs acceptées : ${option.values.join(", ")})`,
+      `${labelOf(settings)}: ${label} "${value}" is not offered by this agent ` +
+        `(accepted values: ${option.values.join(", ")})`,
       labelOf(settings),
     )
   }
@@ -420,7 +420,7 @@ const applyModel = async (
   session: AcpSession,
   model: string,
   settings: AcpProviderSettings,
-): Promise<void> => applyOption(session, "model", "le modèle", model, settings)
+): Promise<void> => applyOption(session, "model", "the model", model, settings)
 
 /**
  * Applies the effort level of the selected variant.
@@ -441,7 +441,7 @@ const applyEffort = async (
 ): Promise<void> => {
   const effort = settings.effort
   if (effort === undefined) return
-  await applyOption(session, "thought_level", "le niveau d'effort", effort, settings)
+  await applyOption(session, "thought_level", "the effort level", effort, settings)
 }
 
 
@@ -513,7 +513,7 @@ const prepare = (input: TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepar
     return Effect.fail(
       new AIError({
         reason: new InvalidRequestError({
-          message: "requête sans aucun message : il n'y a rien à envoyer à l'agent ACP",
+          message: "request without a single message: there is nothing to send to the ACP agent",
         }),
       }),
     )

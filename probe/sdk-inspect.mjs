@@ -1,4 +1,4 @@
-// Sonde ACP basée sur le SDK officiel @agentclientprotocol/sdk
+// ACP probe based on the official @agentclientprotocol/sdk
 // Usage: node sdk-inspect.mjs [commande] [args...]
 import { spawn } from "node:child_process"
 import { Writable, Readable } from "node:stream"
@@ -53,7 +53,7 @@ try {
         }
 
         console.log("\n=== PROMPT ===")
-        const promptPromise = session.prompt("Réponds uniquement par un objet JSON : {\"type\":\"text\",\"text\":\"pong\"}")
+        const promptPromise = session.prompt("Answer only with a JSON object: {\"type\":\"text\",\"text\":\"pong\"}")
         for (;;) {
           const msg = await session.nextUpdate()
           if (msg.kind === "stop") {

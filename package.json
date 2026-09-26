@@ -1,7 +1,7 @@
 {
   "name": "opencode-acp-provider",
   "version": "0.1.0",
-  "description": "Expose un agent ACP (Agent Client Protocol) comme model provider OpenCode",
+  "description": "Expose an ACP (Agent Client Protocol) agent as an OpenCode model provider",
   "license": "MIT",
   "type": "module",
   "private": false,

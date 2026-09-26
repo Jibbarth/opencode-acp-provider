@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 #
-# opencode-acp-provider — installation en une commande.
+# opencode-acp-provider - one-command installation.
 #
 #   git clone <repo> && cd opencode-acp-provider
-#   ./install.sh                 # configuration globale
-#   ./install.sh --local         # configuration du répertoire courant
+#   ./install.sh                 # global configuration
+#   ./install.sh --local         # current directory configuration
 #
-# Ce que fait ce script, et surtout ce qu'il refuse de faire :
+# What this script does, and above all what it refuses to do:
 #
-#   * il ne remplace jamais une configuration. Il fusionne : il cherche une
-#     entrée `plugins[]` qui pointe déjà sur ce dépôt, et ne la duplique pas.
-#     Deux installations successives convergent vers une entrée unique ;
-#   * il sauvegarde le fichier avant de l'écrire, et le relit ensuite pour
-#     vérifier que l'entrée a bien survécu ;
-#   * il refuse une configuration dont il ne sait pas faire la fusion
-#     (`plugins` qui n'est pas un tableau, entrée non-objet, deux entrées qui
-#     pointent déjà ici), et il ne laisse rien à moitié écrit ;
-#   * il refuse une configuration **commentée** sans `--force`, parce que la
-#     réécriture perdrait les commentaires. La sauvegarde est faite dans les
-#     deux cas, et le refus la nomme.
+#   * it never replaces a configuration. It merges: it looks for a `plugins[]`
+#     entry already pointing at this repository and does not duplicate it.
+#     Two successive installations converge to a single entry;
+#   * it backs the file up before writing it, then reads it back to check the
+#     entry really survived;
+#   * it refuses a configuration it cannot merge (`plugins` that is not an
+#     array, a non-object entry, two entries already pointing here), and it
+#     never leaves a half-written file;
+#   * it refuses a **commented** configuration without `--force`, because the
+#     rewrite would lose the comments. The backup is made in both cases, and
+#     the refusal names it.
 #
-# Le chemin du plugin est **absolu**, résolu depuis ce script : il ne dépend pas
-# du répertoire depuis lequel OpenCode est lancé.
+# The plugin path is **absolute**, resolved from this script: it does not depend
+# on the directory OpenCode is launched from.
 
 set -euo pipefail
 
@@ -47,21 +47,21 @@ usage() {
   cat <<'USAGE'
 usage: install.sh [options]
 
-  --global            écrit ~/.config/opencode/opencode.jsonc   (défaut)
-  --local             écrit ./opencode.jsonc (répertoire courant)
-  --config <chemin>   fichier de configuration explicite
-  --status            rapporte l'état, n'écrit rien
-  --uninstall         retire l'entrée de ce dépôt
+  --global            writes ~/.config/opencode/opencode.jsonc   (default)
+  --local             writes ./opencode.jsonc (current directory)
+  --config <path>     explicit configuration file
+  --status            reports the state, writes nothing
+  --uninstall         removes this repository's entry
   --agent "<cmd> [args...]"
-                      agent à configurer, répétable
-                      (défaut : copilot --acp)
-  --no-agent          n'écrit aucun agent, à vous de les ajouter
-  --force             autorise la réécriture d'une configuration commentée
-                      (les commentaires seront perdus ; sauvegarde faite)
-  --yes               ne demande pas confirmation
-  -h, --help          cette aide
+                      agent to configure, repeatable
+                      (default: copilot --acp)
+  --no-agent          writes no agent, you add them yourself
+  --force             allows rewriting a commented configuration
+                      (the comments will be lost; a backup is taken)
+  --yes               does not ask for confirmation
+  -h, --help          this help
 
- exemples :
+ examples:
   ./install.sh
   ./install.sh --local --agent "opencode acp"
   ./install.sh --status
@@ -77,30 +77,30 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --global) SCOPE="global" ;;
     --local) SCOPE="local" ;;
-    --config) [ $# -ge 2 ] || die "--config exige un chemin"; CONFIG="$2"; shift ;;
+    --config) [ $# -ge 2 ] || die "--config requires a path"; CONFIG="$2"; shift ;;
     --status) MODE="status" ;;
     --uninstall) MODE="uninstall" ;;
     --force) FORCE="--force" ;;
     --yes|-y) ASSUME_YES="yes" ;;
-    --agent) [ $# -ge 2 ] || die "--agent exige une commande"; AGENT_SPECS+=("$2"); AGENTS_EXPLICIT="yes"; shift ;;
+    --agent) [ $# -ge 2 ] || die "--agent requires a command"; AGENT_SPECS+=("$2"); AGENTS_EXPLICIT="yes"; shift ;;
     --no-agent) NO_AGENT="yes"; AGENTS_EXPLICIT="yes" ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; die "option inconnue : $1" ;;
+    *) usage >&2; die "unknown option: $1" ;;
   esac
   shift
 done
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prérequis
+# Prerequisites
 # ─────────────────────────────────────────────────────────────────────────────
 
-[ -f "$ROOT/package.json" ] || die "$ROOT ne ressemble pas à opencode-acp-provider (package.json absent)."
-[ -f "$PLUGIN_ENTRY" ] || die "point d'entrée plugin introuvable : $PLUGIN_ENTRY"
+[ -f "$ROOT/package.json" ] || die "$ROOT does not look like opencode-acp-provider (package.json absent)."
+[ -f "$PLUGIN_ENTRY" ] || die "plugin entry point not found: $PLUGIN_ENTRY"
 
-# Le provider est chargé par le serveur OpenCode, qui résout ses dépendances
-# depuis node_modules : sans install, le premier tour échoue sur un import.
+# The provider is loaded by the OpenCode server, which resolves its dependencies
+# from node_modules: without an install, the first turn fails on an import.
 if [ ! -d "$ROOT/node_modules/@opencode/ai" ]; then
-  note "! node_modules incomplet : lancez d'abord"
+  note "! node_modules incomplete: run first"
   note "    bun install"
 fi
 
@@ -108,23 +108,23 @@ RUNNER=""
 for candidate in bun node; do
   if command -v "$candidate" >/dev/null 2>&1; then RUNNER="$candidate"; break; fi
 done
-[ -n "$RUNNER" ] || die "aucun runtime JavaScript trouvé (bun ou node est requis pour écrire la configuration)."
+[ -n "$RUNNER" ] || die "no JavaScript runtime found (bun or node is required to write the configuration)."
 
-# La version d'OpenCode doit correspondre à celle de @opencode/plugin : le
-# plugin est chargé par le serveur, et c'est sa version qui décide du contrat.
+# OpenCode's version must match @opencode/plugin's: the plugin is loaded by the
+# server, and its version is what decides the contract.
 PINNED="$("$RUNNER" -e 'const p=require(process.argv[1]);process.stdout.write((p.devDependencies||{})["@opencode/plugin"]||"?")' "$ROOT/package.json" 2>/dev/null || echo '?')"
 if command -v opencode >/dev/null 2>&1; then
   FOUND="$(opencode --version 2>/dev/null | sed -nE 's/.*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
   if [ -n "$FOUND" ] && [ "$FOUND" != "$PINNED" ]; then
-    note "! OpenCode $FOUND alors que @opencode/plugin est épinglé sur $PINNED."
-    note "  Le plugin est chargé par le serveur : c'est sa version qui fait foi."
+    note "! OpenCode $FOUND while @opencode/plugin is pinned to $PINNED."
+    note "  The plugin is loaded by the server: its version is the one that counts."
   fi
 else
-  note "! opencode n'est pas dans le PATH : la configuration sera écrite, mais OpenCode ne pourra pas la lire."
+  note "! opencode is not in the PATH: the configuration will be written, but OpenCode will not be able to read it."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cible
+# Target
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [ "$SCOPE" = "local" ]; then
@@ -134,11 +134,11 @@ else
   SHIM_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
 fi
 
-# Un lien symbolique est suivi, pas réécrit : le fichier visé peut être versionné
-# (dotfiles), et y écrire à travers le lien ferait diverger l'autre nom.
+# A symbolic link is followed, not rewritten: the target file may be versioned
+# (dotfiles), and writing through the link would make the other name diverge.
 if [ -L "$CONFIG" ]; then
   RESOLVED="$(cd -- "$(dirname -- "$CONFIG")" && pwd -P)/$(readlink -- "$CONFIG")"
-  note "! $CONFIG est un lien symbolique : l'écriture porte sur $RESOLVED"
+  note "! $CONFIG is a symbolic link: the write targets $RESOLVED"
   CONFIG="$RESOLVED"
 fi
 
@@ -167,11 +167,11 @@ else
         return args.length > 0 ? { command, args } : { command }
       })
       if (agents.some((a) => typeof a.command !== "string" || a.command === "")) {
-        throw new Error("un --agent est vide")
+        throw new Error("an --agent is empty")
       }
       process.stdout.write(JSON.stringify(agents))
     '
-  )" || die "impossible de construire la liste d'agents."
+  )" || die "cannot build the agent list."
   # `${arr[*]}` joins on the first character of IFS, hence a lone comma.
   [ "$MODE" = "install" ] && note "agents : $(IFS=$', '; echo "${AGENT_SPECS[*]}")"
 fi
@@ -181,19 +181,19 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [ "$MODE" = "install" ] && [ -z "$ASSUME_YES" ] && [ -t 0 ]; then
-  [ -f "$CONFIG" ] && note "configuration existante : $CONFIG (sauvegarde avant écriture)"
-  note "cible            : $CONFIG"
-  note "point d'entrée   : $PLUGIN_ENTRY"
-  printf 'Écrire ? [o/N] '
+  [ -f "$CONFIG" ] && note "existing configuration: $CONFIG (backup before writing)"
+  note "target           : $CONFIG"
+  note "entry point      : $PLUGIN_ENTRY"
+  printf 'Write? [y/N] '
   read -r reply
   case "$reply" in
-    o|O|oui|OUI|y|Y) ;;
-    *) note "annulé."; exit 0 ;;
+    y|Y|o|O|oui|OUI) ;;
+    *) note "cancelled."; exit 0 ;;
   esac
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fusion
+# Merge
 # ─────────────────────────────────────────────────────────────────────────────
 
 # A `plugins` entry in a config array does not load, measured repeatedly on
@@ -204,9 +204,9 @@ SHIM_PATH="$SHIM_DIR/$SHIM_NAME"
 if [ "$MODE" = "uninstall" ]; then
   if [ -f "$SHIM_PATH" ]; then
     rm -f "$SHIM_PATH"
-    note "supprime : $SHIM_PATH"
+    note "removed: $SHIM_PATH"
   else
-    note "rien a supprimer : $SHIM_PATH est absent"
+    note "nothing to remove: $SHIM_PATH is absent"
   fi
   exit 0
 fi
@@ -244,13 +244,13 @@ export default Plugin.define({
     acp.setup({ ...ctx, options: $AGENTS_JSON ?? readUserAgents() ?? ctx.options }),
 })
 SHIM_EOF
-note "ecrit : $SHIM_PATH"
+note "written: $SHIM_PATH"
 
-[ -f "$SHIM_PATH" ] || die "le shim na pas pu etre ecrit"
-grep -q "$PLUGIN_ENTRY" "$SHIM_PATH" || die "le shim ne designe pas le point dentree attendu"
+[ -f "$SHIM_PATH" ] || die "the shim could not be written"
+grep -q "$PLUGIN_ENTRY" "$SHIM_PATH" || die "the shim does not point at the expected entry point"
 
 if [ "$MODE" = "status" ]; then
-  note "installe : $SHIM_PATH"
+  note "installed: $SHIM_PATH"
   exit 0
 fi
 

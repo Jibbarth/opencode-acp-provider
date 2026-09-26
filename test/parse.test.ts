@@ -27,15 +27,15 @@ import type { NormalizedRequest, NormalizedTool } from "../src/core/types.js"
 
 const READ: NormalizedTool = {
   name: "read",
-  description: "Lit un fichier",
+  description: "Reads a file",
   schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
 }
-const BASH: NormalizedTool = { name: "bash", description: "Exécute une commande", schema: {} }
+const BASH: NormalizedTool = { name: "bash", description: "Runs a command", schema: {} }
 
 /** A failure's message, requiring that it exists (otherwise the test tests nothing). */
 const failure = (raw: string, tools: readonly NormalizedTool[] = [READ]): string => {
   const parsed = parseAgentOutput(raw, tools)
-  if (parsed.ok) throw new Error(`un échec était attendu, obtenu : ${JSON.stringify(parsed.output)}`)
+  if (parsed.ok) throw new Error(`a failure was expected, got: ${JSON.stringify(parsed.output)}`)
   expect(parsed.error).toBeInstanceOf(ParseError)
   return parsed.error.message
 }
@@ -48,9 +48,9 @@ const output = (raw: string, tools: readonly NormalizedTool[] = [READ]) => {
 }
 
 const baseRequest: NormalizedRequest = {
-  system: ["SYSTÈME"],
+  system: ["SYSTEM"],
   tools: [READ],
-  messages: [{ role: "user", text: "bonjour" }],
+  messages: [{ role: "user", text: "hello" }],
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ describe("parseAgentOutput - extraction", () => {
   })
 
   test("an object in a ```json block", () => {
-    const raw = 'Voici ma réponse :\n```json\n{"type":"text","text":"pong"}\n```\nCordialement.'
+    const raw = 'Here is my answer:\n```json\n{"type":"text","text":"pong"}\n```\nKind regards.'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 
@@ -78,13 +78,13 @@ describe("parseAgentOutput - extraction", () => {
 
   test("a JSON object embedded in prose", () => {
     // The most frequent case with agents: an introductory sentence.
-    const raw = 'Bien sûr ! Voici le résultat : {"type":"text","text":"pong"} — bonne journée.'
+    const raw = 'Sure! Here is the result: {"type":"text","text":"pong"} - have a good day.'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 
   test("the first usable object wins", () => {
-    const raw = '{"type":"text","text":"un"}{"type":"text","text":"deux"}'
-    expect(output(raw)).toEqual({ type: "text", text: "un" })
+    const raw = '{"type":"text","text":"one"}{"type":"text","text":"two"}'
+    expect(output(raw)).toEqual({ type: "text", text: "one" })
   })
 
   test("the first object is skipped when it has no known type", () => {
@@ -96,15 +96,15 @@ describe("parseAgentOutput - extraction", () => {
     // Note: this is THE trap of the naive "first `{`, first `}`" extraction:
     // without tracking strings, the object would be cut and the read would
     // fail.
-    const raw = '{"type":"text","text":"voici {une} accolade et un \\" guillemet"}'
-    expect(output(raw)).toEqual({ type: "text", text: 'voici {une} accolade et un " guillemet' })
+    const raw = '{"type":"text","text":"here is {a} brace and a \\" quote"}'
+    expect(output(raw)).toEqual({ type: "text", text: 'here is {a} brace and a " quote' })
   })
 
   test("a trailing string escape is handled", () => {
     // `\\"` is a quote **inside** the string: the string's closing quote comes
     // after, otherwise the final `}` would be swallowed.
-    const raw = '{"type":"text","text":"une barre \\\\ puis }"}'
-    expect(output(raw)).toEqual({ type: "text", text: "une barre \\ puis }" })
+    const raw = '{"type":"text","text":"a backslash \\\\ then }"}'
+    expect(output(raw)).toEqual({ type: "text", text: "a backslash \\ then }" })
   })
 
   test("nested objects do not confuse the extraction", () => {
@@ -117,7 +117,7 @@ describe("parseAgentOutput - extraction", () => {
   })
 
   test("an unclosed `{` does not prevent reading the rest", () => {
-    const raw = 'une accolade orpheline { puis {"type":"text","text":"pong"}'
+    const raw = 'an orphan brace { then {"type":"text","text":"pong"}'
     expect(output(raw)).toEqual({ type: "text", text: "pong" })
   })
 })
@@ -126,38 +126,38 @@ describe("parseAgentOutput - substantive validation", () => {
   test("an empty output is an error, not empty text", () => {
     // The edge case seen in real runs: an agent can return "nothing" after
     // having accepted the contract. A silent empty text would suggest an answer.
-    expect(failure("")).toContain("aucune sortie exploitable")
-    expect(failure("   \n  ")).toContain("aucune sortie exploitable")
+    expect(failure("")).toContain("no usable output")
+    expect(failure("   \n  ")).toContain("no usable output")
   })
 
   test("empty text is an error", () => {
     // Note: "valid JSON but empty of meaning": the shape is right, the substance is not.
-    expect(failure('{"type":"text","text":""}')).toContain("texte exploitable")
+    expect(failure('{"type":"text","text":""}')).toContain("usable text")
   })
 
   test("whitespace-only text is an error", () => {
-    expect(failure('{"type":"text","text":"   "}')).toContain("texte exploitable")
+    expect(failure('{"type":"text","text":"   "}')).toContain("usable text")
   })
 
   test("a missing `text` field is an error", () => {
-    expect(failure('{"type":"text"}')).toContain("texte exploitable")
+    expect(failure('{"type":"text"}')).toContain("usable text")
   })
 
   test("a non-textual `text` is an error", () => {
-    expect(failure('{"type":"text","text":42}')).toContain("texte exploitable")
+    expect(failure('{"type":"text","text":42}')).toContain("usable text")
   })
 
   test("raw prose is an error", () => {
-    expect(failure("Bonjour, je peux vous aider.")).toContain("aucun objet JSON")
+    expect(failure("Hello, I can help you.")).toContain("no JSON object")
   })
 
   test("invalid JSON is an error", () => {
-    expect(failure('{"type":"text","text":')).toContain("aucun objet JSON")
+    expect(failure('{"type":"text","text":')).toContain("no JSON object")
   })
 
   test("an unknown type is an error naming what it found", () => {
-    const message = failure('{"type":"réponse","text":"pong"}')
-    expect(message).toContain("réponse")
+    const message = failure('{"type":"response","text":"pong"}')
+    expect(message).toContain("response")
     expect(message).toContain('"text"')
   })
 
@@ -172,12 +172,12 @@ describe("parseAgentOutput - substantive validation", () => {
   test("a tool request with no catalogue fails saying so", () => {
     const message = failure('{"type":"tool","name":"read","arguments":{}}', [])
     expect(message).toContain("read")
-    expect(message).toContain("aucun")
+    expect(message).toContain("none")
   })
 
   test("a missing or empty `name` is an error", () => {
-    expect(failure('{"type":"tool","arguments":{}}')).toContain("ne nomme aucun outil")
-    expect(failure('{"type":"tool","name":"","arguments":{}}')).toContain("ne nomme aucun outil")
+    expect(failure('{"type":"tool","arguments":{}}')).toContain("names no tool")
+    expect(failure('{"type":"tool","name":"","arguments":{}}')).toContain("names no tool")
   })
 
   test("the name must be EXACT: no prefix, no different case", () => {
@@ -188,13 +188,13 @@ describe("parseAgentOutput - substantive validation", () => {
   })
 
   test.each([
-    ['"read"', "une valeur de type string"],
-    ["42", "une valeur de type number"],
-    ["true", "une valeur de type boolean"],
+    ['"read"', "a value of type string"],
+    ["42", "a value of type number"],
+    ["true", "a value of type boolean"],
     ["null", "null"],
-    ["[1,2]", "un tableau"],
-    ['"{"', "une valeur de type string"],
-  ])("des `arguments` %s sont refusés", (arguments_, fragment) => {
+    ["[1,2]", "an array"],
+    ['"{"', "a value of type string"],
+  ])("`arguments` given as %s are refused", (arguments_, fragment) => {
     const message = failure(`{"type":"tool","name":"read","arguments":${arguments_}}`)
     expect(message).toContain(fragment)
     expect(message).toContain("read")
@@ -232,7 +232,7 @@ describe("parseAgentOutput - substantive validation", () => {
   })
 
   test("an error message on an empty output says so", () => {
-    expect(failure("")).toContain("sortie vide")
+    expect(failure("")).toContain("empty output")
   })
 })
 
@@ -243,11 +243,11 @@ describe("parseAgentOutput - substantive validation", () => {
 describe("renderRequest - prompt structure", () => {
   test("the sections appear in the canonical order", () => {
     const rendered = renderRequest(baseRequest)
-    const role = rendered.indexOf("## Rôle")
-    const system = rendered.indexOf("## Instructions système")
-    const tools = rendered.indexOf("## Outils disponibles")
+    const role = rendered.indexOf("## Role")
+    const system = rendered.indexOf("## System instructions")
+    const tools = rendered.indexOf("## Available tools")
     const transcript = rendered.indexOf("## Conversation")
-    const contract = rendered.indexOf("## Format de sortie")
+    const contract = rendered.indexOf("## Output format")
     expect([role, system, tools, transcript, contract]).toEqual([
       ...[role, system, tools, transcript, contract].sort((a, b) => a - b),
     ])
@@ -255,13 +255,13 @@ describe("renderRequest - prompt structure", () => {
   })
 
   test("the system prompt is taken as-is, without rewriting", () => {
-    expect(renderRequest(baseRequest)).toContain("SYSTÈME")
+    expect(renderRequest(baseRequest)).toContain("SYSTEM")
   })
 
   test("the catalogue names every tool, its description and its serialised schema", () => {
     const rendered = renderRequest(baseRequest)
     expect(rendered).toContain("### read")
-    expect(rendered).toContain("Lit un fichier")
+    expect(rendered).toContain("Reads a file")
     expect(rendered).toContain('"required":["filePath"]')
   })
 
@@ -269,7 +269,7 @@ describe("renderRequest - prompt structure", () => {
     // The agent must pick a name **among those**: the contract says so, and the
     // catalogue is the only source of truth.
     const rendered = renderRequest(baseRequest)
-    expect(rendered).toContain("caractère pour caractère")
+    expect(rendered).toContain("character for character")
     expect(rendered).toContain("read")
   })
 
@@ -277,14 +277,14 @@ describe("renderRequest - prompt structure", () => {
     const rendered = renderRequest({
       ...baseRequest,
       messages: [
-        { role: "user", text: "lis" },
-        { role: "assistant", text: "je lis" },
+        { role: "user", text: "read it" },
+        { role: "assistant", text: "I read it" },
         { role: "tool", id: "call-1", name: "read", output: "# README" },
       ],
     })
-    expect(rendered).toContain("Utilisateur : lis")
-    expect(rendered).toContain("Assistant : je lis")
-    expect(rendered).toContain("Outil read : # README")
+    expect(rendered).toContain("User : read it")
+    expect(rendered).toContain("Assistant : I read it")
+    expect(rendered).toContain("Tool read : # README")
   })
 
   test("a tool result's id is not rendered", () => {
@@ -295,15 +295,15 @@ describe("renderRequest - prompt structure", () => {
 
   test("the contract forbids surrounding prose and native tools", () => {
     const rendered = renderRequest(baseRequest)
-    expect(rendered).toContain("un seul objet JSON")
-    expect(rendered).toContain("aucun texte avant")
-    expect(rendered).toContain("N'appelle aucun outil natif")
+    expect(rendered).toContain("a single JSON object")
+    expect(rendered).toContain("no text before")
+    expect(rendered).toContain("Do not call any native tool")
   })
 
   test("both shapes of the contract are written and exemplified", () => {
     const rendered = renderRequest(baseRequest)
-    expect(rendered).toContain('{"type":"text","text":"<ta réponse>"}')
-    expect(rendered).toContain('{"type":"text","text":"Le fichier contient 42 lignes."}')
+    expect(rendered).toContain('{"type":"text","text":"<your answer>"}')
+    expect(rendered).toContain('{"type":"text","text":"The file contains 42 lines."}')
   })
 
   test("the tool example is rebuilt from the real catalogue", () => {
@@ -314,7 +314,7 @@ describe("renderRequest - prompt structure", () => {
       ...baseRequest,
       tools: [{ ...BASH, schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } }],
     })
-    expect(rendered).toContain('{"type":"tool","name":"bash","arguments":{"command":"exemple"}}')
+    expect(rendered).toContain('{"type":"tool","name":"bash","arguments":{"command":"example"}}')
     expect(rendered).not.toContain('"name":"read"')
   })
 
@@ -343,15 +343,15 @@ describe("renderRequest - prompt structure", () => {
 
   test("with no tool, the catalogue says so and the contract exemplifies no call", () => {
     const rendered = renderRequest({ ...baseRequest, tools: [] })
-    expect(rendered).toContain("aucun outil n'est disponible")
+    expect(rendered).toContain("no tool is available")
     // The **shape** is still described, but no example can cite a tool: there is
     // none, and the agent would only have a name to copy.
-    expect(rendered).toContain('"name":"<nom exact d\'un outil listé plus haut>"')
+    expect(rendered).toContain('"name":"<exact name of a tool listed above>"')
     expect(rendered).not.toContain('{"type":"tool","name":"read"')
   })
 
   test("with no message, the transcript says so", () => {
-    expect(renderRequest({ ...baseRequest, messages: [] })).toContain("aucun message précédent")
+    expect(renderRequest({ ...baseRequest, messages: [] })).toContain("no previous message")
   })
 
   test("the rendering is stable: same inputs, same output", () => {
@@ -366,7 +366,7 @@ describe("renderRequest - unreadable tool schemas", () => {
     // agent with no information at all about the tool.
     const rendered = renderRequest({ ...baseRequest, tools: [{ name: "read", description: "", schema: undefined }] })
     expect(rendered).toContain("### read")
-    expect(rendered).toContain("aucun schéma")
+    expect(rendered).toContain("no schema")
   })
 
   test("a circular schema does not bring down the prompt build", () => {
@@ -376,7 +376,7 @@ describe("renderRequest - unreadable tool schemas", () => {
     circular["self"] = circular
     const rendered = renderRequest({ ...baseRequest, tools: [{ name: "read", description: "", schema: circular }] })
     expect(rendered).toContain("### read")
-    expect(rendered).toContain("non sérialisable")
+    expect(rendered).toContain("not serialisable")
   })
 
   test("a schema that does not serialise to JSON (BigInt) has a fallback too", () => {
@@ -385,14 +385,14 @@ describe("renderRequest - unreadable tool schemas", () => {
       tools: [{ name: "read", description: "", schema: { taille: 1n } }],
     })
     expect(rendered).toContain("### read")
-    expect(rendered).toContain("non sérialisable")
+    expect(rendered).toContain("not serialisable")
   })
 
   test("a free-form schema is rendered as-is, not discarded", () => {
     const rendered = renderRequest({
       ...baseRequest,
-      tools: [{ name: "read", description: "", schema: "un objet quelconque" }],
+      tools: [{ name: "read", description: "", schema: "any object" }],
     })
-    expect(rendered).toContain('"un objet quelconque"')
+    expect(rendered).toContain('"any object"')
   })
 })

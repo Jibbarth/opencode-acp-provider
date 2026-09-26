@@ -52,7 +52,7 @@ const failures = []
  */
 const fail = (field, message) => {
   failures.push({ field, message })
-  console.error(`[échec] ${field} : ${message}`)
+  console.error(`[fail] ${field}: ${message}`)
 }
 
 const check = (field, ok, message) => {
@@ -77,12 +77,12 @@ const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"
 const entryOf = (subpath) => {
   const value = manifest.exports?.[subpath]
   if (typeof value !== "string" || value === "") {
-    fail(`exports["${subpath}"]`, `absent ou non textuel dans package.json (trouvé : ${JSON.stringify(value)})`)
+    fail(`exports["${subpath}"]`, `absent or non-textual in package.json (found: ${JSON.stringify(value)})`)
     return undefined
   }
   const path = resolve(root, value)
   if (!existsSync(path)) {
-    fail(`exports["${subpath}"]`, `${value} est déclaré mais le fichier n'existe pas`)
+    fail(`exports["${subpath}"]`, `${value} is declared but the file does not exist`)
     return undefined
   }
   return pathToFileURL(path).href
@@ -96,7 +96,7 @@ const providerURL = entryOf(".")
 
 if (pluginURL === undefined || providerURL === undefined) {
   console.error(
-    `\n[échec] contrat du paquet : ${failures.length} champ(s) en défaut : ` +
+    `\n[fail] package contract: ${failures.length} field(s) out of contract: ` +
       failures.map((f) => f.field).join(", "),
   )
   process.exit(1)
@@ -104,12 +104,12 @@ if (pluginURL === undefined || providerURL === undefined) {
 
 // ── 1. The plugin entry point exports a `setup` ───────────────────────────────
 
-console.log(`\n# point d'entrée plugin : ${pluginURL}`)
+console.log(`\n# plugin entry point: ${pluginURL}`)
 let plugin
 try {
   plugin = await import(pluginURL)
 } catch (error) {
-  fail("plugin (import)", `l'import a échoué : ${error?.message ?? String(error)}`)
+  fail("plugin (import)", `the import failed: ${error?.message ?? String(error)}`)
 }
 
 if (plugin !== undefined) {
@@ -117,8 +117,8 @@ if (plugin !== undefined) {
     "default.setup",
     typeof plugin.default?.setup === "function",
     typeof plugin.default?.setup === "function"
-      ? "la fonction que l'hôte appelle au chargement est présente"
-      : `l'hôte appelle \`mod.default.setup()\` et a trouvé ${typeof plugin.default?.setup}`,
+      ? "the function the host calls on load is present"
+      : `the host calls \`mod.default.setup()\` and found ${typeof plugin.default?.setup}`,
   )
   check(
     "default.id",
@@ -129,12 +129,12 @@ if (plugin !== undefined) {
 
 // ── 2. The provider entry point exports a `model` ────────────────────────────
 
-console.log(`\n# point d'entrée provider : ${providerURL}`)
+console.log(`\n# provider entry point: ${providerURL}`)
 let provider
 try {
   provider = await import(providerURL)
 } catch (error) {
-  fail("provider (import)", `l'import a échoué : ${error?.message ?? String(error)}`)
+  fail("provider (import)", `the import failed: ${error?.message ?? String(error)}`)
 }
 
 if (provider !== undefined) {
@@ -142,8 +142,8 @@ if (provider !== undefined) {
     "model",
     typeof provider.model === "function",
     typeof provider.model === "function"
-      ? "la fonction que l'hôte appelle pour construire un LanguageModel est présente"
-      : `le champ \`package\` de Provider.Info n'a pas de \`model\` à appeler (trouvé : ${typeof provider.model})`,
+      ? "the function the host calls to build a LanguageModel is present"
+      : `the \`package\` field of Provider.Info has no \`model\` to call (found: ${typeof provider.model})`,
   )
 }
 
@@ -158,7 +158,7 @@ if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
   try {
     computed = plugin.resolvePackageURL(pluginURL)
   } catch (error) {
-    fail("Provider.Info.package", `le calcul a échoué : ${error?.message ?? String(error)}`)
+    fail("Provider.Info.package", `the computation failed: ${error?.message ?? String(error)}`)
   }
   if (typeof computed === "string") {
     check(
@@ -170,7 +170,7 @@ if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
     try {
       target = fileURLToPath(computed)
     } catch (error) {
-      fail("Provider.Info.package", `ce n'est pas une URL de fichier exploitable : ${error?.message ?? String(error)}`)
+      fail("Provider.Info.package", `not a usable file URL: ${error?.message ?? String(error)}`)
     }
     if (target !== undefined) {
       check(
@@ -186,21 +186,21 @@ if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
       check(
         "Provider.Info.package",
         target === fileURLToPath(providerURL),
-        `désigne le même module que exports["."] (${target === fileURLToPath(providerURL) ? "oui" : `non : ${target} ≠ ${fileURLToPath(providerURL)}`})`,
+        `designates the same module as exports["."] (${target === fileURLToPath(providerURL) ? "yes" : `no: ${target} != ${fileURLToPath(providerURL)}`})`,
       )
     }
   }
 } else {
   fail(
     "resolvePackageURL",
-    "le plugin n'exporte pas resolvePackageURL : impossible de vérifier le champ `package`",
+    "the plugin does not export resolvePackageURL: the `package` field cannot be verified",
   )
 }
 
 // ── Verdict ───────────────────────────────────────────────────────────────────
 
 if (failures.length > 0) {
-  console.error(`\n[échec] ${failures.length} champ(s) en défaut : ${failures.map((f) => f.field).join(", ")}`)
+  console.error(`\n[fail] ${failures.length} field(s) out of contract: ${failures.map((f) => f.field).join(", ")}`)
   process.exit(1)
 }
-console.log("\n[ok] contrat du paquet vérifié : les deux points d'entrée s'importent et exposent leur contrat.")
+console.log("\n[ok] package contract verified: both entry points import and expose their contract.")

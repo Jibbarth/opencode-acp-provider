@@ -417,8 +417,8 @@ export type PluginConfigResult =
  * provider they did not ask for.
  */
 export const NO_AGENT_CONFIGURED =
-  'aucun agent ACP configuré : ajoutez-en un dans plugins[].options.agents, ' +
-  'ou dans la clé "acp" de votre opencode.json'
+  'no ACP agent configured: add one in plugins[].options.agents, ' +
+  'or in the "acp" key of your opencode.json'
 
 /** Default minimum delay between two rediscoveries. */
 export const DEFAULT_REFRESH_MS = 60_000
@@ -454,13 +454,13 @@ const readStringArray = (
 ): { readonly ok: true; readonly value: readonly string[] | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (!Array.isArray(raw)) return invalid(`${path}.${key}`, "doit être un tableau de chaînes")
+  if (!Array.isArray(raw)) return invalid(`${path}.${key}`, "must be an array of strings")
   // **Copy** rather than returning the received array: `Array.isArray` proves
   // nothing about its element type, and a copy built here is necessarily a
   // `string[]`, with no need to lie about the typing.
   const values: string[] = []
   for (const item of raw) {
-    if (typeof item !== "string") return invalid(`${path}.${key}`, "doit être un tableau de chaînes")
+    if (typeof item !== "string") return invalid(`${path}.${key}`, "must be an array of strings")
     values.push(item)
   }
   return { ok: true, value: values }
@@ -473,10 +473,10 @@ const readStringRecord = (
 ): { readonly ok: true; readonly value: Record<string, string> | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (!isRecord(raw)) return invalid(`${path}.${key}`, "doit être un objet de chaînes")
+  if (!isRecord(raw)) return invalid(`${path}.${key}`, "must be an object of strings")
   const entries: Record<string, string> = {}
   for (const [name, value] of Object.entries(raw)) {
-    if (typeof value !== "string") return invalid(`${path}.${key}.${name}`, "doit être une chaîne")
+    if (typeof value !== "string") return invalid(`${path}.${key}.${name}`, "must be a string")
     entries[name] = value
   }
   return { ok: true, value: entries }
@@ -488,14 +488,14 @@ const readLimits = (
 ): { readonly ok: true; readonly value: ModelLimits | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input["limits"]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (!isRecord(raw)) return invalid(`${path}.limits`, "doit être un objet { context, output }")
+  if (!isRecord(raw)) return invalid(`${path}.limits`, "must be a { context, output } object")
   const context = raw["context"]
   const output = raw["output"]
   if (typeof context !== "number" || !Number.isInteger(context) || context <= 0) {
-    return invalid(`${path}.limits.context`, "doit être un entier positif")
+    return invalid(`${path}.limits.context`, "must be a positive integer")
   }
   if (typeof output !== "number" || !Number.isInteger(output) || output <= 0) {
-    return invalid(`${path}.limits.output`, "doit être un entier positif")
+    return invalid(`${path}.limits.output`, "must be a positive integer")
   }
   return { ok: true, value: { context, output } }
 }
@@ -518,7 +518,7 @@ const readSession = (
   if (raw === undefined) return { ok: true, value: undefined }
   const found = SESSION_MODES.find((mode) => mode === raw)
   if (found === undefined) {
-    return invalid(`${path}.session`, `doit valoir ${SESSION_MODES.map((m) => `"${m}"`).join(", ")}`)
+    return invalid(`${path}.session`, `must be one of ${SESSION_MODES.map((m) => `"${m}"`).join(", ")}`)
   }
   return { ok: true, value: found }
 }
@@ -536,13 +536,13 @@ const readAgent = (
   raw: unknown,
   path: string,
 ): { readonly ok: true; readonly value: RawAgent } | { readonly ok: false; readonly message: string } => {
-  if (!isRecord(raw)) return invalid(path, "doit être un objet { command, args?, cwd?, env? }")
+  if (!isRecord(raw)) return invalid(path, "must be a { command, args?, cwd?, env? } object")
   const command = raw["command"]
   if (typeof command !== "string" || command.trim() === "") {
-    return invalid(`${path}.command`, 'est obligatoire (ex. "copilot")')
+    return invalid(`${path}.command`, 'is mandatory (e.g. "copilot")')
   }
   const id = raw["id"]
-  if (id !== undefined && typeof id !== "string") return invalid(`${path}.id`, "doit être une chaîne")
+  if (id !== undefined && typeof id !== "string") return invalid(`${path}.id`, "must be a string")
   // An explicit `id` becomes a **provider id**, hence a slug: validated here,
   // where the path of the offending field is still known, and not at
   // registration, where it would only be one more anonymous failure among the
@@ -553,13 +553,13 @@ const readAgent = (
   if (providerSlug === "") {
     return invalid(
       `${path}.id`,
-      'ne contient aucun caractère utilisable dans un identifiant (attendu : lettres, chiffres, "-" ; ex. "copilot")',
+      'carries no usable character for an identifier (expected: letters, digits, "-"; e.g. "copilot")',
     )
   }
   const args = readStringArray(raw, path, "args")
   if (!args.ok) return args
   const cwd = raw["cwd"]
-  if (cwd !== undefined && typeof cwd !== "string") return invalid(`${path}.cwd`, "doit être une chaîne")
+  if (cwd !== undefined && typeof cwd !== "string") return invalid(`${path}.cwd`, "must be a string")
   const env = readStringRecord(raw, path, "env")
   if (!env.ok) return env
   const allowedTools = readStringArray(raw, path, "allowedTools")
@@ -604,7 +604,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     return {
       ok: false,
       message:
-        'options doit être un objet, par exemple { "agents": [{ "command": "copilot", "args": ["--acp"] }] }',
+        'options must be an object, for example { "agents": [{ "command": "copilot", "args": ["--acp"] }] }',
     }
   }
 
@@ -613,7 +613,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     refreshMs !== undefined &&
     (typeof refreshMs !== "number" || !Number.isFinite(refreshMs) || refreshMs < 0)
   ) {
-    return invalid("refreshMs", "doit être un nombre de millisecondes ≥ 0 (0 désactive le rafraîchissement)")
+    return invalid("refreshMs", "must be a number of milliseconds >= 0 (0 disables the refresh)")
   }
 
   // The two discovery bounds are validated **here** rather than read as-is: a
@@ -628,7 +628,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
   ) {
     return invalid(
       "discoveryTimeoutMs",
-      "doit être un nombre de millisecondes strictement positif (borne haute de la découverte)",
+      "must be a strictly positive number of milliseconds (upper bound of the discovery)",
     )
   }
   const discoveryIdleTimeoutMs = input["discoveryIdleTimeoutMs"]
@@ -640,7 +640,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
   ) {
     return invalid(
       "discoveryIdleTimeoutMs",
-      "doit être un nombre de millisecondes strictement positif (borne d'inactivité de l'agent)",
+      "must be a strictly positive number of milliseconds (inactivity bound of the agent)",
     )
   }
 
@@ -655,7 +655,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     return { ok: false, message: NO_AGENT_CONFIGURED }
   }
   if (!Array.isArray(raw)) {
-    return invalid("agents", 'doit être un tableau d\'objets [{ "command": "copilot", "args": ["--acp"] }]')
+    return invalid("agents", 'must be an array of objects [{ "command": "copilot", "args": ["--acp"] }]')
   }
   if (raw.length === 0) {
     return { ok: false, message: NO_AGENT_CONFIGURED }

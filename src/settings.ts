@@ -146,7 +146,7 @@ const optionalString = (
 ): { readonly ok: true; readonly value: string | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (typeof raw !== "string") return invalid(key, "doit être une chaîne")
+  if (typeof raw !== "string") return invalid(key, "must be a string")
   return { ok: true, value: raw }
 }
 
@@ -156,13 +156,13 @@ const optionalStringArray = (
 ): { readonly ok: true; readonly value: readonly string[] | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (!Array.isArray(raw)) return invalid(key, "doit être un tableau de chaînes")
+  if (!Array.isArray(raw)) return invalid(key, "must be an array of strings")
   // **Copy** rather than returning the received array: `Array.isArray` proves
   // nothing about its element type, and a copy built here is necessarily a
   // `string[]`, with no need to lie about the typing.
   const values: string[] = []
   for (const item of raw) {
-    if (typeof item !== "string") return invalid(key, "doit être un tableau de chaînes")
+    if (typeof item !== "string") return invalid(key, "must be an array of strings")
     values.push(item)
   }
   return { ok: true, value: values }
@@ -174,10 +174,10 @@ const optionalStringRecord = (
 ): { readonly ok: true; readonly value: Record<string, string> | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (!isRecord(raw)) return invalid(key, "doit être un objet de chaînes")
+  if (!isRecord(raw)) return invalid(key, "must be an object of strings")
   const entries: Record<string, string> = {}
   for (const [name, value] of Object.entries(raw)) {
-    if (typeof value !== "string") return invalid(`${key}.${name}`, "doit être une chaîne")
+    if (typeof value !== "string") return invalid(`${key}.${name}`, "must be a string")
     entries[name] = value
   }
   return { ok: true, value: entries }
@@ -190,12 +190,12 @@ const optionalEnum = <T extends string>(
 ): { readonly ok: true; readonly value: T | undefined } | { readonly ok: false; readonly message: string } => {
   const raw = input[key]
   if (raw === undefined) return { ok: true, value: undefined }
-  if (typeof raw !== "string") return invalid(key, `doit valoir ${allowed.map((v) => `"${v}"`).join(", ")}`)
+  if (typeof raw !== "string") return invalid(key, `must be one of ${allowed.map((v) => `"${v}"`).join(", ")}`)
   // The value is looked up in the list rather than admitted as-is: the list is
   // authoritative, so the type is correct by construction.
   const found = allowed.find((value) => value === raw)
   if (found === undefined) {
-    return invalid(key, `doit valoir ${allowed.map((v) => `"${v}"`).join(", ")}`)
+    return invalid(key, `must be one of ${allowed.map((v) => `"${v}"`).join(", ")}`)
   }
   return { ok: true, value: found }
 }
@@ -215,20 +215,20 @@ export const parseSettings = (input: unknown): SettingsResult => {
     return {
       ok: false,
       message:
-        "settings doit être un objet JSON, par exemple { \"command\": \"copilot\", \"args\": [\"--acp\"] }",
+        "settings must be a JSON object, for example { \"command\": \"copilot\", \"args\": [\"--acp\"] }",
     }
   }
 
   const command = optionalString(input, "command")
   if (!command.ok) return command
   if (command.value === undefined || command.value.trim() === "") {
-    return invalid("command", 'est obligatoire et ne peut pas être vide (ex. "copilot")')
+    return invalid("command", 'is mandatory and cannot be empty (e.g. "copilot")')
   }
 
   const provider = optionalString(input, "provider")
   if (!provider.ok) return provider
   if (provider.value !== undefined && provider.value.trim() === "") {
-    return invalid("provider", "ne peut pas être une chaîne vide — omets le champ pour le provider par défaut")
+    return invalid("provider", "cannot be an empty string - omit the field for the default provider")
   }
 
   const args = optionalStringArray(input, "args")
@@ -236,7 +236,7 @@ export const parseSettings = (input: unknown): SettingsResult => {
   const cwd = optionalString(input, "cwd")
   if (!cwd.ok) return cwd
   if (cwd.value !== undefined && cwd.value.trim() === "") {
-    return invalid("cwd", "ne peut pas être une chaîne vide — omets le champ pour ne pas fixer de répertoire")
+    return invalid("cwd", "cannot be an empty string - omit the field to leave the directory unset")
   }
   const env = optionalStringRecord(input, "env")
   if (!env.ok) return env
@@ -251,7 +251,7 @@ export const parseSettings = (input: unknown): SettingsResult => {
   const effort = optionalString(input, "effort")
   if (!effort.ok) return effort
   if (effort.value !== undefined && effort.value.trim() === "") {
-    return invalid("effort", "ne peut pas être une chaîne vide — omets le champ pour ne pas forcer de niveau")
+    return invalid("effort", "cannot be an empty string - omit the field to force no level")
   }
 
   return {

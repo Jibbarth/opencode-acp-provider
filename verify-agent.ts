@@ -44,8 +44,8 @@ const argv = process.argv.slice(2)
 const command = argv[0]
 if (command === undefined || command === "-h" || command === "--help") {
   process.stderr.write(
-    "usage: verify:agent <commande> [args...]\n" +
-      "  ex. verify:agent copilot --acp\n" +
+    "usage: verify:agent <command> [args...]\n" +
+      "  e.g. verify:agent copilot --acp\n" +
       "       verify:agent opencode acp\n" +
       "       verify:agent npx -y @agentclientprotocol/codex-acp\n",
   )
@@ -109,7 +109,7 @@ const withTimeout = async <A>(work: Promise<A>, ms: number): Promise<A> => {
       work,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`délai de ${ms} ms dépassé`)),
+          () => reject(new Error(`timeout of ${ms} ms exceeded`)),
           ms,
         )
       }),
@@ -125,11 +125,11 @@ const withTimeout = async <A>(work: Promise<A>, ms: number): Promise<A> => {
 
 /** A minimal request; the contract is added by `renderRequest` itself. */
 const request = (text: string): NormalizedRequest => ({
-  system: ["Tu es un assistant de test."],
+  system: ["You are a test assistant."],
   tools: [
     {
       name: "read",
-      description: "Lit un fichier du projet",
+      description: "Reads a project file",
       schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
     },
   ],
@@ -156,7 +156,7 @@ const isPseudoModel = (id: string): boolean => {
 }
 
 const CONTRACT_ASK =
-  'Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"pong"}'
+  'Answer ONLY with this JSON object, no text around it: {"type":"text","text":"pong"}'
 
 /**
  * The provider id the probe prefixes model ids with, to ask OpenCode's own
@@ -183,7 +183,7 @@ try {
   // The agent could not even be launched. That is a fact about the agent, but
   // there is nothing left to qualify, so the run fails.
   process.stderr.write(
-    `# ECHEC : l'agent n'a pas démarré : ${error instanceof Error ? error.message : String(error)}\n`,
+    `# FAILURE: the agent did not start: ${error instanceof Error ? error.message : String(error)}\n`,
   )
   process.exit(1)
 }
@@ -192,18 +192,18 @@ try {
   const inventory = await withTimeout(agent.inventory(), PROBE_TIMEOUT_MS)
 
   process.stderr.write(`# agent        : ${agent.info.name} ${agent.info.version}\n`)
-  process.stderr.write(`# protocole    : v${agent.protocolVersion}\n`)
+  process.stderr.write(`# protocol    : v${agent.protocolVersion}\n`)
 
   // ── 1. initialize ─────────────────────────────────────────────────────────
   report(
     "initialize",
     agent.protocolVersion === 1 ? "ok" : "degrade",
-    `protocole v${agent.protocolVersion}`,
+    `protocol v${agent.protocolVersion}`,
   )
 
   // ── 2. configOptions: presence and shape ─────────────────────────────────
   if (inventory.options.length === 0) {
-    report("configOptions", "absent", "aucune configOption : le modèle est le seul réglage")
+    report("configOptions", "absent", "no configOption: the model is the only setting")
   } else {
     for (const option of inventory.options) {
       process.stderr.write(
@@ -219,23 +219,23 @@ try {
       // would accidentally succeed - which is exactly how such a mistake can
       // survive on one agent and break on the next.
       process.stderr.write(
-        `#   note : id == catégorie pour ${idEqualsCategory.map((o) => o.id).join(", ")} ` +
-          "(envoi d'une catégorie accepté par accident sur cet agent)\n",
+        `#   note: id == category for ${idEqualsCategory.map((o) => o.id).join(", ")} ` +
+          "(a category sent by accident and accepted by this agent)\n",
       )
     }
     report(
       "configOptions",
       unknownCategory.length === 0 ? "ok" : "degrade",
       unknownCategory.length === 0
-        ? `${inventory.options.length} option(s), toutes classées`
-        : `${inventory.options.length} option(s) — catégorie inconnue : ${unknownCategory.map((o) => o.id).join(", ")}`,
+        ? `${inventory.options.length} option(s), all categorised`
+        : `${inventory.options.length} option(s) - unknown category: ${unknownCategory.map((o) => o.id).join(", ")}`,
     )
   }
 
   // ── 3. models proposed ───────────────────────────────────────────────────
   const published = inventoryToModels(inventory)
   if (inventory.models.length === 0) {
-    report("models", "absent", "aucun modèle : le provider ne peut rien publier")
+    report("models", "absent", "no model: the provider can publish nothing")
   } else {
     const filtered = inventory.models.length - published.length
     // A `/` inside a model id is **not** a defect, and this probe used to
@@ -259,19 +259,19 @@ try {
       })
     const slashed = published.filter((model) => model.id.includes("/")).length
     const detail =
-      `${inventory.models.length} valeur(s), ${published.length} publiée(s)` +
+      `${inventory.models.length} value(s), ${published.length} published` +
       (filtered > 0 ? ` (${filtered} pseudo-valeur(s))` : "") +
-      (slashed > 0 ? ` — dont ${slashed} avec « / », intactes après Model.Ref.parse` : "")
+      (slashed > 0 ? ` - ${slashed} of them with "/", intact after Model.Ref.parse` : "")
     report(
       "models",
       unusable.length === 0 ? "ok" : "broken",
-      unusable.length === 0 ? detail : `id que Model.Ref.parse refuse : ${unusable.join(", ")}`,
+      unusable.length === 0 ? detail : `id that Model.Ref.parse refuses: ${unusable.join(", ")}`,
     )
   }
 
   // ── 4. effort levels ─────────────────────────────────────────────────────
   if (inventory.thoughtLevels.length === 0) {
-    report("thoughtLevel", "absent", "aucun niveau d'effort : les variantes ne seront pas publiées")
+    report("thoughtLevel", "absent", "no effort level: the variants will not be published")
   } else {
     report(
       "thoughtLevel",
@@ -282,7 +282,7 @@ try {
 
   // ── 5. modes ─────────────────────────────────────────────────────────────
   if (inventory.modes.length === 0) {
-    report("mode", "absent", "aucun mode")
+    report("mode", "absent", "no mode")
   } else {
     // Measured: copilot publishes URL ids, `opencode acp` plain strings.
     // `shortenModeId` handles both, so this is a report, not a defect.
@@ -292,13 +292,13 @@ try {
       "mode",
       "ok",
       `${inventory.modes.length} : ${inventory.modes.map((m) => m.id).join(", ")}` +
-        (urls.length === 0 ? " (chaînes simples)" : ` (${urls.length} URL)`),
+        (urls.length === 0 ? " (plain strings)" : ` (${urls.length} URLs)`),
     )
   }
 
   // ── 6. permissions category ──────────────────────────────────────────────
   if (inventory.permissions === undefined) {
-    report("permissions", "absent", "aucune catégorie permissions (l'agent n'expose pas ses outils)")
+    report("permissions", "absent", "no permissions category (the agent does not expose its tools)")
   } else {
     report("permissions", "ok", `id=${inventory.permissions.id} current=${inventory.permissions.currentValue}`)
   }
@@ -308,11 +308,11 @@ try {
   try {
     const effortOption = session.inventory().options.find((o) => o.category === "thought_level")
     if (effortOption === undefined) {
-      report("set_config_option(effort)", "absent", "aucune option de catégorie thought_level")
+      report("set_config_option(effort)", "absent", "no option of category thought_level")
     } else {
       const target = effortOption.values.find((v) => v !== effortOption.currentValue)
       if (target === undefined) {
-        report("set_config_option(effort)", "absent", "un seul niveau : rien à changer")
+        report("set_config_option(effort)", "absent", "a single level: nothing to change")
       } else {
         // Sent through the portable contract by **id**. A category here is
         // refused by every agent measured, so this is where the id/category
@@ -322,7 +322,7 @@ try {
         report(
           "set_config_option(effort)",
           now === target ? "ok" : "broken",
-          `id=${effortOption.id} → ${String(target)}${now === target ? "" : ` (reçu ${String(now)})`}`,
+          `id=${effortOption.id} → ${String(target)}${now === target ? "" : ` (received ${String(now)})`}`,
         )
       }
     }
@@ -330,7 +330,7 @@ try {
 
     const modelOption = session.inventory().options.find((o) => o.category === "model")
     if (modelOption === undefined) {
-      report("set_config_option(model)", "absent", "aucune option de catégorie model")
+      report("set_config_option(model)", "absent", "no option of category model")
     } else {
       // A **concrete** second model: a pseudo-value (`auto`) changes what the
       // agent publishes, so switching to one would prove the switch and nothing
@@ -339,14 +339,14 @@ try {
         modelOption.values.find((v) => v !== modelOption.currentValue && !isPseudoModel(v)) ??
         modelOption.values.find((v) => v !== modelOption.currentValue)
       if (target === undefined) {
-        report("set_config_option(model)", "absent", "un seul modèle : rien à changer")
+        report("set_config_option(model)", "absent", "a single model: nothing to change")
       } else {
         await session.setModel(target)
         const now = session.inventory().options.find((o) => o.id === modelOption.id)?.currentValue
         report(
           "set_config_option(model)",
           now === target ? "ok" : "broken",
-          `id=${modelOption.id} → ${String(target)}${now === target ? "" : ` (reçu ${String(now)})`}`,
+          `id=${modelOption.id} → ${String(target)}${now === target ? "" : ` (received ${String(now)})`}`,
         )
       }
     }
@@ -363,12 +363,12 @@ try {
         )
       }
       if (text.trim() === "") {
-        report("outputContract", "absent", "l'agent n'a rien répondu")
+        report("outputContract", "absent", "the agent answered nothing")
         return
       }
       const parsed = parseAgentOutput(text, [])
       if (parsed.ok) {
-        report("outputContract", "ok", `objet JSON exploitable (${text.trim().slice(0, 60)})`)
+        report("outputContract", "ok", `usable JSON object (${text.trim().slice(0, 60)})`)
         return
       }
       // The agent answered, but not in our format. `parseAgentOutput` is
@@ -398,14 +398,14 @@ try {
       const { all } = await drain(
         ask.prompt(
           request(
-            "Écris le fichier `sonde-acp.txt` dans le répertoire courant avec le contenu « x », " +
-              'puis réponds UNIQUEMENT par {"type":"text","text":"fait"}.',
+            "Write the file `probe-acp.txt` in the current directory with the content \"x\", " +
+              'then answer ONLY with {"type":"text","text":"done"}.',
           ),
         ),
       )
       const asked = all.filter((e) => e.type === "permission")
       if (asked.length === 0) {
-        report("request_permission", "absent", "l'agent n'a rien demandé pendant le tour")
+        report("request_permission", "absent", "the agent asked for nothing during the turn")
         return
       }
       const kinds = asked.flatMap((e) =>
@@ -436,20 +436,20 @@ try {
       // finished would make the probe meaningless.
       setTimeout(() => controller.abort(), 1_500)
       const { all } = await drain(
-        session.prompt(request('Réponds UNIQUEMENT par {"type":"text","text":"pong"}.'), {
+        session.prompt(request('Answer ONLY with {"type":"text","text":"pong"}.'), {
           signal: controller.signal,
         }),
       )
       const done = all.find((e) => e.type === "done")
       if (done === undefined || done.type !== "done") {
-        report("cancel", "absent", "le tour s'est terminé sans `done` : rien à observer")
+        report("cancel", "absent", "the turn ended without `done`: nothing to observe")
         return
       }
       if (done.stopReason === "end_turn") {
         // The agent answered before the abort landed. Nothing was cancelled, so
         // the probe has learned **nothing** about cancellation - which is not the
         // agent failing, and must not be reported as if it were.
-        report("cancel", "absent", "le tour s'est terminé avant l'abandon : annulation non observée")
+        report("cancel", "absent", "the turn ended before the abort: cancellation not observed")
         return
       }
       report("cancel", done.stopReason === "cancelled" ? "ok" : "degrade", `stopReason=${done.stopReason}`)
@@ -473,8 +473,8 @@ try {
         "sessionIsolation",
         refused === undefined ? "broken" : "ok",
         refused === undefined
-          ? "un second tour concurrent a été accepté"
-          : `le second est refusé : ${refused instanceof Error ? refused.message : String(refused)}`,
+          ? "a second concurrent turn was accepted"
+          : `the second is refused: ${refused instanceof Error ? refused.message : String(refused)}`,
       )
     })
   } finally {
@@ -489,13 +489,13 @@ try {
 // ─────────────────────────────────────────────────────────────────────────────
 
 process.stderr.write("\n")
-process.stderr.write("# CONFORMITÉ\n")
+process.stderr.write("# CONFORMANCE\n")
 for (const entry of reports) {
   const detail = entry.detail === "" ? "" : `  ${entry.detail}`
   process.stderr.write(`  [${MARK[entry.verdict]}] ${entry.capability}${detail}\n`)
   if (entry.verdict === "broken") defects++
 }
 process.stderr.write(
-  `\n# VERDICT : ${defects === 0 ? "CONFORME" : `${defects} DÉFAUT(S) DE NOTRE CODE`}\n`,
+  `\n# VERDICT: ${defects === 0 ? "CONFORM" : `${defects} DEFECT(S) IN OUR CODE`}\n`,
 )
 process.exit(defects === 0 ? 0 : 1)

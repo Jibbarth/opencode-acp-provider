@@ -68,7 +68,7 @@ import type { AcpProviderSettings } from "../src/settings.js"
 const FAKE = fileURLToPath(new URL("./fake-acp.ts", import.meta.url))
 
 /** The marker in `test/fake-acp.ts` that separates two deposited prompts. */
-const SEPARATOR = "-----8<-- PROMPT REÇU --8<-----"
+const SEPARATOR = "-----8<-- PROMPT RECEIVED --8<-----"
 
 afterAll(async () => {
   // Agents **and** sessions are cached at module level: without this close,
@@ -107,7 +107,7 @@ const occurrences = (haystack: string, needle: string): number =>
  */
 const at = (index: number): NormalizedMessage => {
   const message = CONVERSATION[index]
-  if (message === undefined) throw new Error(`CONVERSATION[${String(index)}] est absent`)
+  if (message === undefined) throw new Error(`CONVERSATION[${String(index)}] is absent`)
   return message
 }
 
@@ -174,10 +174,10 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * **orphan** - a test failure with no cause, unrelated to the serialisation
  * being checked.
  */
-const within = async <A>(promise: Promise<A>, ms = 1_000, what = "la promesse"): Promise<A> => {
+const within = async <A>(promise: Promise<A>, ms = 1_000, what = "the promise"): Promise<A> => {
   let annuler: (() => void) | undefined
   const timeout = new Promise<never>((_resolve, reject) => {
-    const id = setTimeout(() => reject(new Error(`${what} n'a pas été satisfaite en ${ms} ms`)), ms)
+    const id = setTimeout(() => reject(new Error(`${what} was not satisfied within ${ms} ms`)), ms)
     annuler = () => clearTimeout(id)
   })
   try {
@@ -210,28 +210,28 @@ describe("session key: stable, and distinct when it must be", () => {
   })
 
   test("a prepended message changes the key", () => {
-    const sans = sessionKey(IDENTITY, [assistant("A1")])
-    const avec = sessionKey(IDENTITY, [user("M1"), assistant("A1")])
-    expect(avec).not.toBe(sans)
+    const withoutPrefix = sessionKey(IDENTITY, [assistant("A1")])
+    const withPrefix = sessionKey(IDENTITY, [user("M1"), assistant("A1")])
+    expect(withPrefix).not.toBe(withoutPrefix)
   })
 
   test("a model change changes the key", () => {
     // An ACP session applied its model before its first turn: its memory is not
     // that of another model.
-    const autre: SessionIdentity = { ...IDENTITY, model: "claude-sonnet-5" }
-    expect(sessionKey(autre, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
+    const other: SessionIdentity = { ...IDENTITY, model: "claude-sonnet-5" }
+    expect(sessionKey(other, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
   })
 
   test("a different cwd changes the key", () => {
     // Two projects must never share an agent's memory.
-    const autre: SessionIdentity = { ...IDENTITY, cwd: "/srv/autre" }
-    expect(sessionKey(autre, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
+    const other: SessionIdentity = { ...IDENTITY, cwd: "/srv/other" }
+    expect(sessionKey(other, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
   })
 
   test("a different agent changes the key", () => {
     // Two commands have two memories, even when they look alike.
-    const autre: SessionIdentity = { ...IDENTITY, agent: "codex --acp" }
-    expect(sessionKey(autre, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
+    const other: SessionIdentity = { ...IDENTITY, agent: "codex --acp" }
+    expect(sessionKey(other, CONVERSATION)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
   })
 
   test("a different first message changes the key", () => {
@@ -252,12 +252,12 @@ describe("session key: stable, and distinct when it must be", () => {
     // session that lost its anchor can still be recognised as theirs.
     expect(conversationKey(IDENTITY)).toBe(conversationKey(IDENTITY))
     expect(conversationKey(IDENTITY)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
-    for (const autre of [
+    for (const other of [
       { ...IDENTITY, agent: "codex --acp" },
-      { ...IDENTITY, cwd: "/srv/autre" },
+      { ...IDENTITY, cwd: "/srv/other" },
       { ...IDENTITY, model: "claude-sonnet-5" },
     ] satisfies SessionIdentity[]) {
-      expect(conversationKey(autre)).not.toBe(conversationKey(IDENTITY))
+      expect(conversationKey(other)).not.toBe(conversationKey(IDENTITY))
     }
   })
 
@@ -274,7 +274,7 @@ describe("session key: stable, and distinct when it must be", () => {
 
 describe("message digest: sensitive to role and tool identity", () => {
   test("two messages with the same text but different roles do not share a digest", () => {
-    // Without the role in the digest, rewriting "Utilisateur : x" as
+    // Without the role in the digest, rewriting "User : x" as
     // "Assistant : x" would pass for an addition - and the delta would be wrong.
     expect(messageDigest(user("x"))).not.toBe(messageDigest(assistant("x")))
   })
@@ -288,8 +288,8 @@ describe("message digest: sensitive to role and tool identity", () => {
   })
 
   test("the tool name is part of the digest", () => {
-    const autre: NormalizedMessage = { role: "tool", id: "call-1", name: "bash", output: "# README" }
-    expect(messageDigest(tool("call-1", "# README"))).not.toBe(messageDigest(autre))
+    const other: NormalizedMessage = { role: "tool", id: "call-1", name: "bash", output: "# README" }
+    expect(messageDigest(tool("call-1", "# README"))).not.toBe(messageDigest(other))
   })
 
   test("two identical messages share the same digest", () => {
@@ -332,13 +332,13 @@ describe("continuity: is the received history an extension of the one already se
   test("an edited message breaks continuity at the right rank", () => {
     const previous = historyDigests(CONVERSATION)
     // The tool result is rewritten: same rank, same `id`, different content.
-    const edite = [...CONVERSATION.slice(0, 2), tool("call-1", "R1 modifié"), at(3)]
-    expect(isContinuous(previous, historyDigests(edite))).toBe(false)
+    const edited = [...CONVERSATION.slice(0, 2), tool("call-1", "R1 modified"), at(3)]
+    expect(isContinuous(previous, historyDigests(edited))).toBe(false)
   })
 
   test("a message inserted in the middle breaks continuity", () => {
-    const insere = [at(0), user("interposé"), ...CONVERSATION.slice(1)]
-    expect(isContinuous(historyDigests(CONVERSATION), historyDigests(insere))).toBe(false)
+    const inserted = [at(0), user("inserted"), ...CONVERSATION.slice(1)]
+    expect(isContinuous(historyDigests(CONVERSATION), historyDigests(inserted))).toBe(false)
   })
 
   test("two swapped messages break continuity", () => {
@@ -360,29 +360,29 @@ describe("shared messages: is this history the one that session was?", () => {
   test("a compaction keeps the recent tail, so the two histories overlap", () => {
     // What OpenCode's `/compact` does: a summary at rank 0, the recent messages
     // verbatim. That is the only thing making the session recognisable.
-    const avant = historyDigests(CONVERSATION)
-    const apres = historyDigests([user("résumé"), tool("call-1", "R1"), user("M4")])
-    expect(sharesMessage(avant, apres)).toBe(true)
-    expect(isContinuous(avant, apres)).toBe(false)
+    const before = historyDigests(CONVERSATION)
+    const after = historyDigests([user("summary"), tool("call-1", "R1"), user("M4")])
+    expect(sharesMessage(before, after)).toBe(true)
+    expect(isContinuous(before, after)).toBe(false)
   })
 
   test("a fork overlaps the branch it was taken from", () => {
-    const avant = historyDigests(CONVERSATION)
-    const branche = historyDigests([user("autre piste"), ...CONVERSATION])
-    expect(sharesMessage(avant, branche)).toBe(true)
+    const before = historyDigests(CONVERSATION)
+    const branche = historyDigests([user("other piste"), ...CONVERSATION])
+    expect(sharesMessage(before, branche)).toBe(true)
   })
 
   test("two conversations of the same project share nothing", () => {
     // The false positive that must never happen: a second tab would lose its
     // session on the strength of a coincidence.
-    const autre = historyDigests([user("Autre onglet"), assistant("Bonjour")])
-    expect(sharesMessage(historyDigests(CONVERSATION), autre)).toBe(false)
+    const other = historyDigests([user("Another tab"), assistant("Hello")])
+    expect(sharesMessage(historyDigests(CONVERSATION), other)).toBe(false)
   })
 
   test("an empty history shares nothing, and shares it with an empty one", () => {
-    const vide = historyDigests([])
-    expect(sharesMessage(vide, historyDigests(CONVERSATION))).toBe(false)
-    expect(sharesMessage(vide, vide)).toBe(false)
+    const emptyDigests = historyDigests([])
+    expect(sharesMessage(emptyDigests, historyDigests(CONVERSATION))).toBe(false)
+    expect(sharesMessage(emptyDigests, emptyDigests)).toBe(false)
   })
 })
 
@@ -393,7 +393,7 @@ describe("shared messages: is this history the one that session was?", () => {
 describe("turn plan: what the agent will receive", () => {
   test("first time: fresh session, whole history", () => {
     const plan = planTurn(undefined, historyDigests(CONVERSATION), CONVERSATION)
-    expect(plan).toEqual({ reuse: false, reason: "inconnue" })
+    expect(plan).toEqual({ reuse: false, reason: "unknown" })
   })
 
   test("resume: the delta is exactly the remainder, never the history", () => {
@@ -408,11 +408,11 @@ describe("turn plan: what the agent will receive", () => {
 
   test("rewritten history: fresh session, and the reason is named", () => {
     const previous = historyDigests(CONVERSATION)
-    const compacte = [user("résumé de la conversation")]
-    const plan = planTurn(previous, historyDigests(compacte), compacte)
+    const compacted = [user("summary of the conversation")]
+    const plan = planTurn(previous, historyDigests(compacted), compacted)
     expect(plan.reuse).toBe(false)
     if (plan.reuse) return
-    expect(plan.reason).toBe("historique")
+    expect(plan.reason).toBe("history")
   })
 
   test("replay of the same turn: never an empty delta", () => {
@@ -421,23 +421,23 @@ describe("turn plan: what the agent will receive", () => {
     const plan = planTurn(digests, digests, CONVERSATION)
     expect(plan.reuse).toBe(false)
     if (plan.reuse) return
-    // Note: the reason is `"historique"`, not `"vide"`. `isContinuous` requires
+    // Note: the reason is `"history"`, not `"empty"`. `isContinuous` requires
     // the history to have **grown**, so a replay at equal length is refused
     // before any delta is computed. Both reasons are a refusal to reuse, and
     // that refusal is what this test checks.
-    expect(plan.reason).toBe("historique")
+    expect(plan.reason).toBe("history")
   })
 
-  test("every refusal reason has a French label", () => {
+  test("every refusal reason has a readable label", () => {
     // A `reason` with no translation never reaches the user: it stays an English
     // keyword in a log.
     const motifs = [
-      "inconnue",
-      "historique",
-      "vide",
+      "unknown",
+      "history",
+      "empty",
     ] as const satisfies readonly ResumeRefusal[]
     for (const motif of motifs) {
-      expect(refusalLabel[motif]).toMatch(/[a-zà-ÿ]{4,}/)
+      expect(refusalLabel[motif]).toMatch(/[a-z]{4,}/)
       expect(refusalLabel[motif]).not.toContain("undefined")
     }
   })
@@ -452,17 +452,17 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    expect(premier.reused).toBe(false)
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    expect(first.reused).toBe(false)
     // A fresh session receives everything: the plan says so, and the caller uses
     // it.
-    expect(premier.delta).toEqual([user("M1")])
-    premier.release()
+    expect(first.delta).toEqual([user("M1")])
+    first.release()
 
     const second = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
     expect(second.reused).toBe(true)
     expect(second.reason).toBeNull()
-    expect(second.session).toBe(premier.session)
+    expect(second.session).toBe(first.session)
     second.release()
 
     expect(book.opened).toHaveLength(1)
@@ -473,8 +473,8 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, CONVERSATION.slice(0, 1), opening(book, "s1"))
-    premier.release()
+    const first = await pool.acquire(IDENTITY, CONVERSATION.slice(0, 1), opening(book, "s1"))
+    first.release()
     const second = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
     expect(second.delta).toEqual(CONVERSATION.slice(1))
     second.release()
@@ -484,15 +484,15 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-    premier.release()
+    const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+    first.release()
     // `/compact`: the history is no longer an extension.
-    const compacte = [user("M1"), user("résumé")]
-    const second = await pool.acquire(IDENTITY, compacte, opening(book, "s2"))
+    const compacted = [user("M1"), user("summary")]
+    const second = await pool.acquire(IDENTITY, compacted, opening(book, "s2"))
 
     expect(second.reused).toBe(false)
     if (second.reused) return
-    expect(second.reason).toBe("historique")
+    expect(second.reason).toBe("history")
     expect(book.opened).toHaveLength(2)
     // The old one is closed: nobody will reuse it, and keeping it in memory would
     // cost context in the agent for nothing.
@@ -504,13 +504,13 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    premier.release()
-    const autre: SessionIdentity = { ...IDENTITY, model: "claude-sonnet-5" }
-    const second = await pool.acquire(autre, CONVERSATION, opening(book, "s2"))
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    first.release()
+    const other: SessionIdentity = { ...IDENTITY, model: "claude-sonnet-5" }
+    const second = await pool.acquire(other, CONVERSATION, opening(book, "s2"))
 
     expect(second.reused).toBe(false)
-    expect(second.reason).toBe("inconnue")
+    expect(second.reason).toBe("unknown")
     expect(book.opened).toHaveLength(2)
     second.release()
   })
@@ -525,7 +525,7 @@ describe("session pool: reuse and delta", () => {
   describe("a rewritten anchor", () => {
     /** A compaction of {@link CONVERSATION}: summary in, recent tail kept. */
     const COMPACTED: readonly NormalizedMessage[] = [
-      user("résumé de M1 à M3"),
+      user("summary from M1 to M3"),
       tool("call-1", "R1"),
       user("M4"),
     ]
@@ -534,17 +534,17 @@ describe("session pool: reuse and delta", () => {
       const pool = new SessionPool<FakeSession>()
       const book = ledger()
 
-      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-      premier.release()
-      const apres = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
+      const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      first.release()
+      const after = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
 
-      expect(apres.reused).toBe(false)
+      expect(after.reused).toBe(false)
       expect(book.opened).toHaveLength(2)
       expect(book.opened[0]?.closed).toBe(true)
       // The one that carries the compacted conversation is the only one left.
       expect(pool.size).toBe(1)
       expect(pool.keys()).toEqual([sessionKey(IDENTITY, COMPACTED)])
-      apres.release()
+      after.release()
     })
 
     test("repeating it never accumulates sessions, bound or not", async () => {
@@ -553,12 +553,12 @@ describe("session pool: reuse and delta", () => {
       const book = ledger()
       let history: readonly NormalizedMessage[] = CONVERSATION
 
-      for (let tour = 0; tour < 5; tour += 1) {
-        const lease = await pool.acquire(IDENTITY, history, opening(book, `s${String(tour)}`))
+      for (let turn = 0; turn < 5; turn += 1) {
+        const lease = await pool.acquire(IDENTITY, history, opening(book, `s${String(turn)}`))
         lease.release()
         expect(pool.size).toBe(1)
         // A new summary, the same kept tail, a new pending message.
-        history = [user(`résumé ${String(tour)}`), tool("call-1", "R1"), user(`M${String(tour)}bis`)]
+        history = [user(`summary ${String(turn)}`), tool("call-1", "R1"), user(`M${String(turn)}bis`)]
       }
 
       expect(book.opened).toHaveLength(5)
@@ -574,10 +574,10 @@ describe("session pool: reuse and delta", () => {
       const pool = new SessionPool<FakeSession>()
       const book = ledger()
 
-      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-      premier.release()
-      const autre = await pool.acquire(IDENTITY, [user("Autre onglet"), assistant("Bonjour")], opening(book, "s2"))
-      autre.release()
+      const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      first.release()
+      const other = await pool.acquire(IDENTITY, [user("Another tab"), assistant("Hello")], opening(book, "s2"))
+      other.release()
 
       expect(book.opened[0]?.closed).toBe(false)
       expect(pool.size).toBe(2)
@@ -591,24 +591,24 @@ describe("session pool: reuse and delta", () => {
       const pool = new SessionPool<FakeSession>()
       const book = ledger()
 
-      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-      const apres = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
+      const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      const after = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
       expect(book.opened[0]?.closed).toBe(false)
-      premier.release()
-      apres.release()
-      const suivant = await pool.acquire(
+      first.release()
+      after.release()
+      const next = await pool.acquire(
         IDENTITY,
         [...COMPACTED, assistant("A4")],
         opening(book, "s3"),
       )
-      expect(suivant.reused).toBe(true)
+      expect(next.reused).toBe(true)
       expect(book.opened).toHaveLength(2)
       expect(book.opened[0]?.closes).toBe(0)
-      suivant.release()
+      next.release()
       // A second compaction is a key miss, and now the orphan is collectable.
-      const encore = await pool.acquire(IDENTITY, [user("résumé 2"), tool("call-1", "R1")], opening(book, "s4"))
+      const again = await pool.acquire(IDENTITY, [user("summary 2"), tool("call-1", "R1")], opening(book, "s4"))
       expect(book.opened[0]?.closes).toBe(1)
-      encore.release()
+      again.release()
     })
 
     test("replacing a session closes it exactly once", async () => {
@@ -616,20 +616,20 @@ describe("session pool: reuse and delta", () => {
       const pool = new SessionPool<FakeSession>()
       const book = ledger()
 
-      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-      premier.release()
+      const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      first.release()
       // Anchor intact, tail rewritten: the key still matches, so this is a
       // **replacement**, and the sweep must not add a second close.
       const reecrit = [user("M1"), assistant("A1"), user("M2 modifie")]
       const second = await pool.acquire(IDENTITY, reecrit, opening(book, "s2"))
       expect(second.reused).toBe(false)
       if (second.reused) return
-      expect(second.reason).toBe("historique")
+      expect(second.reason).toBe("history")
       expect(book.opened[0]?.closes).toBe(1)
       second.release()
       // And a later rewrite of the new session closes it once too.
-      const troisieme = await pool.acquire(IDENTITY, [user("M1 modifie"), assistant("A1")], opening(book, "s3"))
-      troisieme.release()
+      const third = await pool.acquire(IDENTITY, [user("M1 modifie"), assistant("A1")], opening(book, "s3"))
+      third.release()
       expect(book.opened[1]?.closes).toBe(1)
     })
 
@@ -639,20 +639,20 @@ describe("session pool: reuse and delta", () => {
       const pool = new SessionPool<FakeSession>()
       const book = ledger()
 
-      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-      premier.release()
-      const cassee: FakeSession = new FakeSession("cassee")
-      cassee.close = () => Promise.reject(new Error("session déjà morte"))
-      const apres = await within(
-        pool.acquire(IDENTITY, COMPACTED, () => Promise.resolve(cassee)),
+      const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      first.release()
+      const broken: FakeSession = new FakeSession("broken")
+      broken.close = () => Promise.reject(new Error("session already dead"))
+      const after = await within(
+        pool.acquire(IDENTITY, COMPACTED, () => Promise.resolve(broken)),
         1_000,
-        "le tour après compaction",
+        "the turn after compaction",
       )
 
-      expect(apres.reused).toBe(false)
-      expect(apres.delta).toEqual(COMPACTED)
+      expect(after.reused).toBe(false)
+      expect(after.delta).toEqual(COMPACTED)
       expect(pool.size).toBe(1)
-      apres.release()
+      after.release()
     })
   })
 
@@ -660,10 +660,10 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    premier.release()
-    const autre: SessionIdentity = { ...IDENTITY, cwd: "/srv/autre" }
-    const second = await pool.acquire(autre, CONVERSATION, opening(book, "s2"))
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    first.release()
+    const other: SessionIdentity = { ...IDENTITY, cwd: "/srv/other" }
+    const second = await pool.acquire(other, CONVERSATION, opening(book, "s2"))
 
     expect(second.reused).toBe(false)
     second.release()
@@ -673,16 +673,16 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-    premier.release()
+    const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+    first.release()
     const rejeu = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
 
     expect(rejeu.reused).toBe(false)
     if (rejeu.reused) return
-    // Note: `"historique"`, not `"vide"`. The history did not grow, so
+    // Note: `"history"`, not `"empty"`. The history did not grow, so
     // `isContinuous` refuses the resume before any delta is computed. What
     // matters here is the refusal - and above all the complete fallback below.
-    expect(rejeu.reason).toBe("historique")
+    expect(rejeu.reason).toBe("history")
     // The fallback must stay **complete**: that is what guarantees the agent
     // receives a whole conversation.
     expect(rejeu.delta).toEqual(CONVERSATION)
@@ -696,9 +696,9 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    premier.poison()
-    premier.release()
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    first.poison()
+    first.release()
     // The close happens on release, not before: a stream is not cut from under
     // its consumer.
     const second = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
@@ -709,7 +709,7 @@ describe("session pool: reuse and delta", () => {
     // release, so the next turn is simply a first turn. That is the wanted
     // behaviour: a poisoned session must not haunt the pool, and the whole
     // history goes out again.
-    expect(second.reason).toBe("inconnue")
+    expect(second.reason).toBe("unknown")
     expect(second.delta).toEqual(CONVERSATION)
     expect(book.opened[0]?.closed).toBe(true)
     expect(book.opened).toHaveLength(2)
@@ -720,13 +720,13 @@ describe("session pool: reuse and delta", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const tour = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    tour.poison()
+    const turn = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    turn.poison()
     // Before the release, the session is still its own: the pool cannot close a
     // session whose turn is running.
     expect(book.opened[0]?.closed).toBe(false)
     expect(pool.size).toBe(1)
-    tour.release()
+    turn.release()
     expect(book.opened[0]?.closed).toBe(true)
   })
 
@@ -738,16 +738,16 @@ describe("session pool: reuse and delta", () => {
     // did not exist.
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
-    const tour = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    tour.poison()
-    tour.release()
-    tour.release()
+    const turn = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    turn.poison()
+    turn.release()
+    turn.release()
     expect(book.opened[0]?.closes).toBe(1)
     // The key's queue is not corrupted: the next turn goes through.
-    const suivant = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
-    expect(suivant.reused).toBe(false)
+    const next = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
+    expect(next.reused).toBe(false)
     expect(pool.size).toBe(1)
-    suivant.release()
+    next.release()
   })
 
   test("a normal exit keeps the session in the pool", async () => {
@@ -756,17 +756,17 @@ describe("session pool: reuse and delta", () => {
     // `session/new` on the next turn.
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
-    const tour = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    tour.release()
+    const turn = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    turn.release()
     expect(book.opened[0]?.closed).toBe(false)
     expect(book.opened[0]?.closes).toBe(0)
     expect(pool.size).toBe(1)
     // And it is indeed reused, with no session reopened.
-    const suivant = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
-    expect(suivant.reused).toBe(true)
-    expect(suivant.session).toBe(tour.session)
+    const next = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2"))
+    expect(next.reused).toBe(true)
+    expect(next.session).toBe(turn.session)
     expect(book.opened).toHaveLength(1)
-    suivant.release()
+    next.release()
   })
 })
 
@@ -779,7 +779,7 @@ describe("session pool: one turn at a time per session", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
     // The second one is on the **same** key (same conversation, longer
     // history): it must wait, otherwise `session/prompt` would receive two
     // concurrent turns - the invariant already stated in `acp/agent.ts`.
@@ -787,8 +787,8 @@ describe("session pool: one turn at a time per session", () => {
     await delay(20)
     expect(book.opened).toHaveLength(1)
 
-    premier.release()
-    const second = await within(attente, 1_000, "le second tour")
+    first.release()
+    const second = await within(attente, 1_000, "the second turn")
     expect(second.reused).toBe(true)
     expect(book.opened).toHaveLength(1)
     second.release()
@@ -798,21 +798,21 @@ describe("session pool: one turn at a time per session", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    const deux = pool.acquire(IDENTITY, [user("M1"), user("M2")], opening(book, "s2"))
-    const trois = pool.acquire(IDENTITY, [user("M1"), user("M2"), user("M3")], opening(book, "s3"))
+    const first = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    const twoTurns = pool.acquire(IDENTITY, [user("M1"), user("M2")], opening(book, "s2"))
+    const threeTurns = pool.acquire(IDENTITY, [user("M1"), user("M2"), user("M3")], opening(book, "s3"))
 
     // Each release only frees **the** next one: it is a queue, not a signal. A
     // pool waking everybody at once would leave two concurrent turns on the same
     // session.
     const ordre: number[] = []
-    premier.release()
-    const second = await within(deux, 1_000, "le deuxième tour")
+    first.release()
+    const second = await within(twoTurns, 1_000, "the second turn")
     ordre.push(2)
     second.release()
-    const troisieme = await within(trois, 1_000, "le troisième tour")
+    const third = await within(threeTurns, 1_000, "the third turn")
     ordre.push(3)
-    troisieme.release()
+    third.release()
 
     expect(ordre).toEqual([2, 3])
     // One single session for the three turns: they share the same key.
@@ -829,7 +829,7 @@ describe("session pool: one turn at a time per session", () => {
     const b = await within(
       pool.acquire(IDENTITY, [user("M2")], opening(book, "s2")),
       500,
-      "la conversation B",
+      "conversation B",
     )
     expect(b.session).not.toBe(a.session)
     expect(pool.size).toBe(2)
@@ -845,19 +845,19 @@ describe("session pool: one turn at a time per session", () => {
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
 
-    const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
-    premier.release()
+    const first = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+    first.release()
     await expect(
       pool.acquire(IDENTITY, CONVERSATION, () => Promise.reject(new Error("agent mort"))),
     ).rejects.toThrow("agent mort")
 
-    const suivant = await within(
+    const next = await within(
       pool.acquire(IDENTITY, CONVERSATION, opening(book, "s2")),
       1_000,
-      "le tour suivant",
+      "the following turn",
     )
-    expect(suivant.reused).toBe(false)
-    suivant.release()
+    expect(next.reused).toBe(false)
+    next.release()
   })
 })
 
@@ -891,12 +891,12 @@ describe("session pool: bounded LRU", () => {
     const book = ledger()
 
     const occupe = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    const autre = await pool.acquire(IDENTITY, [user("M2")], opening(book, "s2"))
+    const other = await pool.acquire(IDENTITY, [user("M2")], opening(book, "s2"))
     expect(book.opened[0]?.closed).toBe(false)
     // The ceiling is therefore exceeded by one per in-flight turn - and no more.
     expect(pool.size).toBe(2)
     occupe.release()
-    autre.release()
+    other.release()
   })
 
   test("a resumed session is not the oldest", async () => {
@@ -924,9 +924,9 @@ describe("session pool: bounded LRU", () => {
     // turn in flight.
     const pool = new SessionPool<FakeSession>({ max: 0 })
     const book = ledger()
-    const tour = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    expect(tour.reused).toBe(false)
-    tour.release()
+    const turn = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    expect(turn.reused).toBe(false)
+    turn.release()
     expect(pool.size).toBe(1)
   })
 
@@ -956,15 +956,15 @@ describe("session pool: bounded LRU", () => {
     // process from dying.
     const pool = new SessionPool<FakeSession>()
     const book = ledger()
-    const tour = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
-    const autre = await pool.acquire(IDENTITY, [user("M2")], opening(book, "s2"))
+    const turn = await pool.acquire(IDENTITY, [user("M1")], opening(book, "s1"))
+    const other = await pool.acquire(IDENTITY, [user("M2")], opening(book, "s2"))
 
     await pool.closeAll()
     expect(pool.size).toBe(0)
     expect(book.opened.map((session) => session.closed)).toEqual([true, true])
     // The late release must not reopen anything.
-    tour.release()
-    autre.release()
+    turn.release()
+    other.release()
     expect(book.opened.map((session) => session.closes)).toEqual([1, 1])
   })
 
@@ -975,9 +975,9 @@ describe("session pool: bounded LRU", () => {
     const livreuse = ledger()
     const premiere = await pool.acquire(IDENTITY, [user("M1")], opening(livreuse, "s1"))
     premiere.release()
-    const cassee: FakeSession = new FakeSession("cassee")
-    cassee.close = () => Promise.reject(new Error("session déjà morte"))
-    const a = await pool.acquire(IDENTITY, [user("M2")], () => Promise.resolve(cassee))
+    const broken: FakeSession = new FakeSession("broken")
+    broken.close = () => Promise.reject(new Error("session already dead"))
+    const a = await pool.acquire(IDENTITY, [user("M2")], () => Promise.resolve(broken))
     a.release()
     const c = await within(pool.acquire(IDENTITY, [user("M3")], opening(livreuse, "s3")), 1_000)
     expect(c.reused).toBe(false)
@@ -1009,7 +1009,7 @@ const fakeSettings = (
 }
 
 /** A `TransportRuntime` that is never called: the ACP transport does no HTTP. */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 /** The prompts deposited by the fake agent, in the order received. */
 const readPrompts = async (file: string): Promise<readonly string[]> =>
@@ -1032,7 +1032,7 @@ const runTurn = async (
       }),
     ).pipe(Effect.result),
   )
-  if (Result.isFailure(outcome)) throw new Error(`le flux a échoué : ${outcome.failure.message}`)
+  if (Result.isFailure(outcome)) throw new Error(`the stream failed: ${outcome.failure.message}`)
   return outcome.success
 }
 
@@ -1042,11 +1042,11 @@ type Step = { readonly role: "user" | "assistant" | "tool"; readonly text: strin
 const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMRequest =>
   new LLMRequest({
     model: languageModel,
-    system: [SystemPart.make("Tu es un assistant.")],
+    system: [SystemPart.make("You are an assistant.")],
     tools: [
       ToolEntry.make({
         name: "read",
-        description: "Lit un fichier du projet",
+        description: "Reads a project file",
         inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
       }),
     ],
@@ -1071,14 +1071,14 @@ const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMReq
   })
 
 /** The three turns of a scripted conversation, with unique markers. */
-const TOUR_1: readonly Step[] = [{ role: "user", text: "MARQUEUR-1 PING" }]
+const TOUR_1: readonly Step[] = [{ role: "user", text: "MARKER-1 PING" }]
 const TOUR_2: readonly Step[] = [
   ...TOUR_1,
-  { role: "assistant", text: "APPEL-1" },
-  { role: "tool", text: "RESULTAT-1" },
-  { role: "user", text: "MARQUEUR-2 PING" },
+  { role: "assistant", text: "CALL-1" },
+  { role: "tool", text: "RESULT-1" },
+  { role: "user", text: "MARKER-2 PING" },
 ]
-const TOUR_3: readonly Step[] = [...TOUR_2, { role: "user", text: "MARQUEUR-3 PING" }]
+const TOUR_3: readonly Step[] = [...TOUR_2, { role: "user", text: "MARKER-3 PING" }]
 
 describe("end to end: resume sends only the delta", () => {
   const temporary: string[] = []
@@ -1104,9 +1104,9 @@ describe("end to end: resume sends only the delta", () => {
     const prompts = await readPrompts(file)
     expect(prompts).toHaveLength(1)
     const prompt = prompts[0] ?? ""
-    expect(occurrences(prompt, "MARQUEUR-1")).toBe(1)
+    expect(occurrences(prompt, "MARKER-1")).toBe(1)
     expect(prompt).toContain("## Conversation\n")
-    expect(prompt).not.toContain("## Conversation — suite")
+    expect(prompt).not.toContain("## Conversation - continued")
   })
 
   test("the second turn receives ONLY the new messages", async () => {
@@ -1121,24 +1121,24 @@ describe("end to end: resume sends only the delta", () => {
     expect(prompts).toHaveLength(2)
     const second = prompts[1] ?? ""
 
-    // Note: **the proof.** "MARQUEUR-1" was already in the first prompt:
+    // Note: **the proof.** "MARKER-1" was already in the first prompt:
     // sending it again would produce a duplicated history, and the agent would
     // see every message twice. Zero occurrences, then.
-    expect(occurrences(second, "MARQUEUR-1")).toBe(0)
+    expect(occurrences(second, "MARKER-1")).toBe(0)
 
     // The delta itself is complete: tool call, tool result, new question - each
     // exactly once, in order.
     const conversation = conversationOf(second)
-    expect(occurrences(conversation, "APPEL-1")).toBe(1)
-    expect(occurrences(conversation, "RESULTAT-1")).toBe(1)
-    expect(occurrences(conversation, "MARQUEUR-2")).toBe(1)
-    expect(conversation).toContain("## Conversation — suite")
-    expect(conversation).toContain("déjà échangés")
+    expect(occurrences(conversation, "CALL-1")).toBe(1)
+    expect(occurrences(conversation, "RESULT-1")).toBe(1)
+    expect(occurrences(conversation, "MARKER-2")).toBe(1)
+    expect(conversation).toContain("## Conversation - continued")
+    expect(conversation).toContain("already exchanged")
 
     // And the prompt stays **complete**: the output contract always closes the
     // message, and the tool catalogue is always there.
-    expect(second).toContain("## Outils disponibles")
-    expect(second.trimEnd().endsWith("toute tentative serait rejetée.")).toBe(true)
+    expect(second).toContain("## Available tools")
+    expect(second.trimEnd().endsWith("any attempt would be rejected.")).toBe(true)
   })
 
   test("by the third turn, nothing already said is replayed", async () => {
@@ -1154,13 +1154,13 @@ describe("end to end: resume sends only the delta", () => {
     expect(prompts).toHaveLength(3)
     const third = prompts[2] ?? ""
     const conversation = conversationOf(third)
-    for (const marqueur of ["MARQUEUR-1", "APPEL-1", "RESULTAT-1", "MARQUEUR-2"]) {
+    for (const marqueur of ["MARKER-1", "CALL-1", "RESULT-1", "MARKER-2"]) {
       expect({ marqueur, occurrences: occurrences(conversation, marqueur) }).toEqual({
         marqueur,
         occurrences: 0,
       })
     }
-    expect(occurrences(conversation, "MARQUEUR-3")).toBe(1)
+    expect(occurrences(conversation, "MARKER-3")).toBe(1)
   })
 
   test("the reuse mode keeps one session and does not lose the turn", async () => {
@@ -1172,8 +1172,8 @@ describe("end to end: resume sends only the delta", () => {
     const settings = fakeSettings({ FAKE_PROMPT_FILE: file }, { session: "reuse" })
     const languageModel = model("gpt-5.6-terra", settings)
 
-    const premier = await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_1))
-    expect(premier.filter((event) => event.type === "text-delta").map((event) => event.text)).toEqual([
+    const first = await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_1))
+    expect(first.filter((event) => event.type === "text-delta").map((event) => event.text)).toEqual([
       "PONG",
     ])
     expect(countRetainedSessions()).toBeGreaterThan(0)
@@ -1219,10 +1219,10 @@ describe("end to end: the fresh mode stays the default and replays everything", 
     const prompts = await readPrompts(file)
     expect(prompts).toHaveLength(2)
     const second = prompts[1] ?? ""
-    expect(occurrences(second, "MARQUEUR-1")).toBe(1)
-    expect(occurrences(second, "MARQUEUR-2")).toBe(1)
+    expect(occurrences(second, "MARKER-1")).toBe(1)
+    expect(occurrences(second, "MARKER-2")).toBe(1)
     expect(second).toContain("## Conversation\n")
-    expect(second).not.toContain("## Conversation — suite")
+    expect(second).not.toContain("## Conversation - continued")
   })
 
   test("an explicit `session: \"fresh\"` behaves like the default", async () => {
@@ -1234,7 +1234,7 @@ describe("end to end: the fresh mode stays the default and replays everything", 
     await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_2))
 
     const prompts = await readPrompts(file)
-    expect(occurrences(prompts[1] ?? "", "MARQUEUR-1")).toBe(1)
+    expect(occurrences(prompts[1] ?? "", "MARKER-1")).toBe(1)
   })
 
   test("a model change invalidates the session, even in reuse", async () => {
@@ -1255,8 +1255,8 @@ describe("end to end: the fresh mode stays the default and replays everything", 
     const prompts = await readPrompts(file)
     expect(prompts).toHaveLength(2)
     const second = prompts[1] ?? ""
-    expect(occurrences(second, "MARQUEUR-1")).toBe(1)
-    expect(second).not.toContain("## Conversation — suite")
+    expect(occurrences(second, "MARKER-1")).toBe(1)
+    expect(second).not.toContain("## Conversation - continued")
   })
 
   test("another cwd changes the agent, and therefore the session", async () => {
@@ -1264,8 +1264,8 @@ describe("end to end: the fresh mode stays the default and replays everything", 
     // session one: two projects have two agents. That is the most conservative
     // behaviour, and it is verified here end to end.
     const book = await mkdtemp(join(tmpdir(), "acp-cwd-a-"))
-    const autre = await mkdtemp(join(tmpdir(), "acp-cwd-b-"))
-    temporary.push(book, autre)
+    const otherDir = await mkdtemp(join(tmpdir(), "acp-cwd-b-"))
+    temporary.push(book, otherDir)
     const file = join(book, "prompts.txt")
     const settings = fakeSettings({ FAKE_PROMPT_FILE: file }, { session: "reuse" })
     const languageModel = model("gpt-5.6-terra", settings)
@@ -1273,12 +1273,12 @@ describe("end to end: the fresh mode stays the default and replays everything", 
     await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_1))
     // Same settings, except the directory: the agent is another one, so the
     // session is fresh and the whole history goes out again.
-    const other: AcpProviderSettings = { ...settings, cwd: autre }
+    const other: AcpProviderSettings = { ...settings, cwd: otherDir }
     await runTurn(other, "gpt-5.6-terra", requestOf(languageModel, TOUR_2))
 
     const prompts = await readPrompts(file)
     expect(prompts).toHaveLength(2)
-    expect(occurrences(prompts[1] ?? "", "MARQUEUR-1")).toBe(1)
+    expect(occurrences(prompts[1] ?? "", "MARKER-1")).toBe(1)
   })
 })
 
@@ -1338,7 +1338,7 @@ const readPid = async (pidFile: string, timeoutMs = 5_000): Promise<number> => {
     const raw = await readFile(pidFile, "utf8").catch(() => "")
     const pid = Number(raw.trim())
     if (Number.isInteger(pid) && pid > 0) return pid
-    if (Date.now() >= deadline) throw new Error(`le faux agent n'a jamais écrit ${pidFile}`)
+    if (Date.now() >= deadline) throw new Error(`the fake agent never wrote ${pidFile}`)
     await delay(20)
   }
 }

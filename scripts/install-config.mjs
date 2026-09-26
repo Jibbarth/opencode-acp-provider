@@ -114,11 +114,11 @@ const parseJsonc = (text, path) => {
     parsed = JSON.parse(stripTrailingCommas(stripped))
   } catch (error) {
     throw new Error(
-      `${path} n'est pas du JSON valide : ${error instanceof Error ? error.message : String(error)}`,
+      `${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${path} doit contenir un objet JSON, pas ${Array.isArray(parsed) ? "un tableau" : typeof parsed}`)
+    throw new Error(`${path} must hold a JSON object, not ${Array.isArray(parsed) ? "an array" : typeof parsed}`)
   }
   return { config: parsed, hasComments, indent: detectIndent(text) }
 }
@@ -177,23 +177,23 @@ const merge = (config, agents, pluginPath, repoRoot, hasComments, force) => {
   if (plugins === undefined) return { config: { ...config, plugins: [entry] }, action: "write" }
   if (!Array.isArray(plugins)) {
     throw new Error(
-      `le champ \`plugins\` existe et n'est pas un tableau (c'est un ${typeof plugins}). ` +
-        "Installateur en retard : corrigez ce champ à la main, rien n'a été écrit.",
+      `the \`plugins\` field exists and is not an array (it is a ${typeof plugins}). ` +
+        "Outdated installer: fix this field by hand, nothing was written.",
     )
   }
   const ours = plugins.filter((item) => isOurPackage(item?.package, repoRoot))
   const strangers = plugins.filter((item) => item !== null && typeof item !== "object")
   if (strangers.length > 0) {
     throw new Error(
-      `\`plugins\` contient ${strangers.length} entrée(s) qui ne sont pas des objets ` +
-        `(valeur ${JSON.stringify(strangers[0])}). Rien n'a été écrit : à corriger à la main.`,
+      `\`plugins\` holds ${strangers.length} entries that are not objects ` +
+        `(value ${JSON.stringify(strangers[0])}). Nothing was written: fix it by hand.`,
     )
   }
   if (ours.length > 1) {
     throw new Error(
-      `${ours.length} entrées pointent déjà sur ce dépôt ` +
+      `${ours.length} entries already point at this repository ` +
         `(${ours.map((item) => item.package).join(", ")}). ` +
-        "Installateur en retard : il en laisse une seule. Rien n'a été écrit.",
+        "Outdated installer: it leaves a single one. Nothing was written.",
     )
   }
   const next = plugins.filter((item) => !isOurPackage(item?.package, repoRoot))
@@ -204,8 +204,8 @@ const merge = (config, agents, pluginPath, repoRoot, hasComments, force) => {
   if (ours.length === 1 && sameEntry(ours[0], kept)) return { config, action: "noop" }
   if (hasComments && !force) {
     throw new Error(
-      "la configuration contient des commentaires, et la réécriture les perdrait. " +
-        "Rien n'a été écrit. Relancez avec --force pour réécrire quand même (une sauvegarde est faite dans les deux cas).",
+      "the configuration holds comments and the rewrite would lose them. " +
+        "Nothing was written. Rerun with --force to rewrite anyway (a backup is made in both cases).",
     )
   }
   return { config: { ...config, plugins: next }, action: "write" }
@@ -214,7 +214,7 @@ const merge = (config, agents, pluginPath, repoRoot, hasComments, force) => {
 /** Where our entry sits, for `--status` and `--uninstall`. */
 const locate = (config, repoRoot) => {
   if (config.plugins === undefined) return { present: false, index: -1, count: 0 }
-  if (!Array.isArray(config.plugins)) throw new Error("`plugins` n'est pas un tableau")
+  if (!Array.isArray(config.plugins)) throw new Error("`plugins` is not an array")
   const count = config.plugins.filter((item) => isOurPackage(item?.package, repoRoot)).length
   const index = config.plugins.findIndex((item) => isOurPackage(item?.package, repoRoot))
   return { present: index >= 0, index, count }
@@ -250,17 +250,17 @@ const main = () => {
 
   if (!existsSync(configPath)) {
     if (mode === "status") {
-      process.stdout.write(`configuration : ${configPath}\n  absente — le plugin n'est pas installé\n`)
+      process.stdout.write(`configuration: ${configPath}\n  absent - the plugin is not installed\n`)
       return
     }
     if (mode === "uninstall") {
-      process.stdout.write(`configuration : ${configPath}\n  absente — rien à désinstaller\n`)
+      process.stdout.write(`configuration: ${configPath}\n  absent - nothing to uninstall\n`)
       return
     }
     mkdirSync(dirname(configPath), { recursive: true })
     const fresh = { $schema: "https://opencode.ai/config.json", plugins: [desiredEntry(pluginPath, agents)] }
     writeFileSync(configPath, `${JSON.stringify(fresh, null, 2)}\n`, "utf8")
-    process.stdout.write(`créé   : ${configPath}\n  plugin : ${pluginPath}\n`)
+    process.stdout.write(`created: ${configPath}\n  plugin: ${pluginPath}\n`)
     readBack(configPath, pluginPath, repoRoot)
     return
   }
@@ -270,61 +270,61 @@ const main = () => {
 
   if (mode === "status") {
     const found = locate(config, repoRoot)
-    process.stdout.write(`configuration : ${configPath}\n`)
+    process.stdout.write(`configuration: ${configPath}\n`)
     process.stdout.write(
       found.present
-        ? `  installé : ${config.plugins[found.index].package}\n  agents   : ${describe(config.plugins[found.index])}\n`
-        : "  absent   : aucune entrée ne pointe sur ce dépôt\n",
+        ? `  installed: ${config.plugins[found.index].package}\n  agents   : ${describe(config.plugins[found.index])}\n`
+        : "  absent   : no entry points at this repository\n",
     )
-    if (found.count > 1) process.stdout.write(`  attention : ${found.count} entrées pointent sur ce dépôt\n`)
-    if (hasComments) process.stdout.write("  note     : le fichier contient des commentaires\n")
+    if (found.count > 1) process.stdout.write(`  warning: ${found.count} entries point at this repository\n`)
+    if (hasComments) process.stdout.write("  note     : the file holds comments\n")
     return
   }
 
   if (mode === "uninstall") {
     const found = locate(config, repoRoot)
     if (!found.present) {
-      process.stdout.write(`rien à faire : aucune entrée ne pointe sur ${repoRoot}\n`)
+      process.stdout.write(`nothing to do: no entry points at ${repoRoot}\n`)
       return
     }
     if (hasComments && !force) {
       fail(
-        "la configuration contient des commentaires, et la réécriture les perdrait. " +
-          "Rien n'a été écrit. Relancez avec --force.",
+        "the configuration holds comments and the rewrite would lose them. " +
+          "Nothing was written. Rerun with --force.",
       )
     }
     const next = { ...config, plugins: config.plugins.filter((_, i) => i !== found.index) }
     if (next.plugins.length === 0) delete next.plugins
     write(configPath, next, indent)
-    process.stdout.write(`retiré : ${config.plugins[found.index].package}\n`)
+    process.stdout.write(`removed: ${config.plugins[found.index].package}\n`)
     readBack(configPath, pluginPath, repoRoot, true)
     return
   }
 
   const { config: merged, action } = merge(config, agents, pluginPath, repoRoot, hasComments, force)
   if (action === "noop") {
-    process.stdout.write(`déjà installé : ${configPath}\n  plugin : ${pluginPath}\n  aucune écriture\n`)
+    process.stdout.write(`already installed: ${configPath}\n  plugin: ${pluginPath}\n  no write\n`)
     return
   }
   write(configPath, merged, indent)
-  process.stdout.write(`écrit  : ${configPath}\n  plugin : ${pluginPath}\n`)
+  process.stdout.write(`written: ${configPath}\n  plugin: ${pluginPath}\n`)
   readBack(configPath, pluginPath, repoRoot)
 }
 
 const describe = (entry) =>
   Array.isArray(entry?.options?.agents)
     ? entry.options.agents.map((a) => [a.command, ...(a.args ?? [])].join(" ")).join(", ")
-    : "(aucun agent déclaré)"
+    : "(no agent declared)"
 
 /** Backup first, then write, then confirm the backup really holds the old bytes. */
 const write = (path, config, indent) => {
   const backup = `${path}.bak-${stamp()}`
   copyFileSync(path, backup)
   if (readFileSync(backup, "utf8") !== readFileSync(path, "utf8")) {
-    fail(`la sauvegarde ${backup} ne reproduit pas ${path} : rien n'a été écrit.`)
+    fail(`the backup ${backup} does not reproduce ${path}: nothing was written.`)
   }
   writeFileSync(path, `${JSON.stringify(config, null, indent)}\n`, "utf8")
-  process.stdout.write(`sauvegarde : ${backup}\n`)
+  process.stdout.write(`backup: ${backup}\n`)
   return backup
 }
 
@@ -342,19 +342,19 @@ const readBack = (path, pluginPath, repoRoot, expectAbsent = false) => {
   try {
     parsed = parseJsonc(readFileSync(path, "utf8"), path).config
   } catch (error) {
-    fail(`la configuration écrite est illisible (${error instanceof Error ? error.message : String(error)}).`)
+    fail(`the written configuration is unreadable (${error instanceof Error ? error.message : String(error)}).`)
   }
   const found = locate(parsed, repoRoot)
   if (expectAbsent) {
-    if (found.present) fail(`l'entrée est toujours présente dans ${path} après désinstallation.`)
-    process.stdout.write("vérifié : relu, valide, entrée absente\n")
+    if (found.present) fail(`the entry is still present in ${path} after uninstall.`)
+    process.stdout.write("verified: re-read, valid, entry absent\n")
     return
   }
-  if (!found.present) fail(`l'entrée n'est pas dans ${path} après écriture.`)
+  if (!found.present) fail(`the entry is not in ${path} after writing.`)
   if (parsed.plugins[found.index].package !== pluginPath) {
-    fail(`l'entrée écrite ne pointe pas sur ${pluginPath}.`)
+    fail(`the written entry does not point at ${pluginPath}.`)
   }
-  process.stdout.write("vérifié : relu, valide, entrée présente\n")
+  process.stdout.write("verified: re-read, valid, entry present\n")
 }
 
 try {

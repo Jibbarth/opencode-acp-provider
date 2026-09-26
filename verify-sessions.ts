@@ -105,7 +105,7 @@ const title = (text: string): void => {
  * compliance instead of the session mode. It comes **first**: a long turn
  * between the instruction and the question measurably lowers compliance.
  */
-const JSON_ONLY = `Réponds UNIQUEMENT par cet objet JSON, sans texte autour : {"type":"text","text":"..."}`
+const JSON_ONLY = `Answer ONLY with this JSON object, no text around it: {"type":"text","text":"..."}`
 
 /** The fact planted before the compaction, and asked back after it. */
 const SECRET = "verglas-7741"
@@ -257,7 +257,7 @@ const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
 /** One tool, the only one the agent is offered: a single call per answer. */
 const READ_TOOL = ToolEntry.make({
   name: "read",
-  description: "Lit un fichier du projet et renvoie son contenu",
+  description: "Reads a project file and returns its content",
   inputSchema: {
     type: "object",
     properties: { filePath: { type: "string" } },
@@ -266,7 +266,7 @@ const READ_TOOL = ToolEntry.make({
 })
 
 /** The ACP transport does no HTTP: an executor that dies if called says so. */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 const runTurn = async (
   languageModel: LanguageModel,
@@ -274,7 +274,7 @@ const runTurn = async (
 ): Promise<TurnReport> => {
   const request = new LLMRequest({
     model: languageModel,
-    system: [SystemPart.make("Tu es un assistant de test. Sois bref.")],
+    system: [SystemPart.make("You are a test assistant. Be brief.")],
     tools: [READ_TOOL],
     messages,
     generation: GenerationOptions.make({ maxTokens: 400 }),
@@ -290,7 +290,7 @@ const runTurn = async (
       }),
     ).pipe(Effect.result),
   )
-  if (Result.isFailure(outcome)) throw new Error(`le flux a échoué : ${outcome.failure.message}`)
+  if (Result.isFailure(outcome)) throw new Error(`the stream failed: ${outcome.failure.message}`)
   return { ...readEvents(outcome.success), ms: Date.now() - started }
 }
 
@@ -320,8 +320,8 @@ const runToolLoop = async (
   const wanted = Array.from({ length: asked }, (_, index) => `ticket-${index + 1}.txt`)
   messages.push(
     Message.user(
-      `${JSON_ONLY} Appelle l'outil « read » ${asked} fois, une fois par tour, dans cet ordre : ` +
-        `${wanted.join(", ")}. Quand tu as lu les ${asked} fichiers, réponds par « lu » en texte.`,
+      `${JSON_ONLY} Call the "read" tool ${asked} times, once per turn, in this order: ` +
+        `${wanted.join(", ")}. Once you have read the ${asked} files, answer with "read" as text.`,
     ),
   )
   // The loop is bounded: a runaway agent must not make the probe unbounded, and
@@ -367,14 +367,14 @@ const runToolLoop = async (
  */
 const filler = (chars: number, seed: number): string => {
   if (FILLER_MODE === "repeated") {
-    return `Note de contexte : le ticket ${seed} décrit une anomalie intermittente du service de facturation. `.repeat(
+    return `Context note: ticket ${seed} describes an intermittent fault of the billing service. `.repeat(
       Math.ceil(chars / 92),
     ).slice(0, chars)
   }
   const words = [
-    "facturation", "latence", "index", "bascule", "reprise", "cache", "déploiement",
-    "migration", "file d'attente", "journalisation", "réplica", "planificateur", "jeton",
-    "signature", "rotation", "quorum", "repli", "réarmement", "compteur", "horloge",
+    "billing", "latency", "index", "switchover", "failover", "cache", "deployment",
+    "migration", "queue", "logging", "replica", "scheduler", "token",
+    "signature", "rotation", "quorum", "fallback", "rearm", "counter", "clock",
   ]
   const out: string[] = []
   let index = 0
@@ -382,14 +382,14 @@ const filler = (chars: number, seed: number): string => {
     const a = words[(index + seed) % words.length] ?? "ticket"
     const b = words[(index * 7 + seed * 3) % words.length] ?? "service"
     const c = (seed * 131 + index * 17) % 9973
-    out.push(`Le dossier ${c} relate une régression de ${a} signalée par ${b} après la bascule.`)
+    out.push(`Folder ${c} reports a regression of ${a} raised by ${b} after the switchover.`)
     index += 1
   }
   return out.join(" ").slice(0, chars)
 }
 
 const partOne = async (mode: SessionMode): Promise<void> => {
-  title(`Partie 1 — mode « ${mode} » — une échange avec ${ASKED_TOOLS} outils`)
+  title(`Part 1 - mode "${mode}" - one exchange with ${ASKED_TOOLS} tools`)
   const logPath = `${LOG_DIR}/acp-sonde-1-${mode}.log`
   const settings = tappedSettings(`p1-${mode}`, mode, logPath)
   const languageModel = model(MODEL, settings)
@@ -398,26 +398,26 @@ const partOne = async (mode: SessionMode): Promise<void> => {
   const trace = readTrace(logPath)
   const sizes = promptSizes(trace)
 
-  line(`  appels de modèle (turns OpenCode)      : ${result.modelCalls}`)
-  line(`  outils exécutés par l'hôte             : ${result.executed}`)
-  line(`  session/new sur le fil                  : ${countOf(trace, "session/new")}`)
-  line(`  session/prompt sur le fil              : ${countOf(trace, "session/prompt")}`)
-  line(`  session/close sur le fil               : ${countOf(trace, "session/close")}`)
-  line(`  rapport modèle + 1 = outils + 1         : ${result.modelCalls === result.executed + 1 ? "OUI" : `NON (${result.modelCalls} ≠ ${result.executed + 1})`}`)
-  line(`  rapport sessions ACP = appels de modèle  : ${countOf(trace, "session/new") === result.modelCalls ? "OUI" : "NON"}`)
-  line(`  taille des prompts envoyés (caractères) : ${sizes.join(", ")}`)
-  line(`  réponse finale                          : ${oneLine(result.last.text)}`)
+  line(`  model calls (OpenCode turns)          : ${result.modelCalls}`)
+  line(`  tools executed by the host            : ${result.executed}`)
+  line(`  session/new on the wire                 : ${countOf(trace, "session/new")}`)
+  line(`  session/prompt on the wire             : ${countOf(trace, "session/prompt")}`)
+  line(`  session/close on the wire              : ${countOf(trace, "session/close")}`)
+  line(`  ratio model + 1 = tools + 1            : ${result.modelCalls === result.executed + 1 ? "YES" : `NO (${result.modelCalls} != ${result.executed + 1})`}`)
+  line(`  ratio ACP sessions = model calls        : ${countOf(trace, "session/new") === result.modelCalls ? "YES" : "NO"}`)
+  line(`  size of the prompts sent (characters)  : ${sizes.join(", ")}`)
+  line(`  final answer                            : ${oneLine(result.last.text)}`)
   if (result.executed === 0) {
     // The agent's willingness to call a tool at all is **not** reproducible: it
     // refuses sometimes, and a run that executed nothing measures a one-turn
     // exchange, not the N-tools exchange the ratio is about.
-    line(`  ⚠ aucun outil demandé par l'agent : la relation N+1 n'est pas exercée par ce run`)
+    line(`  ! no tool requested by the agent: the N+1 relation is not exercised by this run`)
   }
   if (result.truncated) {
-    line(`  ⚠ boucle tronquée : l'agent demandait encore un outil après ${result.modelCalls} tours`)
+    line(`  ! truncated loop: the agent was still asking for a tool after ${result.modelCalls} turns`)
   }
-  if (result.last.complaint !== undefined) line(`  refus du parseur                         : ${result.last.complaint}`)
-  line(`  l'agent annonce-t-il une taille de fenêtre ? ${announcedContextWindow(trace) ?? "non (aucun champ de contexte dans session/new)"}`)
+  if (result.last.complaint !== undefined) line(`  parser refusal                          : ${result.last.complaint}`)
+  line(`  does the agent announce a window size?  ${announcedContextWindow(trace) ?? "no (no context field in session/new)"}`)
   logs.push(logPath)
 }
 
@@ -438,7 +438,7 @@ interface GrowthPoint {
 }
 
 const growthScenario = async (mode: SessionMode): Promise<readonly GrowthPoint[]> => {
-  title(`Partie 2 — mode « ${mode} » — ${TURNS} tours, +${FILLER_CHARS} caractères par tour`)
+  title(`Part 2 - mode "${mode}" - ${TURNS} turns, +${FILLER_CHARS} characters per turn`)
   const logPath = `${LOG_DIR}/acp-sonde-2-${mode}.log`
   const settings = tappedSettings(`p2-${mode}`, mode, logPath)
   const languageModel = model(MODEL, settings)
@@ -454,8 +454,8 @@ const growthScenario = async (mode: SessionMode): Promise<readonly GrowthPoint[]
   for (let turn = 1; turn <= TURNS; turn += 1) {
     const question =
       turn === 1
-        ? `${JSON_ONLY} Résume en une phrase la note de contexte que je te donne.`
-        : `${JSON_ONLY} Note ${turn}. ${filler(FILLER_CHARS, turn)} Résume en une phrase la note ${turn}.`
+        ? `${JSON_ONLY} Summarise in one sentence the context note I give you.`
+        : `${JSON_ONLY} Note ${turn}. ${filler(FILLER_CHARS, turn)} Summarise in one sentence note ${turn}.`
     history.push(Message.user(question))
     const report = await runTurn(languageModel, history)
     const usage = report.usage ?? { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
@@ -527,16 +527,16 @@ const reportGrowth = (mode: SessionMode, points: readonly GrowthPoint[]): void =
     contextSlope > 0 ? (DEFAULT_LIMITS.context - realContext) / contextSlope : Number.NaN
 
   line()
-  line(`  —— synthèse « ${mode} » (remplissage ${FILLER_MODE}, ${FILLER_CHARS} car./tour)`)
-  line(`  input       : ${first.input} → ${last.input}   (pente ${inputSlope.toFixed(0)} jetons/tour, tour 1 exclu)`)
-  line(`  cacheWrite  : ${first.cacheWrite} → ${last.cacheWrite}`)
-  line(`  cacheRead   : ${first.cacheRead} → ${last.cacheRead}`)
-  line(`  contexte réel annoncé par l'agent : ${announced.map((p) => p.contextUsed).join(" → ")}  (pente ${contextSlope.toFixed(0)} jetons/tour)`)
-  line(`  prompt      : ${first.promptChars} → ${last.promptChars} car. (pente ${promptSlope.toFixed(0)} car./tour)`)
-  line(`  >>> input / contexte réel au dernier tour : ${Number.isNaN(gap) ? "?" : gap.toFixed(2)}×`)
+  line(`  -- summary "${mode}" (filler ${FILLER_MODE}, ${FILLER_CHARS} chars/turn)`)
+  line(`  input       : ${first.input} -> ${last.input}   (slope ${inputSlope.toFixed(0)} tokens/turn, turn 1 excluded)`)
+  line(`  cacheWrite  : ${first.cacheWrite} -> ${last.cacheWrite}`)
+  line(`  cacheRead   : ${first.cacheRead} -> ${last.cacheRead}`)
+  line(`  real context announced by the agent: ${announced.map((p) => p.contextUsed).join(" -> ")}  (slope ${contextSlope.toFixed(0)} tokens/turn)`)
+  line(`  prompt      : ${first.promptChars} -> ${last.promptChars} chars (slope ${promptSlope.toFixed(0)} chars/turn)`)
+  line(`  >>> input / real context on the last turn: ${Number.isNaN(gap) ? "?" : gap.toFixed(2)}x`)
   line(
-    `  >>> tours avant la limite (context=${DEFAULT_LIMITS.context}), selon le compteur d'OpenCode :` +
-      ` ${turnsByInput.toFixed(0)}   |   selon le contexte réel de l'agent : ${turnsByContext.toFixed(0)}`,
+    `  >>> turns before the limit (context=${DEFAULT_LIMITS.context}), per OpenCode's counter: ` +
+      ` ${turnsByInput.toFixed(0)}   |   per the agent's real context: ${turnsByContext.toFixed(0)}`,
   )
 }
 
@@ -552,25 +552,25 @@ const reportGrowth = (mode: SessionMode, points: readonly GrowthPoint[]): void =
  * `session/new` looks the same whether the key moved or the digests diverged.
  */
 const decideWithoutAgent = async (): Promise<void> => {
-  const identity = { agent: "sonde", cwd: CWD, model: MODEL }
+  const identity = { agent: "probe", cwd: CWD, model: MODEL }
   const before: NormalizedMessage[] = [
-    { role: "user", text: `Retiens le nom de mon fichier de configuration : il s'appelle ${SECRET}.` },
-    { role: "assistant", text: "C'est noté : verglas-7741." },
+    { role: "user", text: `Remember the name of my configuration file: it is called ${SECRET}.` },
+    { role: "assistant", text: "Noted: verglas-7741." },
   ]
   // What a compaction leaves behind: a summary, and no verbatim earlier turn.
   const after: NormalizedMessage[] = [
-    { role: "user", text: "Résumé de la conversation : l'utilisateur a demandé un résumé de notes techniques." },
-    { role: "assistant", text: "Voici le résumé." },
-    { role: "user", text: `Comment s'appelle le fichier de configuration ? ${JSON_ONLY}` },
+    { role: "user", text: "Conversation summary: the user asked for a summary of technical notes." },
+    { role: "assistant", text: "Here is the summary." },
+    { role: "user", text: `What is the name of the configuration file? ${JSON_ONLY}` },
   ]
   const pool = new SessionPool<ManagedSession>()
   const open = async (): Promise<ManagedSession> => ({ close: async (): Promise<void> => {} })
   const first = await pool.acquire(identity, before, open)
-  line(`  avant réécriture : reuse=${String(first.reused)} raison=${String(first.reason)}`)
+  line(`  before rewrite: reuse=${String(first.reused)} reason=${String(first.reason)}`)
   first.release()
   const second = await pool.acquire(identity, after, open)
-  line(`  après réécriture : reuse=${String(second.reused)} raison=${String(second.reason)}`)
-  line(`  delta réémis     : ${second.delta.length} message(s) sur ${after.length}`)
+  line(`  after rewrite : reuse=${String(second.reused)} reason=${String(second.reason)}`)
+  line(`  delta resent     : ${second.delta.length} message(s) out of ${after.length}`)
   second.release()
   await pool.closeAll()
 }
@@ -591,7 +591,7 @@ const said = (turn: TurnReport): string =>
 const recalls = (turn: TurnReport): boolean => said(turn).includes(SECRET.toLowerCase())
 
 const partThree = async (mode: SessionMode): Promise<void> => {
-  title(`Partie 3 — mode « ${mode} » — réécriture de l'historique (équivalent /compact)`)
+  title(`Part 3 - mode "${mode}" - history rewrite (the equivalent of /compact)`)
   const logPath = `${LOG_DIR}/acp-sonde-3-${mode}.log`
   const settings = tappedSettings(`p3-${mode}`, mode, logPath)
   const languageModel = model(MODEL, settings)
@@ -599,21 +599,21 @@ const partThree = async (mode: SessionMode): Promise<void> => {
   // Turn 1 plants the fact, turn 2 is an ordinary turn: the session now holds
   // the whole pre-compaction conversation.
   const before: MessageType[] = [
-    Message.user(`${JSON_ONLY} Retiens le nom de mon fichier de configuration : il s'appelle ${SECRET}. ${filler(2000, 1)}`),
+    Message.user(`${JSON_ONLY} Remember the name of my configuration file: it is called ${SECRET}. ${filler(2000, 1)}`),
   ]
   const planted = await runTurn(languageModel, before)
-  line(`  tour 1 (plantation)  : ${oneLine(planted.text) || "(vide)"}`)
-  if (planted.complaint !== undefined) line(`  refus tour 1          : ${planted.complaint}`)
-  line(`  >>> le nom a été planté et restitué au tour 1 : ${recalls(planted) ? "OUI" : "NON"}`)
+  line(`  turn 1 (planting)   : ${oneLine(planted.text) || "(empty)"}`)
+  if (planted.complaint !== undefined) line(`  refusal turn 1        : ${planted.complaint}`)
+  line(`  >>> the name was planted and given back on turn 1: ${recalls(planted) ? "YES" : "NO"}`)
   before.push(Message.assistant(planted.text))
   before.push(Message.user(`${JSON_ONLY} Acknowledge.`))
   const middle = await runTurn(languageModel, before)
   before.push(Message.assistant(middle.text))
   const afterFirstTwo = readTrace(logPath)
-  line(`  tour 2 ( banal )     : ${oneLine(middle.text) || "(vide)"}`)
-  if (middle.complaint !== undefined) line(`  refus tour 2          : ${middle.complaint}`)
-  line(`  après 2 tours        : session/new=${countOf(afterFirstTwo, "session/new")} prompts=${countOf(afterFirstTwo, "session/prompt")}`)
-  line(`  sessions retenues (toutes parties) : ${countRetainedSessions()}`)
+  line(`  turn 2 (plain)       : ${oneLine(middle.text) || "(empty)"}`)
+  if (middle.complaint !== undefined) line(`  refusal turn 2        : ${middle.complaint}`)
+  line(`  after 2 turns        : session/new=${countOf(afterFirstTwo, "session/new")} prompts=${countOf(afterFirstTwo, "session/prompt")}`)
+  line(`  retained sessions (all parties)    : ${countRetainedSessions()}`)
 
   // The compaction: the history is **replaced**, not appended to. A real
   // `/compact` keeps a summary and drops the verbatim turns; the summary
@@ -621,10 +621,10 @@ const partThree = async (mode: SessionMode): Promise<void> => {
   // genuine leak of agent-side memory rather than a leak of the summary.
   const compacted: MessageType[] = [
     Message.user(
-      "Résumé de la conversation : l'utilisateur a fait travailler l'assistant sur des notes techniques et un fichier de configuration.",
+      "Conversation summary: the user had the assistant work on technical notes and a configuration file.",
     ),
-    Message.assistant("Voici le résumé de nos échanges."),
-    Message.user(`${JSON_ONLY} Comment s'appelle le fichier de configuration que je t'ai donné ? Réponds par le nom seul.`),
+    Message.assistant("Here is the summary of our exchanges."),
+    Message.user(`${JSON_ONLY} What is the name of the configuration file I gave you? Answer with the name only.`),
   ]
   const sizesBefore = promptSizes(afterFirstTwo)
   const lastBefore = sizesBefore[sizesBefore.length - 1] ?? 0
@@ -634,22 +634,22 @@ const partThree = async (mode: SessionMode): Promise<void> => {
   const sizes = promptSizes(trace)
   const lastAfter = sizes[sizes.length - 1] ?? 0
 
-  line(`  après compact         : session/new=${countOf(trace, "session/new")} (+${countOf(trace, "session/new") - countOf(afterFirstTwo, "session/new")})`)
+  line(`  after compact         : session/new=${countOf(trace, "session/new")} (+${countOf(trace, "session/new") - countOf(afterFirstTwo, "session/new")})`)
   line(`  session/close         : ${countOf(trace, "session/close")}`)
-  line(`  sessions retenues (toutes parties) : ${countRetainedSessions()}`)
-  line(`  prompt avant/après    : ${lastBefore} → ${lastAfter} car.`)
-  line(`  réponse à la question : ${oneLine(asked.text) || "(vide)"}`)
-  if (asked.complaint !== undefined) line(`  refus du parseur        : ${asked.complaint}`)
+  line(`  retained sessions (all parties)    : ${countRetainedSessions()}`)
+  line(`  prompt before/after   : ${lastBefore} -> ${lastAfter} chars.`)
+  line(`  answer to the question: ${oneLine(asked.text) || "(empty)"}`)
+  if (asked.complaint !== undefined) line(`  parser refusal         : ${asked.complaint}`)
   // The verdict is only worth as much as the plant. An agent that never took the
   // name in has nothing to forget, and scoring that as a successful amnesia test
   // would make the probe agree with itself for the wrong reason.
   const verdict = recalls(planted)
     ? recalls(asked)
-      ? "OUI — FUITE : le nom survit à la réécriture"
-      : "NON — amnesia confirmée, la session a bien reparti de zéro"
-    : "INCONCLUANT — le nom n'a jamais été planté (l'agent a refusé le tour 1)"
-  line(`  >>> l'agent se souvient du nom d'avant compact : ${verdict}`)
-  line(`  >>> une session neuve a été ouverte pour la question : ${countOf(trace, "session/new") > countOf(afterFirstTwo, "session/new") ? "OUI" : "NON"}`)
+      ? "YES - LEAK: the name survives the rewrite"
+      : "NO - amnesia confirmed, the session really started from zero"
+    : "INCONCLUSIVE - the name was never planted (the agent refused turn 1)"
+  line(`  >>> the agent remembers the pre-compact name: ${verdict}`)
+  line(`  >>> a fresh session was opened for the question: ${countOf(trace, "session/new") > countOf(afterFirstTwo, "session/new") ? "YES" : "NO"}`)
   logs.push(logPath)
 }
 
@@ -662,7 +662,7 @@ const partThree = async (mode: SessionMode): Promise<void> => {
  * cannot show on its own.
  */
 const postMortem = (): void => {
-  title("Bilan du fil (après fermeture des agents)")
+  title("Wire report (after the agents are closed)")
   for (const logPath of logs) {
     const trace = readTrace(logPath)
     line(
@@ -671,7 +671,7 @@ const postMortem = (): void => {
         ` cancel=${countOf(trace, "session/cancel")}`,
     )
   }
-  line(`  sessions encore retenues après fermeture : ${countRetainedSessions()}`)
+  line(`  sessions still retained after closing : ${countRetainedSessions()}`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -679,7 +679,7 @@ const postMortem = (): void => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 line(`# agent     : ${agentCommand} ${agentArgs.join(" ")}`)
-line(`# modèle    : ${MODEL}`)
+line(`# model     : ${MODEL}`)
 line(`# tap       : ${TAP}`)
 line(`# logs      : ${LOG_DIR}`)
 line(`# contexte  : limit.context=${DEFAULT_LIMITS.context} limit.output=${DEFAULT_LIMITS.output} (DEFAULT_LIMITS du plugin)`)
@@ -693,7 +693,7 @@ const guard = async (label: string, run: () => Promise<void>): Promise<void> => 
     await run()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    line(`ECHEC (${label}) : ${message}`)
+    line(`FAILURE (${label}): ${message}`)
     failure = failure ?? message
   }
 }
@@ -719,7 +719,7 @@ if (part === "all" || part === "2") {
 }
 
 if (part === "all" || part === "3") {
-  await guard("partie 3 / cœur", decideWithoutAgent)
+  await guard("part 3 / core", decideWithoutAgent)
   for (const mode of modes) {
     await guard(`partie 3 / ${mode}`, () => partThree(mode))
   }

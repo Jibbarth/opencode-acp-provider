@@ -84,21 +84,21 @@ const MAX_EXCERPT = 400
 /** A bounded, compacted excerpt of an output, for a readable error message. */
 const excerpt = (raw: string): string => {
   const flat = raw.replace(/\s+/g, " ").trim()
-  if (flat === "") return "(sortie vide)"
+  if (flat === "") return "(empty output)"
   return flat.length <= MAX_EXCERPT ? flat : `${flat.slice(0, MAX_EXCERPT)}…`
 }
 
 /** Builds a failure, always with the raw output in sight. */
 const fail = (raw: string, reason: string): ParseResult => ({
   ok: false,
-  error: new ParseError(`${reason} — sortie reçue : « ${excerpt(raw)} »`),
+  error: new ParseError(`${reason} - output received: "${excerpt(raw)}"`),
 })
 
 /** Describes a value for an error message ("an array", "null"...). */
 const describe = (value: unknown): string => {
   if (value === null) return "null"
-  if (Array.isArray(value)) return "un tableau"
-  return `une valeur de type ${typeof value}`
+  if (Array.isArray(value)) return "an array"
+  return `a value of type ${typeof value}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,7 +194,7 @@ const candidates = (raw: string): string[] => {
 /** Tool catalogue, rendered as a list of names for an error message. */
 const catalogNames = (tools: readonly NormalizedTool[]): string =>
   tools.length === 0
-    ? "(aucun — la requête ne portait aucun outil)"
+    ? "(none - the request carried no tool)"
     : tools.map((tool) => tool.name).join(", ")
 
 /**
@@ -218,7 +218,7 @@ const validate = (
     if (typeof text !== "string" || text.trim() === "") {
       return fail(
         raw,
-        `l'objet {"type":"text"} ne porte aucun texte exploitable (champ « text » absent, vide ou non textuel)`,
+        `the {"type":"text"} object carries no usable text (field "text" absent, empty or not textual)`,
       )
     }
     return { ok: true, output: { type: "text", text } }
@@ -226,13 +226,13 @@ const validate = (
 
   const name = value["name"]
   if (typeof name !== "string" || name === "") {
-    return fail(raw, `l'objet {"type":"tool"} ne nomme aucun outil (champ « name » absent ou vide)`)
+    return fail(raw, `the {"type":"tool"} object names no tool (field "name" absent or empty)`)
   }
   if (!tools.some((tool) => tool.name === name)) {
     return fail(
       raw,
-      `l'agent a proposé l'outil « ${name} », qui ne fait pas partie du catalogue ` +
-        `(noms acceptés : ${catalogNames(tools)})`,
+      `the agent proposed the tool "${name}", which is not part of the catalogue ` +
+        `(accepted names: ${catalogNames(tools)})`,
     )
   }
 
@@ -245,7 +245,7 @@ const validate = (
   if (!isJsonObject(args)) {
     return fail(
       raw,
-      `les arguments de l'outil « ${name} » ne sont pas un objet JSON (reçu : ${describe(args)})`,
+      `the arguments of tool "${name}" are not a JSON object (received: ${describe(args)})`,
     )
   }
   return { ok: true, output: { type: "tool", name, arguments: args } }
@@ -272,7 +272,7 @@ export const parseAgentOutput = (
   tools: readonly NormalizedTool[],
 ): ParseResult => {
   if (raw.trim() === "") {
-    return fail(raw, "l'agent n'a produit aucune sortie exploitable")
+    return fail(raw, "the agent produced no usable output")
   }
 
   // Kept for the diagnostic: a well-formed JSON object with an unknown `type` is
@@ -295,10 +295,10 @@ export const parseAgentOutput = (
   }
 
   if (unknownType !== undefined) {
-    return fail(raw, `« type » vaut « ${unknownType} » : seuls « text » et « tool » sont acceptés`)
+    return fail(raw, `"type" is "${unknownType}": only "text" and "tool" are accepted`)
   }
   return fail(
     raw,
-    "aucun objet JSON de la forme {\"type\":\"text\"|\"tool\"} n'a été trouvé dans la sortie",
+    "no JSON object of the shape {\"type\":\"text\"|\"tool\"} was found in the output",
   )
 }

@@ -48,10 +48,10 @@ describe("plugin loading leaves a trace", () => {
     // The marker carries the module's **URL**: that is what makes it obvious at
     // a glance that *this* file was evaluated, not another plugin that happened
     // to write the same line.
-    expect(stderr).toContain("module évalué")
+    expect(stderr).toContain("module evaluated")
     expect(stderr).toContain(PLUGIN)
     // And **one** marker line only: "discreet" means discreet.
-    expect(stderr.split("\n").filter((line) => line.includes("module évalué"))).toHaveLength(1)
+    expect(stderr.split("\n").filter((line) => line.includes("module evaluated"))).toHaveLength(1)
   })
 
   test("the marker is written on stderr, never on stdout", async () => {
@@ -74,12 +74,12 @@ describe("plugin loading leaves a trace", () => {
     // must therefore **exit with 0**, letting nothing reject.
     const stderr = await evaluatePlugin([
       `const plugin = (await import(${JSON.stringify(PLUGIN)})).default;`,
-      `await plugin.setup({ options: { agents: "pas un tableau" } });`,
+      `await plugin.setup({ options: { agents: "not an array" } });`,
     ])
-    expect(stderr).toContain("module évalué")
+    expect(stderr).toContain("module evaluated")
     // The marker is **present** => the module really was evaluated, and the next
     // line is `setup`'s log: exactly the distinction this batch makes possible.
-    expect(stderr).toContain("configuration ignorée")
+    expect(stderr).toContain("configuration ignored")
   })
 })
 
@@ -99,7 +99,7 @@ describe("the plugin registers a provider from a fake agent", () => {
       const disposables = []
       const context = new Proxy({}, {
         get: (_target, key) => {
-          if (key === "options") return { agents: [{ id: "faux", command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] }], refreshMs: 0 }
+          if (key === "options") return { agents: [{ id: "fake", command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] }], refreshMs: 0 }
           if (key === "provider") return {
             transform: (fn) => { fn({ add: (entry) => { added.push(entry) } }); const d = { dispose: () => {} }; disposables.push(d); return Promise.resolve(d) },
             reload: () => Promise.resolve(),
@@ -137,14 +137,14 @@ describe("the plugin registers a provider from a fake agent", () => {
     // The agent named itself `faux`, so it gets **its own** provider: one
     // provider per agent is what keeps two agents' credentials, inventories and
     // sessions apart.
-    expect(record["id"]).toBe("acp-faux")
+    expect(record["id"]).toBe("acp-fake")
     // This is the point of the package contract tests: the registered URL must
     // be an absolute `file://` pointing at a file that exists - otherwise `/model`
     // shows the provider and the first turn fails with `ERR_MODULE_NOT_FOUND`.
     expect(String(record["package"]).startsWith("file://")).toBe(true)
     // `auto` is filtered out (`PSEUDO_MODEL_IDS`): two models remain.
     expect(record["models"]).toEqual(["gpt-5.6-terra", "claude-sonnet-5"])
-    expect(stderr).toContain("module évalué")
+    expect(stderr).toContain("module evaluated")
   })
 
   test("an unavailable agent does not bring down the startup", async () => {
@@ -170,10 +170,10 @@ describe("the plugin registers a provider from a fake agent", () => {
       new Response(proc.stderr).text(),
     ])
     expect({ code, stdout }).toEqual({ code: 0, stdout: "dispose=undefined\n" })
-    expect(stderr).toContain("module évalué")
+    expect(stderr).toContain("module evaluated")
     // The marker is present **and** the failure is logged: that is the difference
     // between "the module did not load" and "the agent is missing".
-    expect(stderr).toContain("indisponible")
+    expect(stderr).toContain("unavailable")
     expect(stderr).toContain("opencode-acp-commande-inexistante-42")
   })
 })
@@ -223,7 +223,7 @@ describe("discovery is bounded", () => {
     expect(elapsed).toBeLessThan(10_000)
     // The error names the agent **and** the bound: a diagnostic without the
     // agent's name says nothing when the list holds several.
-    expect(stderr).toContain("agent « lent » indisponible")
+    expect(stderr).toContain('agent "lent" unavailable')
     expect(stderr).toContain("700 ms")
   }, 20_000)
 
@@ -240,7 +240,7 @@ describe("discovery is bounded", () => {
     expect(stdout).toBe("dispose=undefined\n")
     // The agent's noisy stdout is relayed **by** the agent, not by us: the plugin
     // does not copy it into its log.
-    expect(stderr).not.toContain("Ceci n'est pas du JSON")
+    expect(stderr).not.toContain("This is not JSON")
     expect(elapsed).toBeLessThan(10_000)
   }, 20_000)
 
@@ -405,8 +405,8 @@ describe("one provider per agent", () => {
       expect(entry.settings["command"]).toBe(process.execPath)
     }
     // Both reached the catalogue, and neither was reported as dropped.
-    expect(stderr).not.toContain("non enregistré")
-    expect(stderr).toContain("2 provider(s) ACP : acp-copilot, acp-codex")
+    expect(stderr).not.toContain("not registered")
+    expect(stderr).toContain("2 ACP provider(s): acp-copilot, acp-codex")
   }, 30_000)
 
   test("an unnamed agent keeps the `acp` provider id, so old configurations still apply", async () => {
@@ -434,7 +434,7 @@ describe("one provider per agent", () => {
     const { providers } = read(stdout)
     const settingsOf = (id: string): Readonly<Record<string, unknown>> => {
       const entry = providers.find((candidate) => candidate.id === `acp-${id}`)
-      if (entry === undefined) throw new Error(`provider absent : acp-${id}`)
+      if (entry === undefined) throw new Error(`provider missing: acp-${id}`)
       return entry.settings
     }
     expect(settingsOf("rapide")["session"]).toBe("reuse")
@@ -454,7 +454,7 @@ describe("one provider per agent", () => {
     expect(code).toBe(0)
     expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-copilot"])
     // And the failure is still explained, with the agent it concerns.
-    expect(stderr).toContain("agent « fantome » indisponible")
+    expect(stderr).toContain('agent "fantome" unavailable')
   }, 30_000)
 
   test("two agents claiming the same id: the first wins, and the loser is named", async () => {
@@ -466,7 +466,7 @@ describe("one provider per agent", () => {
     // `Copilot` and `copilot` normalise to the same id: the normalisation is
     // what makes that collision detectable at all.
     expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-copilot"])
-    expect(stderr).toContain("agent « Copilot » ignoré")
+    expect(stderr).toContain('agent "Copilot" ignored')
     expect(stderr).toContain("acp-copilot")
   }, 30_000)
 
@@ -479,9 +479,9 @@ describe("one provider per agent", () => {
     // The other agent is published, and the refused one is named with what to
     // do about it - rather than overwriting a provider the user configured.
     expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-codex"])
-    expect(stderr).toContain("« acp-copilot »")
-    expect(stderr).toContain("déjà pris")
-    expect(stderr).toContain("1 agent(s) écarté(s)")
+    expect(stderr).toContain('"acp-copilot"')
+    expect(stderr).toContain("already taken")
+    expect(stderr).toContain("1 agent(s) dropped")
   }, 30_000)
 
   test("no agent at all: nothing is published, and it is said once", async () => {
@@ -492,6 +492,6 @@ describe("one provider per agent", () => {
     // `dispose: "undefined"` is the contract with the host: nothing registered,
     // nothing to undo at unload.
     expect(read(stdout)).toEqual({ dispose: "undefined", providers: [] })
-    expect(stderr).toContain("aucun agent enregistré")
+    expect(stderr).toContain("no agent registered")
   }, 30_000)
 })

@@ -1,8 +1,8 @@
 # opencode-acp-provider
 
-Expose un agent **ACP** ([Agent Client Protocol](https://agentclientprotocol.com))
-comme **model provider OpenCode** : les modèles de l'agent apparaissent dans
-`/model` d'OpenCode, et chaque tour passe par un `Transport` ACP sur stdio.
+Expose an **ACP** agent ([Agent Client Protocol](https://agentclientprotocol.com))
+as an **OpenCode model provider**: the agent's models show up in OpenCode's
+`/model`, and every turn goes through an ACP `Transport` over stdio.
 
 ```jsonc
 // opencode.jsonc
@@ -17,295 +17,295 @@ comme **model provider OpenCode** : les modèles de l'agent apparaissent dans
 }
 ```
 
-## État d'avancement
+## Progress
 
-Le projet suit les phases du `PLAN.md`. Où en est-on, sans arrondir :
+The project follows the phases of `PLAN.md`. Where it stands, without rounding:
 
-| Phase | État |
+| Phase | State |
 | --- | --- |
-| P0 — client ACP (`initialize`, `session/new`) | fait, testé contre `copilot --acp` |
-| P1 — `Transport` Effect sur stdio | fait, testé (bout-en-bout contre un faux agent) |
-| P2 — mapping `AcpEvent` → `LLMEvent` | fait, testé séquence par séquence |
-| P2b — l'agent **propose** l'outil, OpenCode l'exécute (§7.3) | fait, testé |
-| **P3a — plugin : provider + `Model.Info`, variantes d'effort** | **fait et testé dans un vrai OpenCode** |
-| **P3b — recette réelle** : `acp/<modèle>` visible dans `/model`, un tour complet | **fait, vérifié** |
-| P4 — permissions fines, erreurs §8 | à faire (`session/cancel` fait, voir « Annulation ») |
-| R1 — sessions ACP persistantes (`PLAN.md` §10) | fait, testé (voir « Sessions persistantes ») |
-| R2 — plusieurs agents, un provider par agent | fait, testé (voir « Plusieurs agents ») |
-| P6 — variantes par modèle, serveurs MCP versés à l'agent | à faire |
-| P7 — adaptateur HTTP `/v1/chat/completions` | à faire |
+| P0 - ACP client (`initialize`, `session/new`) | done, tested against `copilot --acp` |
+| P1 - Effect `Transport` over stdio | done, tested (end to end against a fake agent) |
+| P2 - `AcpEvent` -> `LLMEvent` mapping | done, tested sequence by sequence |
+| P2b - the agent **proposes** the tool, OpenCode executes it (§7.3) | done, tested |
+| **P3a - plugin: provider + `Model.Info`, effort variants** | **done and tested in a real OpenCode** |
+| **P3b - real acceptance**: `acp/<model>` visible in `/model`, one full turn | **done, verified** |
+| P4 - fine-grained permissions, §8 errors | to do (`session/cancel` done, see "Cancellation") |
+| R1 - persistent ACP sessions (`PLAN.md` §10) | done, tested (see "Persistent sessions") |
+| R2 - several agents, one provider per agent | done, tested (see "Several agents") |
+| P6 - per-model variants, MCP servers handed to the agent | to do |
+| P7 - HTTP `/v1/chat/completions` adapter | to do |
 
-**Ce qui a été vérifié pour de vrai, bout en bout.** Dans un vrai `opencode serve`,
-le plugin se charge (`opencode-acp-provider | local | active`), le provider `acp` est
-enregistré avec `package: file://…/src/index.ts`, **19 modèles** paraissent dans
-`/model` avec leurs noms et leurs variantes d'effort, et un tour de conversation via
-`acp/claude-sonnet-5` renvoie la réponse attendue :
+**What was really verified, end to end.** In a real `opencode serve`, the plugin
+loads (`opencode-acp-provider | local | active`), the `acp` provider is
+registered with `package: file://…/src/index.ts`, **19 models** appear in
+`/model` with their names and their effort variants, and one conversation turn
+through `acp/claude-sonnet-5` returns the expected answer:
 
 ```
 acp/claude-sonnet-5 | finish=stop | tokens=2/24
-   texte: BONJOUR-ACP
+   text: BONJOUR-ACP
 ```
 
-⚠️ **Piège de recette, à connaître.** `opencode models` sort **avant** que les plugins
-aient fini de charger : il affiche zéro modèle `acp/` sans que quoi que ce soit soit faux,
-et le résultat est intermittent d'un run à l'autre. Pour vérifier, il faut un **serveur
-persistant** : `opencode serve --port N`, puis interroger `/api/plugin` et `/api/model`
-en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarrage).
+⚠️ **Acceptance pitfall, worth knowing.** `opencode models` exits **before** the
+plugins have finished loading: it shows zero `acp/` model without anything being
+wrong, and the result is flaky from one run to the next. To verify, you need a
+**persistent server**: `opencode serve --port N`, then query `/api/plugin` and
+`/api/model` with the basic auth `opencode:<password>` (the password is printed
+at startup).
 
-### Limites connues
+### Known limits
 
-- **`auto` est filtré.** C'est une pseudo-valeur : l'agent choisit le modèle à
-  chaque tour sans le dire, donc un `Model.Info` serait faux (limites, coût) sans
-  jamais le signaler. Voir `PSEUDO_MODEL_IDS` dans `src/core/publish.ts`.
-- **`allowedTools` est dégradé en interrupteur.** `["*"]` autorise tout le natif,
-  toute autre liste se comporte comme « tout refuser » : la demande de
-  permission ACP ne porte pas toujours le nom de l'outil. C'est le choix
-  *fail-safe* du §7.4, pas un oubli.
-- **`session: "reuse"` est une heuristique, pas une garantie.** Voir
-  « Sessions persistantes » : la reprise ne vaut que si l'historique reçu est
-  exactement une extension de celui déjà envoyé, et toute divergence (édition,
-  fork, `/compact`, changement de modèle) retombe sur une session neuve. Le
-  défaut reste `"fresh"`.
-- **`reuse` annonce un `input` cumulé, et nous le corrigeons quand l'agent se
-  contredit.** Mesuré : sur une session reprise, `copilot` annonce un `input`
-  cumulé (≈ 4,4× sa fenêtre réelle) au lieu de la fenêtre de contexte qu'il
-  publie lui-même par `usage_update`. Le réducteur substitue donc la fenêtre dès
-  qu'elle est plus de 2× plus petite, ce qui laisse `fresh` intact (0,97×) et
-  laisse passer tel quel un agent muet. Voir « Sessions persistantes ».
-- **Le rafraîchissement est déclenché, pas continu.** L'inventaire est relu au
-  plus une fois par `refreshMs` (60 s par défaut), et seulement après un
-  `session.idle`. Le `config_option_update` des sessions du transport n'est pas
-  observé : le contrat portable `AcpSession` ne l'expose qu'en cours de prompt.
-- **Limites déclarées, pas mesurées.** ACP ne publie aucune capacité de modèle ;
-  on annonce 200 000 / 32 000 par défaut, réglable par agent
-  (`agents[].limits`). Un `limit.context` trop grand ne fait que retarder la
+- **`auto` is filtered out.** It is a pseudo-value: the agent picks the model on
+  every turn without saying so, so a `Model.Info` would be wrong (limits, cost)
+  without ever flagging it. See `PSEUDO_MODEL_IDS` in `src/core/publish.ts`.
+- **`allowedTools` is degraded to a switch.** `["*"]` allows everything native,
+  any other list behaves like "deny everything": the ACP permission request does
+  not always carry the tool name. This is the *fail-safe* choice of §7.4, not an
+  oversight.
+- **`session: "reuse"` is a heuristic, not a guarantee.** See
+  "Persistent sessions": resuming is only valid if the received history is
+  exactly an extension of the one already sent, and any divergence (edit, fork,
+  `/compact`, model change) falls back to a fresh session. The default remains
+  `"fresh"`.
+- **`reuse` reports a cumulative `input`, and we correct it when the agent
+  contradicts itself.** Measured: on a resumed session, `copilot` reports a
+  cumulative `input` (≈ 4.4× its real window) instead of the context window it
+  publishes itself through `usage_update`. The reducer therefore substitutes the
+  window as soon as it is more than 2× smaller, which leaves `fresh` untouched
+  (0.97×) and lets a silent agent through as-is. See "Persistent sessions".
+- **Refreshing is triggered, not continuous.** The inventory is re-read at most
+  once per `refreshMs` (60 s by default), and only after a `session.idle`. The
+  `config_option_update` of the transport's sessions is not observed: the
+  portable `AcpSession` contract only exposes it during a prompt.
+- **Declared limits, not measured ones.** ACP publishes no model capability; we
+  announce 200 000 / 32 000 by default, configurable per agent
+  (`agents[].limits`). A `limit.context` that is too large only delays the
   compaction.
-- **Entrées texte seulement.** `copilot --acp` accepte les images, mais le
-  réducteur ne sait pas les rendre : annoncer `input: ["text"]` vaut mieux qu'une
-  image acceptée puis perdue en silence.
-- **Un deuxième process.** La découverte lance son propre agent, distinct de
-  celui que le transport lancera par `model()`. Partager le cache de
-  `opencode-transport.ts` chargerait toute la pile `effect` + `@opencode/ai` au
-  chargement du plugin, dans le process du serveur.
-- **Un plugin absent ne se voit pas… sauf une ligne.** Un package qui ne se
-  charge ne produit aucune erreur ; `src/plugin.ts` écrit donc sur `stderr`, au
-  moment où le module est **évalué** et **hors du `try` de `setup`**, une seule
-  ligne `[opencode-acp-provider] module évalué : file://…/src/plugin.ts`. Si elle
-  manque, le problème est en amont (chemin, installation, erreur d'import) ; si
-  elle est là, tout ce qu'il reste à lire est le journal de `setup`. C'est
-  précisément pour cela qu'elle est écrite là : nulle part ailleurs elle ne
-  distinguerait les deux cas.
-- **Les outils namespacés sont aplatis dans le prompt.** L'agent doit reproduire
-  le nom tel quel, et c'est `namespace_nom` — la convention de `@opencode/ai`
-  pour les protocoles sans namespace natif (`.` n'est pas accepté partout). Le
-  `tool-call` émis porte en plus le `namespace` d'origine, sinon le runtime
-  d'OpenCode, qui indexe son registre par `namespace.nom`, ne retrouverait pas
-  l'outil.
+- **Text inputs only.** `copilot --acp` accepts images, but the reducer cannot
+  render them: announcing `input: ["text"]` is better than an image accepted and
+  then silently lost.
+- **A second process.** Discovery starts its own agent, distinct from the one
+  the transport will start through `model()`. Sharing the
+  `opencode-transport.ts` cache would load the whole `effect` + `@opencode/ai`
+  stack when the plugin loads, inside the server process.
+- **An absent plugin is invisible... except for one line.** A package that does
+  not load produces no error; `src/plugin.ts` therefore writes to `stderr`, at
+  the moment the module is **evaluated** and **outside `setup`'s `try`**, a
+  single line `[opencode-acp-provider] module evaluated: file://…/src/plugin.ts`.
+  If it is missing, the problem is upstream (path, installation, import error);
+  if it is there, all that is left to read is `setup`'s log. That is precisely
+  why it is written there: nowhere else would it tell the two cases apart.
+- **Namespaced tools are flattened in the prompt.** The agent must reproduce the
+  name as-is, and that is `namespace_name` - the convention of `@opencode/ai`
+  for protocols with no native namespace (`.` is not accepted everywhere). The
+  emitted `tool-call` additionally carries the original `namespace`, otherwise
+  OpenCode's runtime, which indexes its registry by `namespace.name`, would not
+  find the tool.
 
-## Annulation
+## Cancellation
 
-`Esc` interrompt proprement, et « proprement » veut dire trois choses, toutes
-vérifiées par `test/cancel.test.ts` :
+`Esc` interrupts cleanly, and "cleanly" means three things, all verified by
+`test/cancel.test.ts`:
 
-1. **l'agent est prévenu.** Le `TransportRuntime` d'`@opencode/ai` ne porte
-   aucun signal d'interruption : quand OpenCode abandonne le stream, le `Scope`
-   se ferme et… rien d'autre ne se passe. Un contrôleur d'annulation armé par un
-   finalizer du **même** `Scope` envoie donc `session/cancel`, enregistré
-   **après** l'ouverture de la session pour que les finalizers — qui s'exécutent
-   en ordre inverse — produisent `session/cancel` puis `session/close`. Le faux
-   agent note chaque annulation reçue dans un fichier : un retour rapide ne
-   prouve rien, un `session/cancel` daté si.
-2. **le temps est celui de l'annulation, pas celui du tour.** Interrompre un tour
-   de 30 s rend la main en quelques centaines de ms, et le flux s'arrête sans
-   `finish` orphelin.
-3. **rien ne fuit.** Un tour annulé ne rend ni la session ni l'agent
-   inutilisables, et le processus n'est pas tué (il est mis en cache et réutilisé,
-   c'est voulu) — mais il n'est jamais laissé sans propriétaire.
+1. **the agent is told.** `@opencode/ai`'s `TransportRuntime` carries no
+   interruption signal: when OpenCode abandons the stream, the `Scope` closes
+   and... nothing else happens. A cancellation controller armed by a finalizer of
+   the **same** `Scope` therefore sends `session/cancel`, registered **after**
+   the session is opened so that the finalizers - which run in reverse order -
+   produce `session/cancel` then `session/close`. The fake agent records every
+   cancellation it receives in a file: a fast return proves nothing, a dated
+   `session/cancel` does.
+2. **the timing is the cancellation's, not the turn's.** Interrupting a 30 s
+   turn hands control back within a few hundred ms, and the stream stops without
+   an orphan `finish`.
+3. **nothing leaks.** A cancelled turn leaves neither the session nor the agent
+   unusable, and the process is not killed (it is cached and reused, on purpose)
+   - but it is never left without an owner.
 
-⚠️ En `session: "reuse"`, un tour **annulé** abandonne en plus la session ACP
-elle-même : sa mémoire ne peut plus être considérée comme fiable (l'agent a pu
-s'arrêter au milieu d'un tour), donc elle est fermée et le tour suivant repart
-d'une session neuve avec tout l'historique. C'est le repli `fail-safe` : perdre
-une session coûte un `session/new`, reprendre une session incohérente corrompt
-le contexte de l'agent sans aucun signe.
+⚠️ Under `session: "reuse"`, a **cancelled** turn also abandons the ACP session
+itself: its memory can no longer be considered reliable (the agent may have
+stopped mid-turn), so it is closed and the next turn starts from a fresh session
+with the whole history. This is the `fail-safe` fallback: losing a session costs
+one `session/new`, resuming an inconsistent one corrupts the agent's context
+with no sign at all.
 
-## Sessions persistantes
+## Persistent sessions
 
-Par défaut (`session: "fresh"`), chaque tour ouvre une session ACP neuve et
-renvoie **tout** l'historique dans le prompt. C'est correct, et c'est lent.
+By default (`session: "fresh"`), every turn opens a new ACP session and sends
+**the whole** history in the prompt. That is correct, and it is slow.
 
-Avec `session: "reuse"`, une **session ACP durable par conversation** est
-réutilisée d'un tour à l'autre, et **seul le delta** — les messages ajoutés
-depuis le dernier tour — est envoyé. L'agent garde ainsi sa propre mémoire, et le
-prompt cesse de grossir linéairement.
+With `session: "reuse"`, a **durable ACP session per conversation** is reused from
+one turn to the next, and **only the delta** - the messages added since the last
+turn - is sent. The agent therefore keeps its own memory, and the prompt stops
+growing linearly.
 
 ```jsonc
 { "command": "copilot", "args": ["--acp"], "session": "reuse" }
 ```
 
-### Ce que la reprise apporte — et ce qu'elle n'apporte pas
+### What resuming brings - and what it does not
 
-**Mesuré sur `copilot --acp` v1.0.88** (agent `Copilot`), sonde
-`npm run verify:resume` : quatre tours, même script dans les deux modes, tour 1
-qui pose un nom de fichier à retenir.
+**Measured on `copilot --acp` v1.0.88** (agent `Copilot`), with the
+`npm run verify:resume` probe: four turns, the same script in both modes, turn 1
+planting a file name to remember.
 
-| | tour 1 | tour 2 | tour 3 | tour 4 |
+| | turn 1 | turn 2 | turn 3 | turn 4 |
 | --- | --- | --- | --- | --- |
-| `reuse` — durée | 4 761 ms | 1 518 ms | 3 383 ms | 1 547 ms |
-| `fresh` — durée | 8 251 ms | 2 940 ms | 7 539 ms | 9 788 ms |
-| `reuse` — `cacheWrite` | 17 629 | 18 377 | 19 045 | 19 764 |
-| `fresh` — `cacheWrite` | 17 628 | 17 684 | 17 737 | 17 789 |
-| `reuse` — `input` | 17 632 | 36 012 | 55 060 | 74 827 |
-| `fresh` — `input` | 17 631 | 17 687 | 17 740 | 17 792 |
+| `reuse` - duration | 4 761 ms | 1 518 ms | 3 383 ms | 1 547 ms |
+| `fresh` - duration | 8 251 ms | 2 940 ms | 7 539 ms | 9 788 ms |
+| `reuse` - `cacheWrite` | 17 629 | 18 377 | 19 045 | 19 764 |
+| `fresh` - `cacheWrite` | 17 628 | 17 684 | 17 737 | 17 789 |
+| `reuse` - `input` | 17 632 | 36 012 | 55 060 | 74 827 |
+| `fresh` - `input` | 17 631 | 17 687 | 17 740 | 17 792 |
 
-**La reprise n'apporte pas de mémoire : les deux modes s'en souviennent.** Sur les
-quatre tours, `copilot` a restitué le nom du fichier **8 fois sur 8**, en `reuse`
-comme en `fresh`. C'est expected — et c'est ce que contredit l'affirmation
-« un agent oublie tout entre deux tours » : en `fresh`, l'historique **rejoué
-dans le prompt** porte déjà l'information. Une session neuve n'amnésique pas,
-elle relit.
+**Resuming brings no memory: both modes remember.** Over the four turns,
+`copilot` gave the file name back **8 times out of 8**, in `reuse` as in `fresh`.
+That is expected - and it is what contradicts the claim "an agent forgets
+everything between two turns": under `fresh`, the history **replayed in the
+prompt** already carries the information. A fresh session does not suffer from
+amnesia, it re-reads.
 
-Ce que la reprise apporte, en revanche, se lit dans `cacheWrite` :
+What resuming does bring is visible in `cacheWrite`:
 
-- en **`fresh`**, le prompt reconstruit est un **texte nouveau** à chaque tour :
-  l'agent le réécrit dans son cache à chaque fois (~17 700 par tour, indéfiniment) ;
-- en **`reuse`**, le préfixe est déjà dans la mémoire de l'agent : il n'écrit que
-  le delta (~750 à 1 900 par tour).
+- in **`fresh`**, the reconstructed prompt is **new text** on every turn: the
+  agent rewrites it in its cache each time (~17 700 per turn, indefinitely);
+- in **`reuse`**, the prefix is already in the agent's memory: it only writes
+  the delta (~750 to 1 900 per turn).
 
-D'où une latence par tour **~3× moindre** et plate, contre une latence qui
-**croit** avec la conversation en `fresh`.
+Hence a per-turn latency **~3× lower** and flat, against a latency that
+**grows** with the conversation in `fresh`.
 
-⚠️ Le contrepartie est dans la même colonne : `input` **croit linéairement** en
-`reuse` (17 k → 75 k sur quatre tours) alors qu'il reste plat en `fresh`. La
-première explication — « la session de l'agent contient tout ce qu'il a déjà reçu »
-— **est fausse, et la mesure le montre**. En `fresh`, l'historique rendu dans le
-prompt occupe exactement la même place dans la fenêtre de l'agent ; ce n'est pas
-l'accumulation côté session qui differentiate les deux modes.
+⚠️ The counterpart is in the same column: `input` **grows linearly** under
+`reuse` (17 k -> 75 k over four turns) whereas it stays flat under `fresh`. The
+first explanation - "the agent's session holds everything it already received" -
+**is wrong, and the measurement shows it**. Under `fresh`, the history rendered
+in the prompt takes up exactly the same room in the agent's window; it is not
+the session-side accumulation that tells the two modes apart.
 
-Ce que `input` vaut vraiment, c'est le **compteur de cache cumulé de la session**
-sur une session reprise : `cacheRead + cacheWrite`, soit 106 805 + 29 962 = 136 767
-pour un `input` de 136 785 au tour 6, là où la fenêtre réelle en occupe 30 809.
-Relevé par `npm run verify:sessions` (six tours, remplissage contrôlé), en
-comparant `input` au `usage_update.used` que l'agent annonce lui-même :
+What `input` really is, is the session's **cumulative cache counter** on a
+resumed session: `cacheRead + cacheWrite`, that is 106 805 + 29 962 = 136 767
+for an `input` of 136 785 on turn 6, where the real window takes up 30 809.
+Recorded by `npm run verify:sessions` (six turns, controlled filler), by
+comparing `input` with the `usage_update.used` the agent announces itself:
 
-| tour 6, remplissage 9 000 car./tour | `input` rapporté | contexte réel (`usage_update`) |
+| turn 6, 9 000 chars filler/turn | reported `input` | real context (`usage_update`) |
 | --- | --- | --- |
 | `fresh` | 26 674 | 27 620 |
 | `reuse` | 136 785 | 30 809 |
 
-Donc les **fenêtres réelles se remplissent à la même vitesse** dans les deux modes
-(≈ 2 200 jetons/tour en `fresh`, ≈ 2 850 en `reuse`) — l'agent n'est jamais le
-facteur limitant, et `reuse` n'atteint pas sa fenêtre plus tôt que `fresh`.
+So the **real windows fill at the same rate** in both modes (≈ 2 200 tokens/turn
+under `fresh`, ≈ 2 850 under `reuse`) - the agent is never the limiting factor,
+and `reuse` does not reach its window earlier than `fresh`.
 
-Le chiffre qui reste problématique est l'autre. `input` est ce que
-`adapters/opencode-protocol.ts` forward à `Usage.inputTokens` : **136 785 au lieu
-de 30 809**, soit un facteur 4,4. C'est ce compte que l'interface affiche et que
-le seuil de `/compact` d'OpenCode finit par rencontrer. (Ce qui est mesuré ici :
-le forwarding et le facteur ; le seuil exact d'OpenCode et sa façon d'agréger les
-usages par message ne sont pas dans ce dépôt et n'ont pas été extraits.)
+The figure that remains problematic is the other one. `input` is what
+`adapters/opencode-protocol.ts` forwards to `Usage.inputTokens`: **136 785
+instead of 30 809**, a factor of 4.4. That is the count the UI displays and the
+one OpenCode's `/compact` threshold eventually runs into. (What is measured here:
+the forwarding and the factor; OpenCode's exact threshold and the way it
+aggregates per-message usages are not in this repository and have not been
+extracted.)
 
-En `reuse`, une conversation se ferait donc compacter ~4× trop tôt, et
-l'indicateur de tokens afficherait un contexte qui n'existe pas. C'est **corrigé**
-— voir « Le compteur de tokens » — mais la mesure reste ce qui a fait de `reuse`
-une option et non le défaut : `fresh` reste le défaut, plus simple et sans état.
+Under `reuse`, a conversation would therefore be compacted ~4× too early, and
+the token indicator would display a context that does not exist. This is
+**corrected** - see "The token counter" - but the measurement is still what made
+`reuse` an option rather than the default: `fresh` remains the default, simpler
+and stateless.
 
-Ce que la reprise n'apporte donc **pas** : une mémoire que `fresh` n'aurait pas.
-Ce qu'elle apporte : un prompt et une latence par tour constants. `fresh` reste le
-défaut — plus simple, correct, et le seul dont le comptage de tokens ne dépende
-d'aucune correction.
+What resuming therefore does **not** bring: a memory `fresh` would not have.
+What it does bring: a constant prompt and a constant per-turn latency. `fresh`
+remains the default - simpler, correct, and the only mode whose token counting
+depends on no correction at all.
 
-### Le compteur de tokens
+### The token counter
 
-L'agent ne se contredit pas toujours. En `fresh`, son `input` **est** la fenêtre
-(0,97×) ; en `reuse`, c'est la comptabilité cumulée de la session (4,4×). Le même
-`events` porte les deux, et l'`usage_update` que l'agent envoie pendant le tour
-donne la seule lecture non ambiguë de ce qu'il occupe réellement.
+The agent does not always contradict itself. Under `fresh`, its `input` **is**
+the window (0.97×); under `reuse`, it is the session's cumulative accounting
+(4.4×). The same `events` carries both, and the `usage_update` the agent sends
+during the turn gives the only unambiguous reading of what it really occupies.
 
-Le réducteur (`adapters/opencode-protocol.ts`) retient donc cette lecture et ne
-s'en sert **que** lorsque le compteur la contredit nettement : au-delà de 2×. Ce
-seuil n'est pas un réglage arbitraire — c'est ce qui sépare les deux régimes
-mesurés. `fresh` est à 0,97×, l'écart naturel entre « jetons envoyés » et « jetons
-réservés » n'atteint pas 2×, et `reuse` le dépasse dès le deuxième tour : au-delà
-de la fenêtre, le compteur ferait compacter OpenCode trois tours avant l'heure
-au lieu de quatre fois trop tôt. Un agent qui n'envoie aucun `usage_update` n'a
-rien contre quoi comparer, et son `input` est donc forwardé tel quel.
+The reducer (`adapters/opencode-protocol.ts`) therefore keeps that reading and
+uses it **only** when the counter clearly contradicts it: beyond 2×. That
+threshold is not an arbitrary setting - it is what separates the two measured
+regimes. `fresh` sits at 0.97×, the natural gap between "tokens sent" and
+"tokens reserved" never reaches 2×, and `reuse` exceeds it from the second turn
+on: beyond the window, the counter would make OpenCode compact three turns early
+instead of four times too early. An agent that sends no `usage_update` has
+nothing to compare against, so its `input` is forwarded as-is.
 
-La correction porte sur le **total**, jamais sur le coût du tour : `output` et
-`total` sont ceux de l'agent. Et elle rescale les trois termes de l'entrée, pas
-seulement leur somme — `cacheRead` laissé tel quel dépasserait la fenêtre dont il
-fait partie. `nonCached + cacheRead + cacheWrite = input` reste donc vrai à
-l'arrondi près, y compris pour un agent qui annonce plus de jetons en cache que
-jetons envoyés.
+The correction applies to the **total**, never to the turn's cost: `output` and
+`total` are the agent's. And it rescales the three terms of the input, not just
+their sum - a `cacheRead` left as-is would exceed the window it is part of.
+`nonCached + cacheRead + cacheWrite = input` therefore remains true, rounding
+errors aside, including for an agent that reports more cached tokens than sent
+tokens.
 
-### Comment une conversation est reconnue
+### How a conversation is recognised
 
-`LLMRequest` ne porte **ni `sessionID` ni `cwd`** (§9bis), donc il n'existe aucun
-identifiant à opposer à une session ACP. La reconnaissance repose sur deux
-niveaux, et c'est cette séparation qui rend la reprise sûre :
+`LLMRequest` carries **neither `sessionID` nor `cwd`** (§9bis), so there is no
+identifier to set against an ACP session. Recognition rests on two levels, and
+that separation is what makes resuming safe:
 
-1. **une clé d'indexation** — `sha256(agent + cwd + modèle + premier message)`.
-   Stable malgré la croissance de la conversation : c'est elle qui permet de
-   retrouver « la session vivante de cette conversation » en O(1).
-2. **une preuve de continuité** — la session retenue a reçu `N` messages ; le tour
-   n'est repris que si l'historique reçu est **exactement** une extension de
-   ceux-là, message par message. Au moindre écart, la session est fermée et on
-   repart d'une session neuve avec tout l'historique.
+1. **an indexing key** - `sha256(agent + cwd + model + first message)`.
+   Stable despite the conversation growing: it is what allows finding "the live
+   session of this conversation" in O(1).
+2. **a proof of continuity** - the retained session has received `N` messages;
+   the turn is only resumed if the received history is **exactly** an extension
+   of those, message by message. At the slightest gap, the session is closed and
+   a fresh one is started with the whole history.
 
-La clé est une **astuce d'indexation** ; la continuité est une **garantie**. La
-preuve porte sur l'historique *entier*, pas sur un préfixe : deux conversations
-qui partagent leurs N premiers messages et divergent ensuite ne peuvent donc pas
-se voler une session — c'est précisément le cas qu'une empreinte de préfixe ne
-détecterait pas.
+The key is an **indexing trick**; continuity is a **guarantee**. The proof
+covers the *whole* history, not a prefix: two conversations that share their
+first N messages and diverge afterwards therefore cannot steal each other's
+session - which is precisely the case a prefix fingerprint would not detect.
 
-| Cas | Ce qui se passe |
+| Case | What happens |
 | --- | --- |
-| Tour suivant normal | Delta envoyé, session réutilisée |
-| Message **édité** | Empreinte différente à ce rang → session neuve, tout l'historique |
-| **Fork**, prépend | Idem |
-| `/compact` (résumé en rang 0) | Clé différente → session neuve, **et l'ancienne est fermée** |
-| **Changement de modèle** | Clé différente → session neuve (une session a appliqué son modèle par `set_config_option`) |
-| `cwd` ou agent différent | Clé différente → session neuve |
-| Rejeu du même tour | Delta vide refusé → session neuve (un prompt sans message produirait un `ACK:` muet) |
-| Tour annulé, agent mort | Session **empoisonnée** → fermée, tour suivant sur une session neuve |
-| Hors LRU (8 sessions) | La moins récemment utilisée est fermée, **sauf** si elle porte un tour |
+| Normal next turn | Delta sent, session reused |
+| **Edited** message | Different fingerprint at that rank -> fresh session, whole history |
+| **Fork**, prepend | Same |
+| `/compact` (summary at rank 0) | Different key -> fresh session, **and the old one is closed** |
+| **Model change** | Different key -> fresh session (a session applied its model through `set_config_option`) |
+| Different `cwd` or agent | Different key -> fresh session |
+| Replay of the same turn | Empty delta refused -> fresh session (a prompt without a message would produce a silent `ACK:`) |
+| Cancelled turn, dead agent | **Poisoned** session -> closed, next turn on a fresh session |
+| Out of LRU (8 sessions) | The least recently used is closed, **unless** it carries a turn |
 
-Une session **inatteignable** est fermée dès qu'on la reconnaît comme telle. Une
-réécriture de l'ancre (ce que fait `/compact`) déplace la clé, et l'ancienne
-session resterait alors vivante sous une clé que rien ne redemandera — une
-session ACP perdue par compaction, jusqu'à l'arrêt du serveur. Le pool la
-reconnaît à ce qu'il reste : **même agent, même dossier, même modèle, et des
-messages encore présents dans l'historique reçu** — ce qu'un `/compact` laisse
-toujours, puisqu'il garde la fin récente des échanges et ne remplace que le
-résumé de tête. Deux conversations réellement distinctes ne partagent aucun
-message, et la leur n'est donc jamais touchée. Une session qui porte encore un
-tour ne l'est pas davantage : le balayage attend qu'elle se libère, et le LRU
-ramasse ce qui traîne.
+An **unreachable** session is closed as soon as it is recognised as such. A
+rewrite of the anchor (what `/compact` does) moves the key, and the old session
+would then stay alive under a key nothing will ever ask for again - an ACP
+session lost to compaction, until the server stops. The pool recognises it by
+what is left: **same agent, same directory, same model, and messages still
+present in the received history** - which a `/compact` always leaves, since it
+keeps the recent end of the exchanges and only replaces the head summary. Two
+genuinely distinct conversations share no message, so theirs is never touched.
+A session that still carries a turn is not touched either: the sweep waits for
+it to free up, and the LRU collects whatever is left over.
 
-⚠️ Ce que la reprise **ne** fait pas : le système, le catalogue d'outils et le
-contrat de sortie sont **renvoyés en entier à chaque tour**. Seule l'historique
-est deltaïsé — c'est l'historique qui double, pas les instructions. La section
-transcript est alors titrée « Conversation — suite », avec une ligne qui dit à
-l'agent que la suite a déjà été échangée et qu'il ne doit pas la répéter.
+⚠️ What resuming does **not** do: the system, the tool catalogue and the output
+contract are **sent again in full on every turn**. Only the history is
+deltafied - it is the history that doubles, not the instructions. The transcript
+section is then titled "Conversation - continued", with a line telling the agent
+that the continuation has already been exchanged and that it must not repeat it.
 
-⚠️ Deux requêtes **sur la même conversation** sont mises en file FIFO : ACP
-refuse deux `session/prompt` concurrents sur une session, et les notifications
-des deux tours seraient indiscernables. Deux conversations différentes ont deux
-clés, donc deux files : elles tournent en parallèle.
+⚠️ Two requests **on the same conversation** are queued FIFO: ACP refuses two
+concurrent `session/prompt` on one session, and the notifications of both turns
+would be indistinguishable. Two different conversations have two keys, hence two
+queues: they run in parallel.
 
-Les sessions retenues sont fermées au déchargement du plugin et par
-`closeAllSessions()` ; le LRU est borné à 8 sessions par agent, et n'évince
-jamais une session qui porte un tour en cours.
+Retained sessions are closed when the plugin unloads and by `closeAllSessions()`;
+the LRU is bounded to 8 sessions per agent, and never evicts a session carrying
+a turn in progress.
 
 ## Installation
 
-Le paquet expose deux points d'entrée : le **plugin** (chargé par OpenCode) et
-le **provider** (le champ `package` du `Provider.Info`, qui pointe sur
-`src/index.ts` en local ou `dist/index.js` après un build). L'URL est calculée
-depuis `import.meta.url`, donc les deux layouts fonctionnent.
+The package exposes two entry points: the **plugin** (loaded by OpenCode) and the
+**provider** (the `Provider.Info`'s `package` field, which points at
+`src/index.ts` locally or `dist/index.js` after a build). The URL is computed
+from `import.meta.url`, so both layouts work.
 
-### En une commande
+### In one command
 
-Pas de publication npm : on clone, puis on lance le script.
+No npm publication: clone, then run the script.
 
 ```bash
 git clone <url> opencode-acp-provider
@@ -314,33 +314,34 @@ bun install
 ./install.sh
 ```
 
-`install.sh` écrit `~/.config/opencode/opencode.jsonc` (créé s'il n'existe pas).
-C'est tout : il n'y a rien à compiler, le plugin est chargé depuis `src/`.
+`install.sh` writes `~/.config/opencode/opencode.jsonc` (created if it does not
+exist). That is all: there is nothing to compile, the plugin is loaded from
+`src/`.
 
-| Option | Effet |
+| Option | Effect |
 | --- | --- |
-| *(aucune)* | `--global` : `~/.config/opencode/opencode.jsonc` |
-| `--local` | `./opencode.jsonc`, dans le répertoire courant |
-| `--config <chemin>` | fichier de configuration explicite |
-| `--status` | rapporte l'état, n'écrit rien |
-| `--uninstall` | retire l'entrée de ce dépôt |
-| `--agent "<cmd> [args…]"` | agent à configurer, répétable (défaut : `copilot --acp` **à la création seulement**) |
-| `--no-agent` | n'écrit aucun agent, à vous de les ajouter |
-| `--force` | autorise la réécriture d'une configuration **commentée** |
-| `--yes` | ne demande pas confirmation |
+| *(none)* | `--global`: `~/.config/opencode/opencode.jsonc` |
+| `--local` | `./opencode.jsonc`, in the current directory |
+| `--config <path>` | explicit configuration file |
+| `--status` | reports the state, writes nothing |
+| `--uninstall` | removes this repository's entry |
+| `--agent "<cmd> [args…]"` | agent to configure, repeatable (default: `copilot --acp` **at creation only**) |
+| `--no-agent` | writes no agent, you add them yourself |
+| `--force` | allows rewriting a **commented** configuration |
+| `--yes` | does not ask for confirmation |
 
 ```bash
 ./install.sh --local --agent "opencode acp" --agent "copilot --acp"
 ```
 
-Le résultat, pour cette commande :
+The result, for that command:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/chemin/absolu/vers/opencode-acp-provider/src/plugin.ts",
+      "package": "/absolute/path/to/opencode-acp-provider/src/plugin.ts",
       "options": {
         "agents": [
           { "command": "opencode", "args": ["acp"] },
@@ -352,69 +353,70 @@ Le résultat, pour cette commande :
 }
 ```
 
-⚠️ **Le chemin est absolu, et il est calculé depuis le script.** Il ne dépend
-donc pas du répertoire depuis lequel OpenCode est lancé. En contrepartie, il
-devient faux si le dépôt est déplacé : relancez `install.sh`, qui répare le
-chemin sans dupliquer l'entrée.
+⚠️ **The path is absolute, and it is computed from the script.** It therefore
+does not depend on the directory OpenCode is launched from. In exchange, it
+becomes wrong if the repository is moved: re-run `install.sh`, which repairs the
+path without duplicating the entry.
 
-### Ce que le script refuse de faire
+### What the script refuses to do
 
-Il ne remplace jamais une configuration. Chacune de ces situations s'arrête avec
-un message, **sans rien écrire** :
+It never replaces a configuration. Each of these situations stops with a
+message, **writing nothing**:
 
-| Situation | Pourquoi on refuse |
+| Situation | Why it is refused |
 | --- | --- |
-| `plugins` n'est pas un tableau | une fusion suppose un tableau ; l'écraser prendrait un choix à votre place |
-| une entrée de `plugins` n'est pas un objet | même raison, et le curseur du champ serait perdu |
-| deux entrées pointent déjà sur ce dépôt | le script en laisse **une** ; choisir à votre place serait arbitraire |
-| le fichier contient des commentaires | la réécriture les perdrait. `--force` passe outre, et le dit |
+| `plugins` is not an array | a merge assumes an array; overwriting it would make the choice for you |
+| a `plugins` entry is not an object | same reason, and the field's cursor would be lost |
+| two entries already point at this repository | the script leaves **one**; choosing for you would be arbitrary |
+| the file holds comments | the rewrite would lose them. `--force` goes through, and says so |
 
-Quand il écrit, il **sauvegarde d'abord** (`opencode.jsonc.bak-<horodatage>`),
-puis **relit** le fichier et vérifie que l'entrée a bien survécu ; une
-configuration illisible ou une écriture ratée est restaurée. Enfin, il
-reconnaît une entrée déjà présente sous une autre écriture — chemin relatif,
-chemin vers `dist/plugin.js`, nom npm `opencode-acp-provider` — et la met à jour
-au lieu d'en ajouter une seconde. Relancer le script ne duplique donc rien.
+When it writes, it **backs up first** (`opencode.jsonc.bak-<timestamp>`), then
+**re-reads** the file and checks the entry really survived; an unreadable
+configuration or a failed write is restored. Finally, it recognises an entry
+already present under another spelling - relative path, path to `dist/plugin.js`,
+npm name `opencode-acp-provider` - and updates it instead of adding a second
+one. Re-running the script therefore duplicates nothing.
 
-⚠️ **`copilot --acp` n'est le défaut qu'à la création.** Relancer `./install.sh`
-sans `--agent` **conserve** les agents déjà déclarés, y compris une liste
-écrite à la main : un ré-installateur qui remettait `copilot --acp` par-dessus
-vos agents l'aurait fait silencieusement. Pour changer la liste, on le demande
-explicitement avec `--agent`.
+⚠️ **`copilot --acp` is the default only at creation.** Re-running `./install.sh`
+without `--agent` **keeps** the agents already declared, including a
+hand-written list: a reinstaller that put `copilot --acp` back on top of your
+agents would do so silently. To change the list, you ask for it explicitly with
+`--agent`.
 
-### Prérequis
+### Prerequisites
 
-Vérifiés par le script, qui signale ce qui manque :
+Verified by the script, which reports what is missing:
 
-- **`node_modules` complet** — sinon `bun install` d'abord. Le provider est
-  importé par le serveur OpenCode, qui résout ses dépendances : sans elles, le
-  premier tour échoue sur un import.
-- **Un runtime JavaScript** (`bun` ou `node`) — c'est lui qui fusionne la
+- **a complete `node_modules`** - otherwise run `bun install` first. The provider
+  is imported by the OpenCode server, which resolves its dependencies: without
+  them, the first turn fails on an import.
+- **a JavaScript runtime** (`bun` or `node`) - it is what merges the
   configuration.
-- **La version d'OpenCode** doit correspondre à celle de `@opencode/plugin`
-  (voir « Versions »). Le plugin est chargé par le serveur : c'est sa version
-  qui fait foi, pas la vôtre.
-- **L'agent ACP** installé et authentifié — `copilot`, `opencode`, `gemini`…
+- **OpenCode's version** must match `@opencode/plugin`'s (see "Versions"). The
+  plugin is loaded by the server: its version is the one that counts, not
+  yours.
+- **the ACP agent** installed and authenticated - `copilot`, `opencode`,
+  `gemini`…
 
-### Écrire la configuration à la main
+### Writing the configuration by hand
 
-Rien n'oblige à passer par le script.
+Nothing forces you to go through the script.
 
-En local, sans build (un chemin relatif est résolu depuis le fichier de
-configuration) :
+Locally, without a build (a relative path is resolved from the configuration
+file):
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "./chemin/vers/opencode-acp-provider/src/plugin.ts",
+      "package": "./path/to/opencode-acp-provider/src/plugin.ts",
       "options": { "agents": [{ "command": "copilot", "args": ["--acp"] }] }
     }
   ]
 }
 ```
 
-Installé (npm) :
+Installed (npm):
 
 ```jsonc
 {
@@ -427,43 +429,43 @@ Installé (npm) :
 }
 ```
 
-Prérequis : **Bun** (le plugin et le provider tournent dans le process Bun
-d'OpenCode), l'agent ACP installé et authentifié, et un OpenCode dont la version
-correspond à celle de `@opencode/plugin` (voir « Versions » plus bas).
+Prerequisites: **Bun** (the plugin and the provider run in OpenCode's Bun
+process), the ACP agent installed and authenticated, and an OpenCode whose
+version matches `@opencode/plugin`'s (see "Versions" below).
 
 ## Configuration
 
-Tout se passe dans `plugins[].options`. Sans configuration, l'agent par défaut est
-`copilot --acp`.
+Everything happens in `plugins[].options`. Without configuration, the default
+agent is `copilot --acp`.
 
-| Champ | Type | Défaut | Rôle |
+| Field | Type | Default | Role |
 | --- | --- | --- | --- |
-| `agents` | `AgentConfig[]` | `[{ "command": "copilot", "args": ["--acp"] }]` | Les agents à découvrir ; **chacun devient un provider** |
-| `refreshMs` | `number` | `60000` | Délai minimum entre deux redécouvertes ; `0` désactive |
-| `discoveryTimeoutMs` | `number` | `10000` | Borne haute de la découverte (lancement + `initialize` + inventaire) |
-| `discoveryIdleTimeoutMs` | `number` | `10000` | Délai maximum sans signe de vie de l'agent pendant la découverte |
+| `agents` | `AgentConfig[]` | `[{ "command": "copilot", "args": ["--acp"] }]` | The agents to discover; **each one becomes a provider** |
+| `refreshMs` | `number` | `60000` | Minimum delay between two rediscoveries; `0` disables |
+| `discoveryTimeoutMs` | `number` | `10000` | Upper bound of the discovery (spawn + `initialize` + inventory) |
+| `discoveryIdleTimeoutMs` | `number` | `10000` | Maximum delay without a sign of life from the agent during the discovery |
 
-`discoveryTimeoutMs` et `discoveryIdleTimeoutMs` existent parce que `setup()`
-est **awaité par l'hôte** : c'est le seul endroit du projet où une attente peut
-bloquer le chargement d'OpenCode. Les deux bornes sont vidées dans un `finally`,
-donc un minuteur résiduel ne retient jamais le process du serveur en vie. Un
-agent qui démarre lentement se règle en **augmentant** `discoveryTimeoutMs` — la
-borne d'inactivité, elle, autorise tout agent qui **parle** (son stderr la
-remet à zéro) à disposer de toute la borne globale. Un agent abandonné en cours
-de route est tué dès qu'il existe : aucun orphelin par chargement de plugin.
+`discoveryTimeoutMs` and `discoveryIdleTimeoutMs` exist because `setup()` is
+**awaited by the host**: it is the only place in the project where a wait can
+block OpenCode's loading. Both bounds are cleared in a `finally`, so a leftover
+timer never keeps the server process alive. A slow-starting agent is handled by
+**increasing** `discoveryTimeoutMs` - the inactivity bound, on the other hand,
+lets any agent that **talks** (its stderr resets it) have the whole global bound.
+An agent abandoned midway is killed as soon as it exists: no orphan per plugin
+load.
 
-`AgentConfig` :
+`AgentConfig`:
 
-| Champ | Type | Rôle |
+| Field | Type | Role |
 | --- | --- | --- |
-| `command` | `string` **obligatoire** | La commande à lancer |
-| `args` | `string[]` | Les arguments (`["--acp"]`) |
-| `cwd` | `string` | Répertoire de travail de l'agent (le process est *partagé* entre toutes les requêtes — cf. `PLAN.md` §9bis) |
-| `env` | `Record<string,string>` | Variables **ajoutées** à celles du serveur |
-| `allowedTools` | `string[]` | `["*"]` = tout autoriser ; absent = tout refuser (§7.4) |
-| `limits` | `{ context, output }` | Limites annoncées dans `/model` |
-| `id` | `string` | Étiquette **et** identifiant de provider ; défaut : aucun (`acp`) |
-Exemple :
+| `command` | `string` **mandatory** | The command to start |
+| `args` | `string[]` | The arguments (`["--acp"]`) |
+| `cwd` | `string` | The agent's working directory (the process is *shared* across all requests - cf. `PLAN.md` §9bis) |
+| `env` | `Record<string,string>` | Variables **added** to the server's |
+| `allowedTools` | `string[]` | `["*"]` = allow everything; absent = deny everything (§7.4) |
+| `limits` | `{ context, output }` | The limits announced in `/model` |
+| `id` | `string` | **Label** and provider id; default: none (`acp`) |
+Example:
 
 ```jsonc
 {
@@ -487,11 +489,10 @@ Exemple :
 }
 ```
 
-## Plusieurs agents
+## Several agents
 
-Chaque entrée de `agents` donne **un provider** : son propre inventaire de
-modèles, ses propres variantes d'effort, son propre process d'agent et son propre
-pool de sessions ACP.
+Each `agents` entry gives **one provider**: its own model inventory, its own
+effort variants, its own agent process and its own pool of ACP sessions.
 
 ```jsonc
 {
@@ -509,17 +510,17 @@ pool de sessions ACP.
 }
 ```
 
-`/model` affiche alors `acp-copilot/claude-sonnet-5` **et** `acp/claude-sonnet-5`
-côte à côte, et le réglage se fait par provider :
+`/model` then displays `acp-copilot/claude-sonnet-5` **and**
+`acp/claude-sonnet-5` side by side, and the setting is made per provider:
 
 ```jsonc
 { "provider": { "acp-copilot": { "options": { "session": "reuse" } } } }
 ```
 
-### Choisir un mode de session par agent
+### Choosing a session mode per agent
 
-`agents[].session` est le moyen de **déclarer le mode dans l'entrée d'agent**,
-c'est-à-dire à l'endroit où l'on décrit déjà la commande, le `cwd` et l'`env` :
+`agents[].session` is the way to **declare the mode in the agent entry**, that
+is, where you already describe the command, the `cwd` and the `env`:
 
 ```jsonc
 {
@@ -547,281 +548,277 @@ c'est-à-dire à l'endroit où l'on décrit déjà la commande, le `cwd` et l'`e
 }
 ```
 
-Les deux formes écrivent le même réglage, et `agents[].session` **gagne** sur
-`provider.acp-copilot.options.session` : l'entrée d'agent *est* la configuration
-par agent. Un agent qui ne dit rien ne publie **aucune** clé `session`, donc une
-configuration écrite avant l'existence du champ produit exactement le même
-provider qu'avant — et c'est vérifié par un test qui compare les clés publiées, pas
-seulement le comportement.
+Both forms write the same setting, and `agents[].session` **wins** over
+`provider.acp-copilot.options.session`: the agent entry *is* the per-agent
+configuration. An agent that says nothing publishes **no** `session` key, so a
+configuration written before the field existed produces exactly the same
+provider as before - and a test verifies that by comparing the published keys, not
+only the behaviour.
 
-| `agents[].session` | effet |
+| `agents[].session` | effect |
 | --- | --- |
-| absent (défaut) | `fresh` — une session ACP par appel de modèle |
-| `"fresh"` | idem, explicite |
-| `"reuse"` | une session ACP par conversation, delta seul |
-| autre valeur | refusé : `options.agents[N].session doit valoir "fresh", "reuse"` |
+| absent (default) | `fresh` - one ACP session per model call |
+| `"fresh"` | same, explicit |
+| `"reuse"` | one ACP session per conversation, delta only |
+| any other value | refused: `options.agents[N].session must be one of "fresh", "reuse"` |
 
-### L'identifiant du provider
+### The provider id
 
-| `agents[].id` | provider publié |
+| `agents[].id` | published provider |
 | --- | --- |
 | absent | `acp` |
 | `"copilot"` | `acp-copilot` |
-| `"Mon Agent!"` | `acp-mon-agent` |
+| `"My Agent!"` | `acp-my-agent` |
 
-Trois règles, et chacune a une raison :
+Three rules, and each has a reason:
 
-- **Un agent sans `id` garde `acp`.** C'est la compatibilité : une configuration
-  écrite avant les agents multiples continue de publier le provider auquel son
-  bloc `providers.acp.settings` fait référence.
-- **Un `id` nommé est préfixé par `acp-`.** C'est ce qui rend une collision avec
-  un provider d'OpenCode improbable : OpenCode livre `openai`, `anthropic`,
-  `github-copilot`…, et l'utilisateur peut déclarer les siens. `editor.add`
-  **remplace** l'entrée qui porte le même `id` — sans ce préfixe, un agent nommé
-  `copilot` remplacerait purement et simplement un provider existant.
-- **L'`id` est réduit à `[a-z0-9-]`** (minuscules, espaces et ponctuation
-  remplacés par `-`). Un identifiant est tapé après `provider/model`, utilisé
-  comme filtre dans le TUI et mis dans une URL : `acp-Mon Agent!` devrait être
-  échappé au moins une fois. Un `id` qui ne laisse **aucun** caractère utilisable
-  (`"///"`) est **refusé** plutôt que ramené à `acp` : l'utilisateur a demandé un
-  nom, et le lui donner par défaut cacherait la faute de frappe derrière une
-  configuration qui marche.
+- **An agent without an `id` keeps `acp`.** That is compatibility: a
+  configuration written before multiple agents still publishes the provider its
+  `providers.acp.settings` block refers to.
+- **A named `id` is prefixed with `acp-`.** That is what makes a collision with
+  an OpenCode provider unlikely: OpenCode ships `openai`, `anthropic`,
+  `github-copilot`..., and the user can declare their own. `editor.add`
+  **replaces** the entry carrying the same `id` - without that prefix, an agent
+  named `copilot` would simply replace an existing provider.
+- **The `id` is reduced to `[a-z0-9-]`** (lowercase, spaces and punctuation
+  replaced with `-`). An identifier is typed after `provider/model`, used as a
+  filter in the TUI and put in a URL: `acp-My Agent!` would have to be escaped
+  at least once. An `id` leaving **no** usable character (`"///"`) is
+  **refused** rather than brought back to `acp`: the user asked for a name, and
+  giving them the default one would hide the typo behind a working
+  configuration.
 
-### Que faire d'un identifiant en conflit
+### What to do with a conflicting id
 
-**L'agent est écarté, et le journal nomme l'identifiant.** Deux cas :
+**The agent is dropped, and the log names the id.** Two cases:
 
-- **Deux agents de la configuration revendiquent le même id** — après
-  normalisation, `copilot` et `Copilot` ne font qu'un. Le **premier** gagne,
-  l'autre est journalisé. Laisser les deux passer serait pire qu'un doublon :
-  `editor.add` remplace, donc `/model` montrerait les modèles du second sous le
-  nom du premier — une substitution silencieuse.
-- **L'id est déjà pris par un autre provider** (construit-in ou déclaré par
-  l'utilisateur dans `providers`). L'agent est écarté. Le renommer
-  automatiquement n'est pas une option : « le prochain nom libre » n'est pas
-  stable d'un redémarrage à l'autre, donc `/model` changerait d'identifiant à
-  chaque provider ajouté. Refuser est le seul comportement déterministe, et le
-  message indique quoi faire.
+- **Two agents from the configuration claim the same id** - after
+  normalisation, `copilot` and `Copilot` are one and the same. The **first**
+  wins, the other is logged. Letting both through would be worse than a
+  duplicate: `editor.add` replaces, so `/model` would show the second one's
+  models under the first one's name - a silent substitution.
+- **The id is already taken by another provider** (built-in or declared by the
+  user in `providers`). The agent is dropped. Renaming it automatically is not
+  an option: "the next free name" is not stable from one restart to the next, so
+  `/model` would change id with every provider added. Refusing is the only
+  deterministic behaviour, and the message says what to do.
 
-Dans les deux cas les autres agents sont enregistrés normalement, et le journal
-termine par `1 agent(s) écarté(s)`.
+In both cases the other agents are registered normally, and the log ends with
+`1 agent(s) dropped`.
 
-⚠️ **Un agent en échec n'en bloque pas d'autres**, mais la découverte est
-**séquentielle** : le démarrage de N agents est additionnel, pas parallèle. C'est
-délibéré — chaque découverte lance un agent qui s'authentifie, et N agents qui
-démarrent ensemble au boot sont exactement le pic que `discoveryTimeoutMs` existe
-pour éviter. Un agent mort coûte au plus sa borne, une fois.
+⚠️ **A failing agent does not block the others**, but the discovery is
+**sequential**: starting N agents is additive, not parallel. That is
+deliberate - each discovery starts an agent that authenticates, and N agents
+starting together at boot are exactly the burst `discoveryTimeoutMs` exists to
+avoid. A dead agent costs at most its bound, once.
 
-## Mappings ACP → OpenCode
+## ACP -> OpenCode mappings
 
-Relevé de référence sur `copilot --acp` (agent `Copilot` v1.0.88) : 20 valeurs de
-catégorie `model` (dont `auto`), 6 niveaux d'effort, 3 modes, 1 option de
-permissions.
+Baseline reading on `copilot --acp` (agent `Copilot` v1.0.88): 20 values in the
+`model` category (including `auto`), 6 effort levels, 3 modes, 1 permissions
+option.
 
-| Catégorie ACP | Cible OpenCode | Détail |
+| ACP category | OpenCode target | Detail |
 | --- | --- | --- |
-| `model` | **un `Model.Info` par valeur** | `acp/gpt-5.6-terra`, `acp/claude-sonnet-5`… |
-| `thought_level` | **un `variant` par valeur** | `settings: { effort: "high" }` → `set_config_option(<l'`id` de l'agent>)` avant le prompt |
-| `mode` | *(rien)* | les modes ACP sont des agents, pas des modèles : hors périmètre pour l'instant |
-| `permissions` | *(rien)* | non utilisée par la politique — voir « Portabilité » |
+| `model` | **one `Model.Info` per value** | `acp/gpt-5.6-terra`, `acp/claude-sonnet-5`... |
+| `thought_level` | **one `variant` per value** | `settings: { effort: "high" }` -> `set_config_option(<the agent's `id`>)` before the prompt |
+| `mode` | *(nothing)* | ACP modes are agents, not models: out of scope for now |
+| `permissions` | *(nothing)* | unused by the policy - see "Portability" |
 
-Le `Model.ID` est **exactement** la valeur ACP : c'est ce que l'adaptateur
-renvoie à `set_config_option`, sans table de correspondance.
+The `Model.ID` is **exactly** the ACP value: that is what the adapter sends back
+to `set_config_option`, with no mapping table.
 
-Le provider s'appelle `acp`, ou `acp-<id>` pour un agent nommé (voir « Plusieurs
-agents »), et son `name` est `ACP — <agentInfo.name>`. Son
-`package` est une URL `file://` **absolue** vers le module exportant `model`,
-calculée depuis `import.meta.url` (`resolvePackageURL` dans `src/plugin.ts`).
+The provider is called `acp`, or `acp-<id>` for a named agent (see "Several
+agents"), and its `name` is `ACP — <agentInfo.name>`. Its `package` is an
+**absolute** `file://` URL to the module exporting `model`, computed from
+`import.meta.url` (`resolvePackageURL` in `src/plugin.ts`).
 
-## Portabilité — deux agents, le même code
+## Portability - two agents, the same code
 
-`verify:agent` qualifie un agent quelconque et rapporte une capacité par ligne :
-`ok` (on le fait), `degrade` (l'agent le fait autrement et on s'en accommode),
-`absent` (l'agent ne le propose pas). **Aucun de ces trois vericts n'est un
-échec** ; seul `BROKEN`, qui signifie que *notre* code ne sait pas faire, change
-le code de sortie.
+`verify:agent` qualifies any agent and reports one capability per line: `ok` (we
+do it), `degrade` (the agent does it differently and we make do), `absent` (the
+agent does not offer it). **None of these three verdicts is a failure**; only
+`BROKEN`, which means that *our* code does not know how, changes the exit code.
 
 ```bash
 npm run verify:agent -- copilot --acp
 npm run verify:agent -- opencode acp
 ```
 
-Relevé réel, côte à côte :
+Real reading, side by side:
 
-| Capacité | `copilot --acp` 1.0.88 | `opencode acp` 2.0.16 |
+| Capability | `copilot --acp` 1.0.88 | `opencode acp` 2.0.16 |
 | --- | --- | --- |
-| `id` de l'option `model` | `model` | `model` |
-| `id` de l'option d'effort | `reasoning_effort` | **`effort`** |
-| `id` de l'option `mode` | `mode` | `mode` |
-| catégorie `permissions` | `allow_all` | **aucune** |
-| ids de mode | 3 **URL** | 2 **chaînes simples** |
-| niveaux d'effort | `none … max` (6) | `low … max` + **`default`** (6) |
-| ids de modèle | `claude-sonnet-5` | **`opencode/big-pickle`** |
+| `id` of the `model` option | `model` | `model` |
+| `id` of the effort option | `reasoning_effort` | **`effort`** |
+| `id` of the `mode` option | `mode` | `mode` |
+| `permissions` category | `allow_all` | **none** |
+| mode ids | 3 **URLs** | 2 **plain strings** |
+| effort levels | `none … max` (6) | `low … max` + **`default`** (6) |
+| model ids | `claude-sonnet-5` | **`opencode/big-pickle`** |
 | `set_config_option(effort)` | `ok` | `ok` |
 | `set_config_option(model)` | `ok` | `ok` |
-| contrat de sortie JSON | `ok` | `ok` |
-| `request_permission` | `ok` (3 options) | `absent` (ne demande rien) |
-| annulation | `absent` (tour trop court) | `ok` (`stopReason=cancelled`) |
-| **verdict** | **CONFORME** | **CONFORME** |
+| JSON output contract | `ok` | `ok` |
+| `request_permission` | `ok` (3 options) | `absent` (asks for nothing) |
+| cancellation | `absent` (turn too short) | `ok` (`stopReason=cancelled`) |
+| **verdict** | **CONFORM** | **CONFORM** |
 
-Aucune hypothèse sur `copilot` n'a dû être retirée : les cinq différences se
-logent déjà dans le code, et la sonde le prouve sur les deux.
+No assumption about `copilot` had to be withdrawn: the five differences are
+already logged in the code, and the probe proves it on both.
 
-### Le `configId` est un `id`, jamais une catégorie
+### The `configId` is an `id`, never a category
 
-C'est la distinction qui tient tout le reste. Une `ConfigOption` porte un
-`category` **et** un `id`, et seul l'`id` est un `configId` valide — mesuré, les
-deux agents **refusent** leur propre catégorie (`Unknown config option
-'thought_level'`, `unknown config option`). Le code résout donc l'option par
-catégorie dans l'inventaire, puis envoie son `id` : `applyOption` dans
-`adapters/opencode-transport.ts`, et les deux autres appelants (`setModel` dans
-`acp/agent.ts`, `--effort` dans `adapters/cli.ts`).
+That is the distinction everything else rests on. A `ConfigOption` carries a
+`category` **and** an `id`, and only the `id` is a valid `configId` - measured,
+both agents **refuse** their own category (`Unknown config option
+'thought_level'`, `unknown config option`). The code therefore resolves the
+option by category in the inventory, then sends its `id`: `applyOption` in
+`adapters/opencode-transport.ts`, and the two other callers (`setModel` in
+`acp/agent.ts`, `--effort` in `adapters/cli.ts`).
 
-⚠️ `opencode acp` accepte `model` comme catégorie **par accident** : son `id`
-vaut `model`. Une sonde de conformité qui n'aurait testé que ce cas serait
-passée. `test/fake-acp.ts` refuse désormais un `configId` inconnu, comme le font
-les vrais agents, pour que la confusion ne puisse pas survivre en test.
+⚠️ `opencode acp` accepts `model` as a category **by accident**: its `id` is
+`model`. A conformance probe that had only tested that case would have passed.
+`test/fake-acp.ts` now refuses an unknown `configId`, as real agents do, so the
+confusion cannot survive in a test.
 
-### Un `id` de modèle peut contenir un `/`
+### A model `id` can contain a `/`
 
-C'est le point le plus sérieux, et **ce n'est pas un défaut**. `opencode acp`
-publie `opencode/big-pickle` ; le nommage `provider/model` d'OpenCode semble
-interdire le `/`, alors qu'il l'exige.
+That is the most serious point, and **it is not a defect**. `opencode acp`
+publishes `opencode/big-pickle`; OpenCode's `provider/model` naming seems to
+forbid the `/`, whereas it actually requires it.
 
-La question est tranchée par le parseur d'OpenCode lui-même, pas par une
-heuristique : `Model.Ref.parse` coupe au **premier** `/` et prend tout le reste
-comme id. `acp/opencode/big-pickle` donne `{providerID: "acp", id:
-"opencode/big-pickle"}` — intact. Le catalogue qu'OpenCode embarque lui-même
-contient 4274 ids avec un `/` (`subconscious/subconscious/glm-5.2`,
-`tokengo/deepseek/deepseek-v4-flash`) : c'est une forme normale, pas un cas
-limite.
+The question is settled by OpenCode's own parser, not by a heuristic:
+`Model.Ref.parse` cuts at the **first** `/` and takes everything after it as the
+id. `acp/opencode/big-pickle` gives `{providerID: "acp", id:
+"opencode/big-pickle"}` - intact. The catalogue OpenCode ships itself contains
+4274 ids with a `/` (`subconscious/subconscious/glm-5.2`,
+`tokengo/deepseek/deepseek-v4-flash`): it is a normal shape, not an edge case.
 
-**Décision : ne rien assainir.** Le `Model.ID` reste la valeur ACP exacte, pour
-trois raisons mesurées : le parseur d'OpenCode l'accepte tel quel ; l'agent
-accepte cette valeur dans `set_config_option` (relevé : `id=model →
-opencode/big-pickle`, `ok`) ; et un id modifié exigerait une table de
-correspondance à threading entre le plugin (qui publie) et le transport (qui
-envoie), pour un gain nul. `verify:agent` ne se fie plus à un motif : il passe
-chaque id publié à `Model.Ref.parse` et ne signale que ce que le parseur refuse
-vraiment.
+**Decision: sanitise nothing.** The `Model.ID` stays the exact ACP value, for
+three measured reasons: OpenCode's parser accepts it as-is; the agent accepts
+that value in `set_config_option` (reading: `id=model -> opencode/big-pickle`,
+`ok`); and a modified id would require a threaded mapping table between the
+plugin (which publishes) and the transport (which sends), for a zero gain.
+`verify:agent` no longer relies on a pattern: it passes every published id to
+`Model.Ref.parse` and only reports what the parser really refuses.
 
-### Deux valeurs filtrées, pour la même raison
+### Two filtered values, for the same reason
 
-`auto` parmi les modèles et `default` parmi les niveaux d'effort sont des
-pseudo-valeurs : elles signifient « laisse l'agent décider ». Les publier
-produirait une entrée dans `/model` dont les `settings` ne seraient jamais
-appliqués — OpenCode réécrit un variant nommé `default` en *aucun* variant avant
-d'en fusionner les réglages. Les deux sont donc filtrées, et l'absence de
-variant sélectionné laisse l'agent appliquer ce qu'il annonce lui-même.
+`auto` among the models and `default` among the effort levels are
+pseudo-values: they mean "let the agent decide". Publishing them would produce
+an entry in `/model` whose `settings` would never be applied - OpenCode rewrites
+a variant named `default` into *no* variant before merging its settings. Both
+are therefore filtered, and the absence of a selected variant lets the agent
+apply what it announces itself.
 
-Le même module sert **tous** les providers ACP : OpenCode n'appelle qu'une chose
-d'un package provider, `model(modelID, settings)`, et rien d'autre n'y porte
-l'identité du provider. L'id voyage donc **dans les settings** — le plugin
-l'écrit sous la clé `provider`, et `parseSettings` le relit. C'est aussi ce qui
-isole deux agents dans `agentKey` : deux providers ne partagent ni process,
-ni authentification, ni sessions ACP.
+The same module serves **all** ACP providers: OpenCode only calls one thing on a
+provider package, `model(modelID, settings)`, and nothing else there carries the
+provider's identity. The id therefore travels **in the settings** - the plugin
+writes it under the `provider` key and `parseSettings` reads it back. That is
+also what isolates two agents in `agentKey`: two providers share neither
+process, nor authentication, nor ACP sessions.
 
-## Réglage par modèle
+## Per-model setting
 
-Les niveaux d'effort viennent de l'inventaire, et il **varie avec le modèle** :
-`copilot --acp` ne propose plus `none` pour `claude-sonnet-5`. Sélectionner un
-variant devenu invalide échoue donc avec la liste des valeurs acceptées sous le
-nez, plutôt que de laisser l'agent refuser une valeur muette. Le rafraîchissement
-automatique est la parade, pas encore la règle.
+The effort levels come from the inventory, and it **varies with the model**:
+`copilot --acp` no longer offers `none` for `claude-sonnet-5`. Selecting a
+variant that has become invalid therefore fails with the list of accepted values
+in plain sight, rather than letting the agent refuse a value silently. Automatic
+refreshing is the answer, not yet the rule.
 
-Sans variant sélectionné, aucun `set_config_option` n'est envoyé : l'agent
-applique la valeur qu'il annonce lui-même dans `session/new`.
+With no variant selected, no `set_config_option` is sent: the agent applies the
+value it announces itself in `session/new`.
 
-Il n'existe volontairement **pas** de variant `default` : OpenCode réécrit cet id
-en « aucun variant » et n'en fusionne donc pas les `settings`. Un agent qui
-publie ce niveau (`opencode acp`) le voit filtré — même traitement que `auto`
-parmi les modèles, et pour la même raison.
+There is deliberately **no** `default` variant: OpenCode rewrites that id into
+"no variant" and therefore does not merge its `settings`. An agent that
+publishes that level (`opencode acp`) sees it filtered - the same treatment as
+`auto` among the models, and for the same reason.
 
 ## Versions
 
-| Paquet | Version | Pourquoi |
+| Package | Version | Why |
 | --- | --- | --- |
-| `@opencode/ai` | `2.0.16` | **la version qu'embarque `opencode@2.0.16`**, et non une plus ancienne : notre provider construit un `LanguageModel` et une `Usage` avec *notre* instance, l'hôte les lit avec *la sienne*. Deux instances = deux classes `Usage`, donc un `instanceof` faux côté hôte, qui échoue avec « The provider response ended unexpectedly. » — indiscernable d'une troncature de flux. `test/opencode.test.ts` compare notre version à la dépendance déclarée par `@opencode/plugin` ; `scripts/verify-package.mjs` vérifie que l'URL du champ `package` désigne le **même** fichier que `exports["."]`, donc qu'un seul module est chargé |
-| `@opencode/schema` | `2.0.16` | idem — c'est de là que viennent `LLMEvent` et `Usage` |
-| `@opencode/plugin` | `2.0.16` | **en `devDependencies`** : au chargement, c'est l'hôte qui le fournit. Sa version suit celle du CLI, pas celle de `@opencode/ai` |
-| `effect` | `4.0.0-rc.112` | release candidate, épinglée |
-| `@agentclientprotocol/sdk` | `1.5.0` | le protocole ACP |
+| `@opencode/ai` | `2.0.16` | **the version `opencode@2.0.16` ships**, and not an older one: our provider builds a `LanguageModel` and a `Usage` with *our* instance, the host reads them with *its own*. Two instances = two `Usage` classes, hence a false `instanceof` on the host side, which fails with "The provider response ended unexpectedly." - indistinguishable from a stream truncation. `test/opencode.test.ts` compares our version with the dependency declared by `@opencode/plugin`; `scripts/verify-package.mjs` checks that the `package` field's URL designates the **same** file as `exports["."]`, hence that a single module is loaded |
+| `@opencode/schema` | `2.0.16` | same - that is where `LLMEvent` and `Usage` come from |
+| `@opencode/plugin` | `2.0.16` | **in `devDependencies`**: at load time, it is the host that provides it. Its version follows the CLI's, not `@opencode/ai`'s |
+| `effect` | `4.0.0-rc.112` | release candidate, pinned |
+| `@agentclientprotocol/sdk` | `1.5.0` | the ACP protocol |
 
-⚠️ Le `PLAN.md` référence `@opencode/plugin@2.0.3` : ses types exposent un
-domaine `catalog` que le serveur `2.0.16` **n'implémente pas** (son `Context`
-expose `provider` et `model`). C'est `2.0.16` qui est épinglé ici, parce que
-c'est la version du serveur qui charge le plugin.
+⚠️ `PLAN.md` refers to `@opencode/plugin@2.0.3`: its types expose a `catalog`
+domain that the `2.0.16` server **does not implement** (its `Context` exposes
+`provider` and `model`). It is `2.0.16` that is pinned here, because that is the
+server version that loads the plugin.
 
-### Comptage de tokens : pourquoi l'interface affiche `2/24`
+### Token counting: why the UI displays `2/24`
 
-Le tour de recette affichait `tokens=2/24` alors que l'agent, appelé
-directement, déclare ~15 000 tokens d'entrée. **Ce n'est pas une perte** : c'est
-la répartition du cache.
+The acceptance turn displayed `tokens=2/24` while the agent, called directly,
+declares ~15 000 input tokens. **This is not a loss**: it is the cache
+breakdown.
 
-Relevé réel sur `copilot --acp` v1.0.88, avec la sonde `verify:real` :
+Real reading on `copilot --acp` v1.0.88, with the `verify:real` probe:
 
 ```
 usage: Usage input=15604 output=43 cacheWrite=15601
 ```
 
-`inputTokens` porte bien **toute** la fenêtre reçue. L'interface affiche le
-`nonCachedInputTokens` — le reste est du `cacheWrite`, que l'agent paie une fois
-et qu'OpenCode ne recompte pas à chaque tour. La preuve que le prompt n'est pas
-tronqué est directe : en ajoutant ~4 000 tokens au système, `inputTokens`
-**augmente** d'autant, et le `nonCached` ne bouge pas.
+`inputTokens` does carry the **whole** received window. The UI displays the
+`nonCachedInputTokens` - the rest is `cacheWrite`, which the agent pays for once
+and which OpenCode does not count again on every turn. The proof that the prompt
+is not truncated is direct: adding ~4 000 tokens to the system makes
+`inputTokens` **grow** by as much, and `nonCached` does not move.
 
-`test/prompt-fidelity.test.ts` verrouille le reste : le prompt est comparé
-**caractère par caractère** à celui que le faux agent a réellement reçu sur le
-fil (`FAKE_PROMPT_FILE`), pour une requête réaliste — système multi-parties,
-trois outils avec schémas JSON, transcript avec appel et résultat d'outil.
+`test/prompt-fidelity.test.ts` locks down the rest: the prompt is compared
+**character by character** with the one the fake agent actually received on the
+wire (`FAKE_PROMPT_FILE`), for a realistic request - multi-part system, three
+tools with JSON schemas, transcript with a tool call and a tool result.
 
-## Développement
+## Development
 
 ```bash
 bun install
-bun test            # 364 tests, dont la chaîne ACP complète contre test/fake-acp.ts
+bun test            # 364 tests, including the full ACP chain against test/fake-acp.ts
 bun run typecheck   # tsc --noEmit, strict + noUncheckedIndexedAccess
-npm run verify:package   # exécute le paquet pour vérifier son contrat (Node)
-npm run verify:agent -- copilot --acp   # qualifie un agent, une ligne par capacité
-npm run verify:real copilot --acp    # sonde hors suite : exige un agent installé
-npm run verify:resume copilot --acp  # idem, `session: "reuse"` mesuré contre `fresh`
+npm run verify:package   # runs the package to verify its contract (Node)
+npm run verify:agent -- copilot --acp   # qualifies an agent, one line per capability
+npm run verify:real copilot --acp    # probe outside the suite: requires an installed agent
+npm run verify:resume copilot --acp  # same, `session: "reuse"` measured against `fresh`
 ```
 
-`verify:agent` est la sonde de **portabilité** : elle passe par le code du
-projet lui-même, elle accepte n'importe quel agent, et elle sort en `0` tant
-qu'aucun défaut n'est **le nôtre**. Voir « Portabilité ».
+`verify:agent` is the **portability** probe: it goes through the project's own
+code, it accepts any agent, and it exits `0` as long as no defect is **ours**.
+See "Portability".
 
-### `verify:package` — le contrat, vérifié **par exécution**
+### `verify:package` - the contract, verified **by execution**
 
 ```bash
-npm run verify:package    # ou : node scripts/verify-package.mjs
+npm run verify:package    # or: node scripts/verify-package.mjs
 ```
 
-Inspiré du `prepack` d'`opencode-acpx` (MIT). Un point d'entrée qui n'exporte
-pas ce qu'OpenCode appelle, ou un champ `package` qui ne pointe sur rien, ne
-produit **aucune** erreur au chargement : le serveur importe le module, ne trouve
-pas `model`, et le premier chat échoue. Ce script **importe réellement** les
-deux points d'entrée et vérifie :
+Inspired by `opencode-acpx`'s `prepack` (MIT). An entry point that does not
+export what OpenCode calls, or a `package` field that points at nothing,
+produces **no** error at load time: the server imports the module, does not find
+`model`, and the first chat fails. This script **actually imports** both entry
+points and checks:
 
-- `default.setup` est une fonction, et le plugin a un `id` ;
-- `model` est une fonction ;
-- l'URL calculée par le plugin pour le champ `Provider.Info.package` est un
-  `file://` **absolu** pointant vers un fichier qui **existe**, et désigne le
-  **même** module que `exports["."]` (donc une seule instance chargée) ;
-- les fichiers déclarés dans `exports` existent.
+- `default.setup` is a function, and the plugin has an `id`;
+- `model` is a function;
+- the URL computed by the plugin for the `Provider.Info.package` field is an
+  **absolute** `file://` pointing at a file that **exists**, and designates the
+  **same** module as `exports["."]` (hence a single loaded instance);
+- the files declared in `exports` exist.
 
-Il sort avec un code **non nul** et un message nommant le champ fautif
-(`default.setup`, `model`, `Provider.Info.package`, `exports["."]`…). Il est
-branché sur `prepack`, donc il tourne avant toute publication.
+It exits with a **non-zero** code and a message naming the faulty field
+(`default.setup`, `model`, `Provider.Info.package`, `exports["."]`...). It is
+wired into `prepack`, hence it runs before any publication.
 
-⚠️ Il s'exécute sous **Node**, pas sous Bun : `prepack` tourne chez qui publie,
-dans une CI qui n'a pas forcément Bun. Node efface les types depuis la 22.6 mais
-ne réécrit pas les spécificateurs — d'où `scripts/resolve-ts-extensions.mjs`, un
-crochet de résolution de vingt lignes qui mappe `./x.js` vers `./x.ts` **seulement
-si le fichier existe**. C'est aussi la raison pour laquelle `AcpAgentError`
-déclare son champ `subject` explicitement : une « parameter property » est du
-TypeScript que l'effacement de types de Node ne sait pas traiter.
+⚠️ It runs under **Node**, not under Bun: `prepack` runs wherever publishing
+happens, in a CI that does not necessarily have Bun. Node has stripped types
+since 22.6 but does not rewrite specifiers - hence
+`scripts/resolve-ts-extensions.mjs`, a twenty-line resolution hook that maps
+`./x.js` to `./x.ts` **only if the file exists**. That is also the reason why
+`AcpAgentError` declares its `subject` field explicitly: a "parameter property" is
+TypeScript that Node's type stripping does not know how to handle.
 
-`test/publish.test.ts` ne teste que des fonctions pures — `src/core/publish.ts`
-n'importe ni `@opencode/plugin`, ni `effect`, ni le SDK, et un test le vérifie.
-C'est ce découpage qui rend l'inventaire testable sans lancer OpenCode.
+`test/publish.test.ts` only tests pure functions - `src/core/publish.ts` imports
+neither `@opencode/plugin`, nor `effect`, nor the SDK, and a test checks it.
+That split is what makes the inventory testable without starting OpenCode.

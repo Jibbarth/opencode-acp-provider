@@ -126,7 +126,7 @@ const first = <T extends LLMEvent["type"]>(
   type: T,
 ): Extract<LLMEvent, { type: T }> => {
   const found = events.find((event): event is Extract<LLMEvent, { type: T }> => event.type === type)
-  if (found === undefined) throw new Error(`aucun événement « ${type} » dans ${types(events).join(", ")}`)
+  if (found === undefined) throw new Error(`no "${type}" event in ${types(events).join(", ")}`)
   return found
 }
 
@@ -138,7 +138,7 @@ const first = <T extends LLMEvent["type"]>(
  * `Effect.succeed` would hide the day someone wires a real HTTP endpoint by
  * accident.
  */
-const NO_HTTP = { http: { execute: () => Effect.die("le transport ACP ne fait pas de HTTP") } }
+const NO_HTTP = { http: { execute: () => Effect.die("the ACP transport does no HTTP") } }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. The reducer, pure
@@ -150,16 +150,16 @@ describe("AcpEvent -> LLMEvent reducer", () => {
     // delta by delta: it cannot be, since until the whole answer has been read
     // there is no way to know whether it is text or a tool call.
     const before = replay([
-      { type: "text", text: '{"type":"text","text":"bon' },
-      { type: "text", text: 'jour"}' },
+      { type: "text", text: '{"type":"text","text":"he' },
+      { type: "text", text: 'llo"}' },
     ])
     // Nothing is emitted before the `done`: that is the heart of the trade-off.
     expect(before.events).toEqual([])
 
     const { events } = replay(
       [
-        { type: "text", text: '{"type":"text","text":"bon' },
-        { type: "text", text: 'jour"}' },
+        { type: "text", text: '{"type":"text","text":"he' },
+        { type: "text", text: 'llo"}' },
         { type: "done", stopReason: "end_turn" },
       ],
       before.state,
@@ -173,13 +173,13 @@ describe("AcpEvent -> LLMEvent reducer", () => {
       "finish",
     ])
     // A **single** delta, carrying the answer and not the contract's JSON.
-    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["bonjour"])
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["hello"])
   })
 
   test("a reasoning block is closed before the rendered text", () => {
     const { events } = replay([
-      { type: "thought", text: "je réfléchis" },
-      say("réponse"),
+      { type: "thought", text: "I am thinking" },
+      say("answer"),
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
@@ -201,10 +201,10 @@ describe("AcpEvent -> LLMEvent reducer", () => {
     // What stays live is exactly what the user needs to see while the buffer
     // fills: the agent's activity.
     const { events } = replay([
-      raw('{"type":"text","text":"ré'),
-      { type: "thought", text: "je cherche" },
-      { type: "plan", entries: [{ content: "Analyser", priority: "high", status: "pending" }] },
-      { type: "text", text: 'ponse"}' },
+      raw('{"type":"text","text":"ans'),
+      { type: "thought", text: "I am searching" },
+      { type: "plan", entries: [{ content: "Analyze", priority: "high", status: "pending" }] },
+      { type: "text", text: 'wer"}' },
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
@@ -219,7 +219,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
       "step-finish",
       "finish",
     ])
-    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["réponse"])
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["answer"])
   })
 
   test("a done with nothing still produces a valid sequence", () => {
@@ -235,7 +235,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
         type: "plan",
         entries: [{ content: "Analyser", priority: "high", status: "pending" }],
       },
-      say("c'est fait"),
+      say("it is done"),
       { type: "done", stopReason: "end_turn" },
     ])
     expect(types(events)).toEqual([
@@ -296,14 +296,14 @@ describe("AcpEvent -> LLMEvent reducer", () => {
         type: "tool",
         id: "call-2",
         name: "",
-        title: "Écrire le fichier",
+        title: "Write the file",
         kind: "edit",
         status: "pending",
         input: {},
       },
       { type: "done", stopReason: "end_turn" },
     ])
-    expect(first(events, "tool-call").name).toBe("Écrire le fichier")
+    expect(first(events, "tool-call").name).toBe("Write the file")
   })
 
   test("an ACP tool call precedes the text rendered at the done", () => {
@@ -346,7 +346,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
     ["cancelled", "stop"],
     ["max_turn_requests", "stop"],
   ] as const)("stopReason %s → finishReason %s", (stopReason, expected) => {
-    const { events } = replay([say("voilà"), { type: "done", stopReason }])
+    const { events } = replay([say("there you go"), { type: "done", stopReason }])
     expect(first(events, "finish").reason.normalized).toBe(expected)
     expect(first(events, "step-finish").reason.normalized).toBe(expected)
   })
@@ -376,11 +376,11 @@ describe("AcpEvent -> LLMEvent reducer", () => {
     // agent's error passes alone, as the terminal event.
     const { state, events } = replay([
       raw('{"type":"text","text":"partial'),
-      { type: "error", message: "l'agent est mort" },
+      { type: "error", message: "the agent is dead" },
       { type: "done", stopReason: "cancelled" },
     ])
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
-    expect(first(events, "provider-error").message).toBe("l'agent est mort")
+    expect(first(events, "provider-error").message).toBe("the agent is dead")
     // No `finish` **after** the terminal: the core would refuse it.
     expect(indexOfType(events, "finish")).toBe(-1)
     expect(state.terminal).toBe(true)
@@ -567,7 +567,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
         request: {
           sessionId: "s",
           toolCallId: "c",
-          title: "Écrire",
+          title: "Write",
           kind: "edit",
           options: [{ id: "reject", name: "Refuser", kind: "reject_once" }],
         },
@@ -606,7 +606,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
   test("halt shows the buffer when complete, and drops it when truncated", () => {
     // An answer that arrived whole, then a dead stream: it is shown. An answer cut
     // in the middle of the JSON: dropping it beats rendering mangled JSON.
-    const complete = replay([say("déjà fini")])
+    const complete = replay([say("already done")])
     expect(types(halt(complete.state).events)).toEqual([
       "step-start",
       "text-start",
@@ -703,10 +703,10 @@ describe("the core mechanism: the output contract becomes a tool-call", () => {
   })
 
   test.each([
-    ["du texte brut", "Bonjour, je peux vous aider."],
-    ["du JSON invalide", '{"type":"text","text":'],
-    ["un type inconnu", '{"type":"réponse","text":"bonjour"}'],
-    ["un texte vide", '{"type":"text","text":""}'],
+    ["plain prose", "Hello, I can help you."],
+    ["invalid JSON", '{"type":"text","text":'],
+    ["an unknown type", '{"type":"response","text":"hello"}'],
+    ["an empty text", '{"type":"text","text":""}'],
   ])("%s finit en provider-error, jamais en troncature", (_label, output) => {
     const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
@@ -718,9 +718,9 @@ describe("the core mechanism: the output contract becomes a tool-call", () => {
   test("an object escaped in a ``` block stays readable", () => {
     // The extraction's tolerance does not stop at the first `{`: a brace inside
     // a string closes nothing, otherwise the agent's text would be cut.
-    const output = 'Voici : ```json\n{"type":"text","text":"voici {une} accolade"}\n```'
+    const output = 'Here: ```json\n{"type":"text","text":"here is {a} brace"}\n```'
     const { events } = replay([raw(output), { type: "done", stopReason: "end_turn" }], withTools("read"))
-    expect(first(events, "text-delta").text).toBe("voici {une} accolade")
+    expect(first(events, "text-delta").text).toBe("here is {a} brace")
   })
 
   test("`arguments` that are not an object are refused, not swallowed", () => {
@@ -763,7 +763,7 @@ describe("provider settings", () => {
     [{ command: "copilot", stderr: "verbose" }, "settings.stderr"],
     [{ command: "copilot", session: "keep" }, "settings.session"],
     [{ command: "copilot", allowedTools: "bash" }, "settings.allowedTools"],
-    ["copilot", "settings doit être un objet"],
+    ["copilot", "settings must be a JSON object"],
   ])("refuse %o", (input, fragment) => {
     const parsed = parseSettings(input)
     expect(parsed.ok).toBe(false)
@@ -785,7 +785,7 @@ describe("provider settings", () => {
     expect(agentKey(strict)).not.toBe(agentKey(loose))
     const withTools = parseSettings({ command: "copilot", allowedTools: ["*"] })
     const without = parseSettings({ command: "copilot" })
-    if (!withTools.ok || !without.ok) throw new Error("parseSettings a échoué")
+    if (!withTools.ok || !without.ok) throw new Error("parseSettings failed")
     // `allowedTools` changes the **ACP client policy**: a difference that must
     // yield two distinct agents.
     expect(agentKey(withTools.value)).not.toBe(agentKey(without.value))
@@ -830,7 +830,7 @@ describe("provider settings", () => {
     // the user reads has to say which of his two providers is misconfigured.
     try {
       model("x", { provider: "acp-codex" })
-      throw new Error("aurait dû lever")
+      throw new Error("should have thrown")
     } catch (error) {
       if (!(error instanceof ProviderConfigurationError)) throw error
       expect(String(error.provider)).toBe("acp-codex")
@@ -848,13 +848,13 @@ const buildRequest = (languageModel: LanguageModel, userText: string): LLMReques
   new LLMRequest({
     model: languageModel,
     system: [
-      SystemPart.make("Tu es un assistant."),
-      SystemPart.make("Réponds en français."),
+      SystemPart.make("You are an assistant."),
+      SystemPart.make("Answer in English."),
     ],
     tools: [
       ToolEntry.make({
         name: "read",
-        description: "Lit un fichier du projet",
+        description: "Reads a project file",
         inputSchema: {
           type: "object",
           properties: { filePath: { type: "string" } },
@@ -903,7 +903,7 @@ const runTurn = async (
     ).pipe(Effect.result),
   )
   if (Result.isFailure(outcome)) {
-    throw new Error(`le flux a échoué : ${outcome.failure.message}`)
+    throw new Error(`the stream failed: ${outcome.failure.message}`)
   }
   return outcome.success
 }
@@ -937,7 +937,7 @@ describe("end to end: the real route against the ACP agent", () => {
     const languageModel = model("gpt-5.6-terra", settings)
     // No fake-agent keyword: it takes its default branch, which "echoes" the
     // prompt.
-    const request = buildRequest(languageModel, "bonjour")
+    const request = buildRequest(languageModel, "hello")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
 
@@ -946,11 +946,11 @@ describe("end to end: the real route against the ACP agent", () => {
       .map((e) => e.text)
       .join("")
     const expected = renderRequest({
-      system: ["Tu es un assistant.", "Réponds en français."],
+      system: ["You are an assistant.", "Answer in English."],
       tools: [
         {
           name: "read",
-          description: "Lit un fichier du projet",
+          description: "Reads a project file",
           schema: {
             type: "object",
             properties: { filePath: { type: "string" } },
@@ -959,8 +959,8 @@ describe("end to end: the real route against the ACP agent", () => {
         },
       ],
       messages: [
-        { role: "user", text: "bonjour" },
-        { role: "assistant", text: `Appel d'outil read : {"filePath":"README.md"}` },
+        { role: "user", text: "hello" },
+        { role: "assistant", text: `Tool call read : {"filePath":"README.md"}` },
         { role: "tool", id: "call-9", name: "read", output: "# README" },
       ],
       maxOutputTokens: 512,
@@ -1039,12 +1039,12 @@ describe("end to end: the real route against the ACP agent", () => {
     // truncation.
     const settings = fakeSettings({ FAKE_OUTPUT: "raw" })
     const languageModel = model("gpt-5.6-terra", settings)
-    const request = buildRequest(languageModel, "bonjour")
+    const request = buildRequest(languageModel, "hello")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
 
     expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
-    expect(first(events, "provider-error").message).toContain("bonjour")
+    expect(first(events, "provider-error").message).toContain("hello")
     expect(indexOfType(events, "finish")).toBe(-1)
   })
 
@@ -1054,7 +1054,7 @@ describe("end to end: the real route against the ACP agent", () => {
     // user can do nothing with the turn.
     const settings = fakeSettings({ FAKE_OUTPUT: "hallucinated" })
     const languageModel = model("gpt-5.6-terra", settings)
-    const request = buildRequest(languageModel, "bonjour")
+    const request = buildRequest(languageModel, "hello")
 
     const events = await runTurn(settings, "gpt-5.6-terra", request)
 
@@ -1269,7 +1269,7 @@ describe("end to end: the real route against the ACP agent", () => {
     expect(outcome.failure.message).toContain("none, medium, high")
     // The message names the requested **thing**: 'model "absent"' would be
     // unreadable.
-    expect(outcome.failure.message).toContain("niveau d'effort")
+    expect(outcome.failure.message).toContain("the effort level")
   })
 
   test("a model the agent does not offer fails naming the accepted values", async () => {
@@ -1284,14 +1284,14 @@ describe("end to end: the real route against the ACP agent", () => {
           const route = languageModel.route
           const body = yield* route.body.from(request)
           const prepared: AcpPrepared = yield* route.prepareTransport(body, request)
-          const bogus = { ...prepared, model: "pas-un-modele" }
+          const bogus = { ...prepared, model: "not-a-model" }
           return yield* Stream.runCollect(route.streamPrepared(bogus, request, NO_HTTP))
         }),
       ).pipe(Effect.result),
     )
     expect(Result.isFailure(outcome)).toBe(true)
     if (Result.isSuccess(outcome)) return
-    expect(outcome.failure.message).toContain("pas-un-modele")
+    expect(outcome.failure.message).toContain("not-a-model")
     expect(outcome.failure.message).toContain("gpt-5.6-terra")
   })
 
@@ -1311,7 +1311,7 @@ describe("end to end: the real route against the ACP agent", () => {
     )
     expect(Result.isFailure(outcome)).toBe(true)
     if (Result.isSuccess(outcome)) return
-    expect(outcome.failure.message).toContain("sans aucun message")
+    expect(outcome.failure.message).toContain("without a single message")
   })
 })
 
@@ -1334,7 +1334,7 @@ describe("provider package contract", () => {
     expect(() => model("x", { args: ["--acp"] })).toThrow(ProviderConfigurationError)
     try {
       model("x", { args: ["--acp"] })
-      throw new Error("aurait dû lever")
+      throw new Error("should have thrown")
     } catch (error) {
       if (!(error instanceof ProviderConfigurationError)) throw error
       expect(error.message).toContain("settings.command")

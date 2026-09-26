@@ -136,7 +136,7 @@ const reason = (error: unknown): string => (error instanceof Error ? error.messa
  * report, and a server loading a hundred plugins must not write a hundred extra
  * lines in its log.
  */
-log(`module évalué : ${import.meta.url}`)
+log(`module evaluated: ${import.meta.url}`)
 
 /**
  * **Absolute** `file://` URL of the module exporting `model`.
@@ -169,8 +169,8 @@ export const resolvePackageURL = (moduleURL: string): string => {
     // are named, because "package not found" without the candidate list is an
     // unusable diagnostic.
     throw new Error(
-      `aucun point d'entrée provider trouvé (cherché : ${candidates.join(", ")}) ; ` +
-        "le plugin doit être installé avec ses sources, ou built vers dist/.",
+      `no provider entry point found (searched: ${candidates.join(", ")}); ` +
+        "the plugin must be installed with its sources, or built into dist/.",
     )
   }
   return pathToFileURL(found).href
@@ -188,14 +188,14 @@ class DiscoveryTimeout extends Error {
    * this file is in the import graph of the plugin entry point, hence in that of
    * `npm run verify:package`.
    */
-  readonly reason: "silence" | "délai"
+  readonly reason: "silence" | "timeout"
   readonly limitMs: number
 
-  constructor(reason: "silence" | "délai", limitMs: number) {
+  constructor(reason: "silence" | "timeout", limitMs: number) {
     super(
       reason === "silence"
-        ? `aucun signe de vie pendant ${limitMs} ms`
-        : `délai de ${limitMs} ms dépassé`,
+        ? `no sign of life for ${limitMs} ms`
+        : `timeout of ${limitMs} ms exceeded`,
     )
     this.name = "DiscoveryTimeout"
     this.reason = reason
@@ -250,7 +250,7 @@ const withBounds = <A>(
 
   rearm()
   overall = setTimeout(() => {
-    if (armed) reject(new DiscoveryTimeout("délai", timeoutMs))
+    if (armed) reject(new DiscoveryTimeout("timeout", timeoutMs))
   }, timeoutMs)
   overall.unref?.()
 
@@ -420,8 +420,8 @@ const register = (
   ctx.provider.transform((editor: ProviderEditor) => {
     if (isTakenByAnother(editor, publication.info.id, owned)) {
       throw new Error(
-        `identifiant de provider « ${publication.info.id} » déjà pris par un provider existant ; ` +
-          "donne un autre `id` à cet agent (le préfixe `acp-` rend la collision improbable).",
+        `provider id "${publication.info.id}" already taken by an existing provider; ` +
+          "give this agent another `id` (the `acp-` prefix makes a collision unlikely).",
       )
     }
     editor.add({ info: publication.info, models: publication.models })
@@ -451,7 +451,7 @@ const register = (
  */
 const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (() => void) => {
   if (refreshMs === 0) {
-    log("rafraîchissement désactivé (refreshMs: 0)")
+    log("refresh disabled (refreshMs: 0)")
     return () => {}
   }
 
@@ -469,7 +469,7 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
       timer = undefined
       if (stopped) return
       lastRun = Date.now()
-      refresh().catch((error: unknown) => log(`rafraîchissement ignoré : ${reason(error)}`))
+      refresh().catch((error: unknown) => log(`refresh skipped: ${reason(error)}`))
     }, wait)
     // The timer must not, on its own, keep the process alive.
     timer.unref?.()
@@ -485,7 +485,7 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
         if (next.value.type === "session.idle") schedule()
       }
     } catch (error) {
-      if (!stopped) log(`flux d'événements interrompu, rafraîchissement arrêté : ${reason(error)}`)
+      if (!stopped) log(`event stream interrupted, refresh stopped: ${reason(error)}`)
     }
   }
   void pump()
@@ -522,7 +522,7 @@ export default Plugin.define({
     try {
       return await runSetup(ctx)
     } catch (error) {
-      log(`chargement abandonné, provider non enregistré : ${reason(error)}`)
+      log(`loading abandoned, provider not registered: ${reason(error)}`)
       return
     }
   },
@@ -567,7 +567,7 @@ const bringUp = async (
   // with its path, not on the first prompt.
   const settings = parseSettings(providerSettingsOf(agent, providerId))
   if (!settings.ok) {
-    log(`agent « ${agent.id} » ignoré : ${settings.message}`)
+    log(`agent "${agent.id}" ignored: ${settings.message}`)
     return undefined
   }
 
@@ -600,7 +600,7 @@ const bringUp = async (
     // The error names the **agent**: "agent unavailable" without the
     // configured agent's name is an unusable diagnostic when the list holds
     // several, or when the default (`copilot`) is not that one.
-    log(`agent « ${agent.id} » indisponible, « ${providerId} » non enregistré : ${reason(error)}`)
+    log(`agent "${agent.id}" unavailable, "${providerId}" not registered: ${reason(error)}`)
     return undefined
   }
   const acp = discovered.agent
@@ -620,20 +620,20 @@ const bringUp = async (
     inventory = await discovered.inventory()
   } catch (error) {
     await acp.close()
-    log(`inventaire illisible pour « ${agent.id} », « ${providerId} » non enregistré : ${reason(error)}`)
+    log(`inventory unreadable for "${agent.id}", "${providerId}" not registered: ${reason(error)}`)
     return undefined
   }
   if (inventory.models.length === 0) {
     await acp.close()
-    log(`« ${agent.id} » ne propose aucun modèle, « ${providerId} » non enregistré`)
+    log(`"${agent.id}" offers no model, "${providerId}" not registered`)
     return undefined
   }
   // The **raw** capture is logged: the published count may be smaller (`auto`
   // is filtered out), and it is the gap between the two that says whether the
   // agent proposed anything other than models.
   log(
-    `${acp.info.name} v${acp.info.version} (${providerId}) : ${inventory.models.length} valeur(s) de ` +
-      `modèle, ${inventory.thoughtLevels.length} niveau(s) d'effort`,
+    `${acp.info.name} v${acp.info.version} (${providerId}): ${inventory.models.length} model value(s), ` +
+      `${inventory.thoughtLevels.length} effort level(s)`,
   )
 
   // A rejected `transform` would leave the ACP agent alive with nothing
@@ -644,7 +644,7 @@ const bringUp = async (
     registration = await register(ctx, publish(options, packageURL, inventory), owned)
   } catch (error) {
     await acp.close()
-    log(`« ${providerId} » non enregistré : ${reason(error)}`)
+    log(`"${providerId}" not registered: ${reason(error)}`)
     return undefined
   }
   owned.add(providerId)
@@ -661,7 +661,7 @@ const bringUp = async (
     // whole catalogue, so calling it without reason would lose the current
     // `/model` selection over an identical inventory.
     if (nextSignature === signature) return
-    log(`${providerId} : inventaire modifié, ${next.models.length} modèle(s)`)
+    log(`${providerId}: inventory changed, ${next.models.length} model(s)`)
     // The new one is registered **before** the old one is disposed: if the
     // registration fails, the previous catalogue stays in place and `/model`
     // keeps working with a dated but valid inventory.
@@ -705,12 +705,12 @@ const lower = async (entry: Registered): Promise<void> => {
   try {
     await entry.dispose()
   } catch (error) {
-    log(`« ${entry.id} » non retiré du catalogue : ${reason(error)}`)
+    log(`"${entry.id}" not removed from the catalogue: ${reason(error)}`)
   }
   try {
     await entry.closeAgent()
   } catch (error) {
-    log(`agent « ${entry.id} » non arrêté : ${reason(error)}`)
+    log(`agent "${entry.id}" not stopped: ${reason(error)}`)
   }
 }
 
@@ -745,7 +745,7 @@ const isFormFields = (fields: readonly unknown[]): fields is Form.Fields =>
 
 /** The `/connect` form, or a failure the caller turns into a log line. */
 const connectForm = (): Form.Fields => {
-  if (!isFormFields(CONNECT_FORM_FIELDS)) throw new Error("le formulaire /connect est mal formé")
+  if (!isFormFields(CONNECT_FORM_FIELDS)) throw new Error("the /connect form is malformed")
   return CONNECT_FORM_FIELDS
 }
 
@@ -767,7 +767,7 @@ const connectForm = (): Form.Fields => {
  */
 const registerConnect = async (ctx: Context): Promise<boolean> => {
   if (typeof ctx.integration?.transform !== "function") {
-    log("hôte sans domaine `integration` : /connect indisponible")
+    log("host without an `integration` domain: /connect unavailable")
     return false
   }
   try {
@@ -782,7 +782,7 @@ const registerConnect = async (ctx: Context): Promise<boolean> => {
     })
     await ctx.integration.reload()
   } catch (error) {
-    log(`intégration /connect non enregistrée : ${reason(error)}`)
+    log(`/connect integration not registered: ${reason(error)}`)
     return false
   }
   return true
@@ -808,7 +808,7 @@ const readConnectAgent = async (ctx: Context): Promise<RawAgent | undefined> => 
     if (answers === undefined) return undefined
     return connectAgentToRawAgent(answers)
   } catch (error) {
-    log(`connexion /connect illisible : ${reason(error)}`)
+    log(`/connect connection unreadable: ${reason(error)}`)
     return undefined
   }
 }
@@ -818,7 +818,7 @@ const reloadCatalogue = async (ctx: Context): Promise<void> => {
   try {
     await ctx.provider.reload()
   } catch (error) {
-    log(`catalogue non rechargé : ${reason(error)}`)
+    log(`catalogue not reloaded: ${reason(error)}`)
   }
 }
 
@@ -854,7 +854,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   // `opencode.json` yet, which is the case it is for. The refusal is logged, and
   // the defaults apply to the rest of the options.
   const parsed = parsePluginConfig(ctx.options)
-  if (!parsed.ok) log(`configuration ignorée : ${parsed.message}`)
+  if (!parsed.ok) log(`configuration ignored: ${parsed.message}`)
   const config: PluginConfig = parsed.ok
     ? parsed.value
     : {
@@ -907,7 +907,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   const raise = async (agent: RawAgent): Promise<boolean> => {
     const id = providerIdOf(agent.providerSlug)
     if (owned.has(id)) {
-      log(`agent « ${agent.id} » ignoré : l'identifiant « ${id} » est déjà pris par un agent enregistré`)
+      log(`agent "${agent.id}" ignored: the id "${id}" is already taken by a registered agent`)
       return false
     }
     const up = await bringUp(ctx, agent, id, packageURL, bounds, owned)
@@ -962,18 +962,18 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
         owned.delete(id)
         await lower(entry)
         moved = true
-        log(`agent « ${gone.id} » retiré : absent de /connect`)
+        log(`agent "${gone.id}" removed: absent from /connect`)
       }
       for (const fresh of added) {
         if (!(await raise(fresh))) continue
         moved = true
-        log(`agent « ${fresh.id} » ajouté depuis /connect`)
+        log(`agent "${fresh.id}" added from /connect`)
       }
       settled = next
       fingerprint = agentsFingerprint(next)
       if (moved) await reloadCatalogue(ctx)
     } catch (error) {
-      log(`resynchronisation /connect ignorée : ${reason(error)}`)
+      log(`/connect resync ignored: ${reason(error)}`)
     } finally {
       running = false
     }
@@ -988,13 +988,13 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   const connectIDs = new Set(fromConnect.map((agent) => providerIdOf(agent.providerSlug)))
   const fromConnectCount = published.filter((id) => connectIDs.has(id)).length
   if (published.length === 0) {
-    log("aucun agent enregistré, aucun provider ACP publié")
+    log("no agent registered, no ACP provider published")
   } else {
     const dropped = wanted.length - published.length
     log(
-      `${published.length} provider(s) ACP : ${published.join(", ")}` +
-        (dropped > 0 ? ` — ${dropped} agent(s) écarté(s)` : "") +
-        ` — ${fromConnectCount} depuis /connect, ${published.length - fromConnectCount} depuis la configuration`,
+      `${published.length} ACP provider(s): ${published.join(", ")}` +
+        (dropped > 0 ? ` - ${dropped} agent(s) dropped` : "") +
+        ` - ${fromConnectCount} from /connect, ${published.length - fromConnectCount} from the configuration`,
     )
   }
 
@@ -1034,6 +1034,6 @@ const closeProviderSessions = async (): Promise<void> => {
     const { closeAllSessions } = await import("./adapters/opencode-transport.js")
     await closeAllSessions()
   } catch (error) {
-    log(`sessions ACP non fermées au déchargement : ${reason(error)}`)
+    log(`ACP sessions not closed on unload: ${reason(error)}`)
   }
 }
