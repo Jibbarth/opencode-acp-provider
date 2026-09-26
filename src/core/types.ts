@@ -135,11 +135,24 @@ export type NormalizedMessage =
   | { role: "assistant"; text: string }
   | { role: "tool"; id: string; name: string; output: string }
 
-/** Un outil exposé à l'agent, avec son vrai nom et son vrai schéma JSON. */
+/**
+ * Un outil exposé à l'agent, avec son vrai nom et son vrai schéma JSON.
+ *
+ * ⚠️ `name` est le nom **à plat** que l'agent doit reproduire, et
+ * `namespace` l'namespace dont il est issu, **s'il y en a un**. Les deux
+ * existent parce que le runtime d'OpenCode indexe son registre par
+ * `namespace.nom` (`ToolRuntime.dispatch` de `@opencode/ai`), alors que les
+ * protocoles sans namespace natif aplatissent en `namespace_nom`. Un
+ * adaptateur qui n'enverrait que le nom aplati produirait un `tool-call`
+ * introuvable (« No tool named "…" is currently available ») : les deux moitiés
+ * sont donc conservées, et seul `name` est rendu dans le prompt.
+ */
 export interface NormalizedTool {
   name: string
   description: string
   schema: unknown
+  /** Namespace d'origine, absent pour un outil de premier niveau. */
+  namespace?: string
 }
 
 /**

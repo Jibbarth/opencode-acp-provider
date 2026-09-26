@@ -83,14 +83,20 @@ export interface AcpAgentOptions {
  * en croyant que c'était une ligne de commande.
  */
 export class AcpAgentError extends Error {
-  constructor(
-    message: string,
-    /** Commande lancée **ou** `sessionId`, selon l'origine de l'erreur. */
-    readonly subject: string,
-    options?: { cause?: unknown },
-  ) {
+  /**
+   * ⚠️ Champ **déclaré explicitement**, et non en `readonly subject: string`
+   * dans la signature du constructeur : la forme « parameter property » est du
+   * TypeScript que l'effacement de types de Node **ne sait pas** traiter (il
+   * efface, il ne transforme pas). Elle aurait donc fait échouer
+   * `scripts/verify-package.mjs` — le seul moyen d'**exécuter** le paquet avant
+   * publication — avec un `SyntaxError` sans rapport avec le contrat.
+   */
+  readonly subject: string
+
+  constructor(message: string, subject: string, options?: { cause?: unknown }) {
     super(message, options)
     this.name = "AcpAgentError"
+    this.subject = subject
   }
 }
 

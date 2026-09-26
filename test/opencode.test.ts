@@ -16,6 +16,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
+import { readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
@@ -1106,6 +1107,36 @@ describe("contrat du package provider", () => {
     const settings = fakeSettings()
     // Sans ce cache, chaque tour d'une conversation relancerait un `initialize`.
     expect(acquireAgent(settings)).toBe(acquireAgent(settings))
+  })
+
+  test("`@opencode/ai` est aligné sur la version qu'embarque l'hôte", async () => {
+    // ⚠️ **Le risque de double instance du §14 (R3).** Notre provider construit
+    // un `LanguageModel` et une `Usage` avec **notre** instance de
+    // `@opencode/ai` ; l'hôte les lit avec **la sienne**. Deux instances
+    // distinctes, c'est deux classes `Usage` différentes — donc un `instanceof`
+    // faux côté hôte, et le mode d'échec décrit au §4.0 (« The provider
+    // response ended unexpectedly. »), indiscernable d'une troncature.
+    //
+    // La référence n'est pas le `package.json` du projet (qui pourrait mentir) :
+    // c'est la dépendance déclarée par `@opencode/plugin`, c'est-à-dire le
+    // paquet que le serveur OpenCode fournit au chargement.
+    const read = async (relative: string): Promise<Record<string, unknown>> => {
+      const path = fileURLToPath(new URL(relative, import.meta.url))
+      return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+    }
+    const asRecord = (value: unknown): Record<string, unknown> =>
+      typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
+
+    const ours = await read("../node_modules/@opencode/ai/package.json")
+    const plugin = await read("../node_modules/@opencode/plugin/package.json")
+    const hostDeps = asRecord(plugin["dependencies"])
+
+    expect(ours["version"]).toBe("2.0.16")
+    expect(hostDeps["@opencode/ai"]).toBe(ours["version"])
+    // `@opencode/schema` doit suivre : c'est de là que viennent `LLMEvent` et
+    // `Usage`, et les deux paquets sont résolus par le même chemin.
+    const schema = await read("../node_modules/@opencode/schema/package.json")
+    expect(schema["version"]).toBe(hostDeps["@opencode/schema"])
   })
 })
 

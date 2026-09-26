@@ -265,6 +265,32 @@ const openSession = (settings: AcpProviderSettings): Effect.Effect<
       Effect.promise(() => session.close()).pipe(Effect.ignore),
   )
 
+/**
+ * Signal d'annulation du tour, armé par la fermeture du `Scope`.
+ *
+ * ⚠️ **Pourquoi ne pas se contenter d'abandonner l'itérateur.** Le `TransportRuntime`
+ * d'`@opencode/ai` ne porte **aucun** signal d'interruption : quand OpenCode
+ * abandonne le stream, le `Scope` se ferme et… rien d'autre ne se passe. Or le
+ * générateur ACP est alors **suspendu** dans `await session.nextUpdate()`, et
+ * l'agent, lui, continue de travailler. Renderer la main ne suffit donc pas :
+ * il faut *dire* à l'agent d'arrêter, sinon il brûle un tour complet dans notre
+ * dos et garde sa session occupée.
+ *
+ * D'où ce contrôleur : il est armé par un finalizer du **même** `Scope` que la
+ * session, donc il se déclenche exactement quand la requête est interrompue.
+ * Et comme les finalizers d'un `Scope` s'exécutent en **ordre inverse** de leur
+ * enregistrement, celui-ci (enregistré après `openSession`) passe **avant** la
+ * fermeture de la session : l'ordre sur le fil est donc
+ * `session/cancel` puis `session/close`, comme le veut la spécification.
+ */
+const turnCancellation = Effect.acquireRelease(
+  Effect.sync(() => new AbortController()),
+  (controller) =>
+    Effect.sync(() => {
+      if (!controller.signal.aborted) controller.abort()
+    }),
+)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Trames
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,9 +345,10 @@ const prepare = (input: TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepar
  * `execute` : un `Scope` par requête, une session par `Scope`.
  *
  * Le `Scope` est ce qui rend l'annulation propre : quand OpenCode interrompt le
- * stream (ou que le TUI abandonne le tour), le `Scope` se ferme, la session se
- * ferme, et l'agent reçoit `session/cancel` puis `session/close`. C'est aussi le
- * filet qui garantit qu'un stream oublié ne laisse pas un processus vivant.
+ * stream (ou que le TUI abandonne le tour), le `Scope` se ferme, le contrôleur
+ * d'annulation part — donc l'agent reçoit `session/cancel` — puis la session se
+ * ferme (`session/close`). C'est aussi le filet qui garantit qu'un stream oublié
+ * ne laisse ni session ni processus vivant.
  */
 const execute = (
   prepared: AcpPrepared,
@@ -331,10 +358,17 @@ const execute = (
 ): Effect.Effect<TransportExecution<string>, AIError, Scope.Scope> =>
   Effect.gen(function* () {
     const session = yield* openSession(settings)
+    // ⚠️ Enregistré **après** `openSession` : les finalizers d'un `Scope` sont
+    // exécutés en ordre inverse, donc l'annulation part avant la fermeture.
+    const cancellation = yield* turnCancellation
     yield* attempt(settings, () => applyModel(session, prepared.model, settings))
     yield* attempt(settings, () => applyEffort(session, settings))
     const frames: Stream.Stream<string, AIError> = Stream.fromAsyncIterable(
-      session.prompt(prepared.request),
+      // Le signal est passé **et** l'itérateur reste abandonnable : les deux
+      // chemins d'annulation (interruption du stream, signal armé par le Scope)
+      // convergent vers le même `session/cancel`, et l'agent est arrêté même si
+      // le générateur reste suspendu dans `nextUpdate()`.
+      session.prompt(prepared.request, { signal: cancellation.signal }),
       // Une exception du générateur devient un échec de flux : mieux vaut une
       // `AIError` qui nomme la commande qu'une trame avortée en silence.
       (error: unknown) => toFrameError(error, settings),

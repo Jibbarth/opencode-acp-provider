@@ -29,7 +29,7 @@ Le projet suit les phases du `PLAN.md`. Où en est-on, sans arrondir :
 | P2b — l'agent **propose** l'outil, OpenCode l'exécute (§7.3) | fait, testé |
 | **P3a — plugin : provider + `Model.Info`, variantes d'effort** | **fait et testé dans un vrai OpenCode** |
 | **P3b — recette réelle** : `acp/<modèle>` visible dans `/model`, un tour complet | **fait, vérifié** |
-| P4 — permissions fines, `session/cancel`, erreurs §8 | à faire |
+| P4 — permissions fines, erreurs §8 | à faire (`session/cancel` fait, voir « Annulation ») |
 | P6 — variantes par modèle, serveurs MCP versés à l'agent | à faire |
 | P7 — adaptateur HTTP `/v1/chat/completions` | à faire |
 
@@ -79,6 +79,40 @@ en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarr
   celui que le transport lancera par `model()`. Partager le cache de
   `opencode-transport.ts` chargerait toute la pile `effect` + `@opencode/ai` au
   chargement du plugin, dans le process du serveur.
+- **Un plugin absent ne se voit pas… sauf une ligne.** Un package qui ne se
+  charge ne produit aucune erreur ; `src/plugin.ts` écrit donc sur `stderr`, au
+  moment où le module est **évalué** et **hors du `try` de `setup`**, une seule
+  ligne `[opencode-acp-provider] module évalué : file://…/src/plugin.ts`. Si elle
+  manque, le problème est en amont (chemin, installation, erreur d'import) ; si
+  elle est là, tout ce qu'il reste à lire est le journal de `setup`. C'est
+  précisément pour cela qu'elle est écrite là : nulle part ailleurs elle ne
+  distinguerait les deux cas.
+- **Les outils namespacés sont aplatis dans le prompt.** L'agent doit reproduire
+  le nom tel quel, et c'est `namespace_nom` — la convention de `@opencode/ai`
+  pour les protocoles sans namespace natif (`.` n'est pas accepté partout). Le
+  `tool-call` émis porte en plus le `namespace` d'origine, sinon le runtime
+  d'OpenCode, qui indexe son registre par `namespace.nom`, ne retrouverait pas
+  l'outil.
+
+## Annulation
+
+`Esc` interrompt proprement, et « proprement » veut dire trois choses, toutes
+vérifiées par `test/cancel.test.ts` :
+
+1. **l'agent est prévenu.** Le `TransportRuntime` d'`@opencode/ai` ne porte
+   aucun signal d'interruption : quand OpenCode abandonne le stream, le `Scope`
+   se ferme et… rien d'autre ne se passe. Un contrôleur d'annulation armé par un
+   finalizer du **même** `Scope` envoie donc `session/cancel`, enregistré
+   **après** l'ouverture de la session pour que les finalizers — qui s'exécutent
+   en ordre inverse — produisent `session/cancel` puis `session/close`. Le faux
+   agent note chaque annulation reçue dans un fichier : un retour rapide ne
+   prouve rien, un `session/cancel` daté si.
+2. **le temps est celui de l'annulation, pas celui du tour.** Interrompre un tour
+   de 30 s rend la main en quelques centaines de ms, et le flux s'arrête sans
+   `finish` orphelin.
+3. **rien ne fuit.** Un tour annulé ne rend ni la session ni l'agent
+   inutilisables, et le processus n'est pas tué (il est mis en cache et réutilisé,
+   c'est voulu) — mais il n'est jamais laissé sans propriétaire.
 
 ## Installation
 
@@ -127,6 +161,17 @@ Tout se passe dans `plugins[].options`. Sans configuration, l'agent par défaut 
 | --- | --- | --- | --- |
 | `agents` | `AgentConfig[]` | `[{ "command": "copilot", "args": ["--acp"] }]` | Les agents à découvrir (le premier est enregistré) |
 | `refreshMs` | `number` | `60000` | Délai minimum entre deux redécouvertes ; `0` désactive |
+| `discoveryTimeoutMs` | `number` | `10000` | Borne haute de la découverte (lancement + `initialize` + inventaire) |
+| `discoveryIdleTimeoutMs` | `number` | `10000` | Délai maximum sans signe de vie de l'agent pendant la découverte |
+
+`discoveryTimeoutMs` et `discoveryIdleTimeoutMs` existent parce que `setup()`
+est **awaité par l'hôte** : c'est le seul endroit du projet où une attente peut
+bloquer le chargement d'OpenCode. Les deux bornes sont vidées dans un `finally`,
+donc un minuteur résiduel ne retient jamais le process du serveur en vie. Un
+agent qui démarre lentement se règle en **augmentant** `discoveryTimeoutMs` — la
+borne d'inactivité, elle, autorise tout agent qui **parle** (son stderr la
+remet à zéro) à disposer de toute la borne globale. Un agent abandonné en cours
+de route est tué dès qu'il existe : aucun orphelin par chargement de plugin.
 
 `AgentConfig` :
 
@@ -139,7 +184,6 @@ Tout se passe dans `plugins[].options`. Sans configuration, l'agent par défaut 
 | `allowedTools` | `string[]` | `["*"]` = tout autoriser ; absent = tout refuser (§7.4) |
 | `limits` | `{ context, output }` | Limites annoncées dans `/model` |
 | `id` | `string` | Étiquette pour les journaux ; défaut : la commande |
-
 Exemple :
 
 ```jsonc
@@ -202,8 +246,8 @@ id comme « aucun variant » et n'en fusionne pas les `settings`.
 
 | Paquet | Version | Pourquoi |
 | --- | --- | --- |
-| `@opencode/ai` | `2.0.3` | celle qu'embarque `opencode@2.0.16` ; épinglée pour que le smoke test casse bruyamment en cas de dérive |
-| `@opencode/schema` | `2.0.3` | idem |
+| `@opencode/ai` | `2.0.16` | **la version qu'embarque `opencode@2.0.16`**, et non une plus ancienne : notre provider construit un `LanguageModel` et une `Usage` avec *notre* instance, l'hôte les lit avec *la sienne*. Deux instances = deux classes `Usage`, donc un `instanceof` faux côté hôte, qui échoue avec « The provider response ended unexpectedly. » — indiscernable d'une troncature de flux. `test/opencode.test.ts` compare notre version à la dépendance déclarée par `@opencode/plugin` ; `scripts/verify-package.mjs` vérifie que l'URL du champ `package` désigne le **même** fichier que `exports["."]`, donc qu'un seul module est chargé |
+| `@opencode/schema` | `2.0.16` | idem — c'est de là que viennent `LLMEvent` et `Usage` |
 | `@opencode/plugin` | `2.0.16` | **en `devDependencies`** : au chargement, c'est l'hôte qui le fournit. Sa version suit celle du CLI, pas celle de `@opencode/ai` |
 | `effect` | `4.0.0-rc.112` | release candidate, épinglée |
 | `@agentclientprotocol/sdk` | `1.5.0` | le protocole ACP |
@@ -213,14 +257,69 @@ domaine `catalog` que le serveur `2.0.16` **n'implémente pas** (son `Context`
 expose `provider` et `model`). C'est `2.0.16` qui est épinglé ici, parce que
 c'est la version du serveur qui charge le plugin.
 
+### Comptage de tokens : pourquoi l'interface affiche `2/24`
+
+Le tour de recette affichait `tokens=2/24` alors que l'agent, appelé
+directement, déclare ~15 000 tokens d'entrée. **Ce n'est pas une perte** : c'est
+la répartition du cache.
+
+Relevé réel sur `copilot --acp` v1.0.88, avec la sonde `verify:real` :
+
+```
+usage: Usage input=15604 output=43 cacheWrite=15601
+```
+
+`inputTokens` porte bien **toute** la fenêtre reçue. L'interface affiche le
+`nonCachedInputTokens` — le reste est du `cacheWrite`, que l'agent paie une fois
+et qu'OpenCode ne recompte pas à chaque tour. La preuve que le prompt n'est pas
+tronqué est directe : en ajoutant ~4 000 tokens au système, `inputTokens`
+**augmente** d'autant, et le `nonCached` ne bouge pas.
+
+`test/prompt-fidelity.test.ts` verrouille le reste : le prompt est comparé
+**caractère par caractère** à celui que le faux agent a réellement reçu sur le
+fil (`FAKE_PROMPT_FILE`), pour une requête réaliste — système multi-parties,
+trois outils avec schémas JSON, transcript avec appel et résultat d'outil.
+
 ## Développement
 
 ```bash
 bun install
-bun test            # 211 tests, dont la chaîne ACP complète contre test/fake-acp.ts
+bun test            # 253 tests, dont la chaîne ACP complète contre test/fake-acp.ts
 bun run typecheck   # tsc --noEmit, strict + noUncheckedIndexedAccess
+npm run verify:package   # exécute le paquet pour vérifier son contrat (Node)
 bun run verify:real copilot --acp   # sonde hors suite : exige un agent installé
 ```
+
+### `verify:package` — le contrat, vérifié **par exécution**
+
+```bash
+npm run verify:package    # ou : node scripts/verify-package.mjs
+```
+
+Inspiré du `prepack` d'`opencode-acpx` (MIT). Un point d'entrée qui n'exporte
+pas ce qu'OpenCode appelle, ou un champ `package` qui ne pointe sur rien, ne
+produit **aucune** erreur au chargement : le serveur importe le module, ne trouve
+pas `model`, et le premier chat échoue. Ce script **importe réellement** les
+deux points d'entrée et vérifie :
+
+- `default.setup` est une fonction, et le plugin a un `id` ;
+- `model` est une fonction ;
+- l'URL calculée par le plugin pour le champ `Provider.Info.package` est un
+  `file://` **absolu** pointant vers un fichier qui **existe**, et désigne le
+  **même** module que `exports["."]` (donc une seule instance chargée) ;
+- les fichiers déclarés dans `exports` existent.
+
+Il sort avec un code **non nul** et un message nommant le champ fautif
+(`default.setup`, `model`, `Provider.Info.package`, `exports["."]`…). Il est
+branché sur `prepack`, donc il tourne avant toute publication.
+
+⚠️ Il s'exécute sous **Node**, pas sous Bun : `prepack` tourne chez qui publie,
+dans une CI qui n'a pas forcément Bun. Node efface les types depuis la 22.6 mais
+ne réécrit pas les spécificateurs — d'où `scripts/resolve-ts-extensions.mjs`, un
+crochet de résolution de vingt lignes qui mappe `./x.js` vers `./x.ts` **seulement
+si le fichier existe**. C'est aussi la raison pour laquelle `AcpAgentError`
+déclare son champ `subject` explicitement : une « parameter property » est du
+TypeScript que l'effacement de types de Node ne sait pas traiter.
 
 `test/publish.test.ts` ne teste que des fonctions pures — `src/core/publish.ts`
 n'importe ni `@opencode/plugin`, ni `effect`, ni le SDK, et un test le vérifie.

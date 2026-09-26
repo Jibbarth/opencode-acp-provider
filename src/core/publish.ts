@@ -302,6 +302,26 @@ export interface PluginConfig {
    * `session/new` — d'où une minute par défaut, et non une seconde.
    */
   readonly refreshMs: number
+  /**
+   * Bornes de la **découverte** : lancement de l'agent, `initialize`, relevé de
+   * l'inventaire.
+   *
+   * ⚠️ C'est le seul endroit du projet où une attente peut bloquer le
+   * chargement d'OpenCode : `setup()` est awaited par l'hôte avant de rendre la
+   * main, donc un agent muet ne fait pas « ne pas enregistrer de provider »,
+   * il fait « OpenCode ne démarre pas ». D'où deux bornes, pas une.
+   */
+  readonly discoveryTimeoutMs: number
+  /**
+   * Borne d'**inactivité** : délai maximal sans signe de vie de l'agent.
+   *
+   * ⚠️ Elle attrape ce que la borne globale n'attrape pas — un agent qui
+   * bavarde sans jamais finir (authentification en boucle, reconnexion réseau
+   * permanente) ne s'arrête jamais, mais il n'est plus muet : sans cette borne,
+   * `setup` l'attendrait jusqu'à la borne globale, et l'utilisateur verrait le
+   * chargement d'OpenCode s'arrêter « pour une raison » sans voir d'erreur.
+   */
+  readonly discoveryIdleTimeoutMs: number
 }
 
 /** Résultat de `parsePluginConfig` : jamais une exception, toujours un diagnostic. */
@@ -322,6 +342,27 @@ export const DEFAULT_AGENT: RawAgent = {
 
 /** Délai minimum par défaut entre deux redécouvertes. */
 export const DEFAULT_REFRESH_MS = 60_000
+
+/**
+ * Bornes par défaut de la découverte, en ms — 10 s, comme `opencode-acpx`.
+ *
+ * ⚠️ Pourquoi 10 s et pas 30 s (le timeout d'`initialize` de `createAcpAgent`) :
+ * parce que l'enjeu n'est pas la patience mais le **chargement d'OpenCode**.
+ * Trente secondes d'écran figé au démarrage, sans message, sont indiscernables
+ * d'un plantage ; dix secondes le sont encore. Un agent réellement lent se règle
+ * avec `discoveryTimeoutMs` — c'est une option, pas un figement.
+ */
+export const DEFAULT_DISCOVERY_TIMEOUT_MS = 10_000
+
+/** Borne d'inactivité par défaut, en ms : même ordre de grandeur que le global. */
+export const DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS = 10_000
+
+/** Les bornes de découverte par défaut, prêtes à étaler dans une `PluginConfig`. */
+const DEFAULT_BOUNDS = {
+  refreshMs: DEFAULT_REFRESH_MS,
+  discoveryTimeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS,
+  discoveryIdleTimeoutMs: DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
+} as const
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -446,7 +487,7 @@ const readAgent = (
  */
 export const parsePluginConfig = (input: unknown): PluginConfigResult => {
   if (input === undefined || input === null) {
-    return { ok: true, value: { agents: [DEFAULT_AGENT], refreshMs: DEFAULT_REFRESH_MS } }
+    return { ok: true, value: { agents: [DEFAULT_AGENT], ...DEFAULT_BOUNDS } }
   }
   if (!isRecord(input)) {
     return {
@@ -464,18 +505,49 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     return invalid("refreshMs", "doit être un nombre de millisecondes ≥ 0 (0 désactive le rafraîchissement)")
   }
 
+  // ⚠️ Les deux bornes de découverte sont validées **ici**, et non lues
+  // telles quelles : une borne négative ou non finie ne bornerait rien, et le
+  // pire des cas pour une borne de délai est qu'elle soit infinie.
+  const discoveryTimeoutMs = input["discoveryTimeoutMs"]
+  if (
+    discoveryTimeoutMs !== undefined &&
+    (typeof discoveryTimeoutMs !== "number" ||
+      !Number.isFinite(discoveryTimeoutMs) ||
+      discoveryTimeoutMs <= 0)
+  ) {
+    return invalid(
+      "discoveryTimeoutMs",
+      "doit être un nombre de millisecondes strictement positif (borne haute de la découverte)",
+    )
+  }
+  const discoveryIdleTimeoutMs = input["discoveryIdleTimeoutMs"]
+  if (
+    discoveryIdleTimeoutMs !== undefined &&
+    (typeof discoveryIdleTimeoutMs !== "number" ||
+      !Number.isFinite(discoveryIdleTimeoutMs) ||
+      discoveryIdleTimeoutMs <= 0)
+  ) {
+    return invalid(
+      "discoveryIdleTimeoutMs",
+      "doit être un nombre de millisecondes strictement positif (borne d'inactivité de l'agent)",
+    )
+  }
+
+  const bounds = {
+    refreshMs: refreshMs ?? DEFAULT_REFRESH_MS,
+    discoveryTimeoutMs: discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+    discoveryIdleTimeoutMs: discoveryIdleTimeoutMs ?? DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
+  }
+
   const raw = input["agents"]
   if (raw === undefined) {
-    return {
-      ok: true,
-      value: { agents: [DEFAULT_AGENT], refreshMs: refreshMs ?? DEFAULT_REFRESH_MS },
-    }
+    return { ok: true, value: { agents: [DEFAULT_AGENT], ...bounds } }
   }
   if (!Array.isArray(raw)) {
     return invalid("agents", 'doit être un tableau d\'objets [{ "command": "copilot", "args": ["--acp"] }]')
   }
   if (raw.length === 0) {
-    return { ok: true, value: { agents: [DEFAULT_AGENT], refreshMs: refreshMs ?? DEFAULT_REFRESH_MS } }
+    return { ok: true, value: { agents: [DEFAULT_AGENT], ...bounds } }
   }
 
   const agents: RawAgent[] = []
@@ -484,7 +556,7 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
     if (!agent.ok) return agent
     agents.push(agent.value)
   }
-  return { ok: true, value: { agents, refreshMs: refreshMs ?? DEFAULT_REFRESH_MS } }
+  return { ok: true, value: { agents, ...bounds } }
 }
 
 /**

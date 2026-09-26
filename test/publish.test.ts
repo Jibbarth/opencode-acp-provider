@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url"
 
 import {
   DEFAULT_AGENT,
+  DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
+  DEFAULT_DISCOVERY_TIMEOUT_MS,
   DEFAULT_LIMITS,
   DEFAULT_REFRESH_MS,
   PSEUDO_MODEL_IDS,
@@ -452,6 +454,57 @@ describe("settings.effort (pur)", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // L'URL `file://` du package provider
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `resolvePackageURL`
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("bornes de découverte (§14, R7)", () => {
+  test("les deux bornes valent 10 s par défaut", () => {
+    // 10 s, comme `opencode-acpx` : l'enjeu n'est pas la patience mais le
+    // chargement d'OpenCode, et trente secondes d'écran figé sans message sont
+    // indiscernables d'un plantage.
+    expect(DEFAULT_DISCOVERY_TIMEOUT_MS).toBe(10_000)
+    expect(DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS).toBe(10_000)
+  })
+
+  test("absentes, elles reprennent leurs défauts", () => {
+    for (const input of [undefined, null, {}, { agents: [] }]) {
+      const parsed = parsePluginConfig(input)
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) return
+      expect(parsed.value.discoveryTimeoutMs).toBe(DEFAULT_DISCOVERY_TIMEOUT_MS)
+      expect(parsed.value.discoveryIdleTimeoutMs).toBe(DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS)
+    }
+  })
+
+  test("elles sont réglables, par exemple pour un agent lent au démarrage", () => {
+    const parsed = parsePluginConfig({ discoveryTimeoutMs: 120_000, discoveryIdleTimeoutMs: 5_000 })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.discoveryTimeoutMs).toBe(120_000)
+    expect(parsed.value.discoveryIdleTimeoutMs).toBe(5_000)
+    // Le reste de la configuration n'est pas touché.
+    expect(parsed.value.refreshMs).toBe(DEFAULT_REFRESH_MS)
+  })
+
+  test.each([
+    [{ discoveryTimeoutMs: 0 }, "options.discoveryTimeoutMs"],
+    [{ discoveryTimeoutMs: -1 }, "options.discoveryTimeoutMs"],
+    [{ discoveryTimeoutMs: Number.POSITIVE_INFINITY }, "options.discoveryTimeoutMs"],
+    [{ discoveryTimeoutMs: "10s" }, "options.discoveryTimeoutMs"],
+    [{ discoveryIdleTimeoutMs: 0 }, "options.discoveryIdleTimeoutMs"],
+    [{ discoveryIdleTimeoutMs: Number.NaN }, "options.discoveryIdleTimeoutMs"],
+  ])("une borne inutilisable est refusée : %o", (input, fragment) => {
+    // ⚠️ Une borne `0`, négative ou infinie ne borne **rien** : c'est le pire
+    // des cas pour une borne de délai, et il doit être refusé à la lecture de la
+    // configuration, pas constaté au chargement d'OpenCode.
+    const parsed = parsePluginConfig(input)
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) return
+    expect(parsed.message).toContain(fragment)
+  })
+})
 
 describe("resolvePackageURL", () => {
   test("elle pointe sur un fichier qui existe vraiment", () => {

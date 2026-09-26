@@ -70,6 +70,10 @@ const normalizedToolSchema = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
   schema: Schema.Unknown,
+  // ⚠️ Déclaré, sinon le codec **retire** la clé au décodage du corps et
+  // l'adaptateur perdrait l'namespace d'un outil namespacé — donc la moitié du
+  // nom sous laquelle le runtime d'OpenCode indexe son registre.
+  namespace: Schema.optional(Schema.String),
 })
 
 const normalizedMessageSchema = Schema.Union([
@@ -382,6 +386,11 @@ const toolNameOf = (event: Extract<AcpEvent, { type: "tool" }>): string =>
  * ose le faire : il vient du `buffer`, pas du transcript, donc il ne peut pas
  * entrer en collision avec un id de `request.messages`. Il est renvoyé verbatim au
  * tour suivant par `fromRequest` (§2.1).
+ *
+ * ⚠️ Le `namespace` du catalogue est **relu** ici et non transmis par l'agent :
+ * l'agent ne connaît que le nom à plat (§7.3), et c'est notre catalogue qui sait
+ * d'où il vient. C'est ce qui permet au runtime d'OpenCode de retrouver l'outil
+ * dans son registre, indexé par `namespace.nom`.
  */
 const emitOutput = (state: ReducerState, output: AgentOutput): Reduction => {
   if (output.type === "text") {
@@ -398,13 +407,21 @@ const emitOutput = (state: ReducerState, output: AgentOutput): Reduction => {
   const id = `acp-call-${state.calls}`
   const { name } = output
   const input = output.arguments
+  const namespace = state.catalog.find((tool) => tool.name === name)?.namespace
   return {
     state: { ...state, calls: state.calls + 1, tools: new Set([...state.tools, id]) },
     events: [
-      { type: "tool-input-start", id, name },
-      { type: "tool-input-delta", id, name, text: renderJson(input), input },
-      { type: "tool-input-end", id, name },
-      { type: "tool-call", id, name, input },
+      { type: "tool-input-start", id, name, ...(namespace === undefined ? {} : { namespace }) },
+      {
+        type: "tool-input-delta",
+        id,
+        name,
+        text: renderJson(input),
+        input,
+        ...(namespace === undefined ? {} : { namespace }),
+      },
+      { type: "tool-input-end", id, name, ...(namespace === undefined ? {} : { namespace }) },
+      { type: "tool-call", id, name, input, ...(namespace === undefined ? {} : { namespace }) },
     ],
   }
 }
@@ -644,7 +661,13 @@ export const halt = (state: ReducerState): Reduction => {
 // `LLMRequest` → `NormalizedRequest`
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Nom d'un outil, namespaces aplatis comme le fait `flattenTools` de `@opencode/ai`. */
+/**
+ * Nom d'un outil, namespaces aplatis comme le fait `flattenTools` de `@opencode/ai`.
+ *
+ * ⚠️ Le séparateur est `_` et non `.` : c'est la convention de la bibliothèque
+ * (« `.` is not broadly accepted in provider tool names », `protocols/shared.js`)
+ * et donc exactement le nom que l'agent doit reproduire dans le prompt.
+ */
 const NAMESPACED_SEPARATOR = "_"
 
 const flatToolName = (namespace: string | undefined, name: string): string =>
@@ -688,8 +711,16 @@ const renderToolResult = (result: { readonly type: string; readonly value: unkno
 const renderToolCall = (name: string, input: unknown): string =>
   `Appel d'outil ${name} : ${renderJson(input)}`
 
-/** Un outil du catalogue, namespace aplati. */
-const flattenTools = (tools: LLMRequest["tools"]): { name: string; description: string; schema: unknown }[] =>
+/**
+ * Un outil du catalogue, namespace aplati — **namespace conservé**.
+ *
+ * ⚠️ Le catalogue porte deux moitiés : `name` est le nom à plat que l'agent doit
+ * reproduire (donc celui qui figure dans le prompt), et `namespace` celui que le
+ * runtime d'OpenCode attend pour retrouver l'outil dans son registre. Émettre un
+ * `tool-call` qui ne porterait que le nom aplati produirait « No tool named
+ * "search_grep" is currently available » : l'outil serait perdu, en silence.
+ */
+const flattenTools = (tools: LLMRequest["tools"]): NormalizedTool[] =>
   tools.flatMap((entry) => {
     if (entry.type === "namespace") {
       return entry.tools
@@ -698,6 +729,7 @@ const flattenTools = (tools: LLMRequest["tools"]): { name: string; description: 
           name: flatToolName(entry.name, inner.name),
           description: inner.description,
           schema: inner.inputSchema,
+          namespace: entry.name,
         }))
     }
     return [{ name: entry.name, description: entry.description, schema: entry.inputSchema }]

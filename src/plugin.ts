@@ -82,7 +82,31 @@ const log = (message: string): void => {
   process.stderr.write(`[${PLUGIN_ID}] ${message}\n`)
 }
 
+/** Le message d'une erreur quelconque, sans sa pile : c'est un journal, pas un rapport. */
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/**
+ * Marqueur « le module a été évalué » — §14, R4.
+ *
+ * ⚠️ **Pourquoi cette ligne est hors de `setup` — et c'est tout l'intérêt.**
+ * Un package de plugin qui ne se charge ne produit **aucune** erreur visible :
+ * l'hôte journalise « plugin ignoré » et n'insiste pas, et le fichier
+ * `opencode.jsonc` pointe peut-être vers le mauvais chemin, ou le module lève
+ * pendant son évaluation, ou `Plugin.define` n'est même pas atteint. Toutes ces
+ * fins se ressemblent — un plugin absent, silencieusement.
+ *
+ * Il faut donc distinguer deux situations que rien ne distingue aujourd'hui :
+ *
+ *   · **le module n'a jamais été évalué** — cette ligne n'est jamais parue ;
+ *   · **`setup()` a levé** — le `try/catch` de `setup` l'a journalisé, et cette
+ *     ligne **est** parue juste avant.
+ *
+ * Une seule ligne, écrite au moment exact où le module est évalué, suffit à
+ * faire la différence. Elle est volontairement **discrète** : c'est un
+ * diagnostic, pas un rapport, et un serveur qui charge cent plugins ne doit pas
+ * écrire cent lignes de plus dans son journal.
+ */
+log(`module évalué : ${import.meta.url}`)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL du package provider
@@ -125,6 +149,164 @@ export const resolvePackageURL = (moduleURL: string): string => {
     )
   }
   return pathToFileURL(found).href
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bornes de la découverte — §14, R7
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Un dépassement de borne, avec la borne fautive et son terme. */
+class DiscoveryTimeout extends Error {
+  /**
+   * ⚠️ Champs **déclarés explicitement**, comme `AcpAgentError` : la forme
+   * « parameter property » est du TypeScript que l'effacement de types de Node
+   * ne sait pas traiter, et ce fichier est dans le graphe d'import du point
+   * d'entrée plugin — donc dans celui de `npm run verify:package`.
+   */
+  readonly reason: "silence" | "délai"
+  readonly limitMs: number
+
+  constructor(reason: "silence" | "délai", limitMs: number) {
+    super(
+      reason === "silence"
+        ? `aucun signe de vie pendant ${limitMs} ms`
+        : `délai de ${limitMs} ms dépassé`,
+    )
+    this.name = "DiscoveryTimeout"
+    this.reason = reason
+    this.limitMs = limitMs
+  }
+}
+
+/**
+ * Course une promesse contre **deux** bornes : un délai global, et un délai
+ * d'inactivité remis à zéro par `beat()`.
+ *
+ * ⚠️ **Pourquoi deux, et pas une.** Un agent muet et un agent bavard sont deux
+ * pannes différentes. Une seule borne les traite identiquement : elle les laisse
+ * tous les deux attendre son terme, alors que la seconde est invisible — elle ne
+ * produit aucun message, juste un chargement qui ne finit pas. La borne
+ * d'inactivité rend la question utile : **l'agent parle-t-il encore ?** C'est la
+ * seule information disponible pendant une découverte, et elle suffit à
+ * distinguer « il met quatre-vingt-dix secondes à démarrer » (légitime, et son
+ * stderr le dit) de « il est bloqué ».
+ *
+ * ⚠️ **Les deux minuteurs sont vidés dès que la course est décidée**, dans les
+ * deux sens. Un minuteur laissé armé ne fait pas qu'attendre : il retient le
+ * process du serveur OpenCode en vie pendant toute la durée du service, pour
+ * rien — et il finirait par rejeter une promesse déjà résolue, donc par produire
+ * une rejection orpheline.
+ */
+const withBounds = <A>(
+  work: Promise<A>,
+  timeoutMs: number,
+  idleTimeoutMs: number,
+): { readonly result: Promise<A>; readonly beat: () => void } => {
+  let idle: ReturnType<typeof setTimeout> | undefined
+  let overall: ReturnType<typeof setTimeout> | undefined
+  /** Une fois la course décidée, `beat` devient neutre : plus rien à réarmer. */
+  let armed = true
+
+  const rearm = (): void => {
+    if (!armed) return
+    if (idle !== undefined) clearTimeout(idle)
+    idle = setTimeout(() => {
+      if (armed) reject(new DiscoveryTimeout("silence", idleTimeoutMs))
+    }, idleTimeoutMs)
+    // Un minuteur ne doit pas, à lui seul, garder le process en vie.
+    idle.unref?.()
+  }
+
+  let resolve: (value: A) => void = () => {}
+  let reject: (error: unknown) => void = () => {}
+  const result = new Promise<A>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+
+  rearm()
+  overall = setTimeout(() => {
+    if (armed) reject(new DiscoveryTimeout("délai", timeoutMs))
+  }, timeoutMs)
+  overall.unref?.()
+
+  // ⚠️ Le `finally` est le **seul** endroit où les minuteurs sont vidés : il
+  // s'exécute dans tous les cas de sortie — résolution, rejet du travail, ou
+  // dépassement d'une des deux bornes. C'est exactement ce que le §14 demande,
+  // et c'est invisible dans une écriture qui vide « quand ça marche ».
+  void work.then(
+    (value) => {
+      if (!armed) return
+      resolve(value)
+    },
+    (error: unknown) => {
+      if (!armed) return
+      reject(error)
+    },
+  ).finally(() => {
+    armed = false
+    if (idle !== undefined) clearTimeout(idle)
+    if (overall !== undefined) clearTimeout(overall)
+    idle = undefined
+    overall = undefined
+  })
+
+  return { result, beat: rearm }
+}
+
+/** Ce que la découverte borne : l'agent, et son relevé d'inventaire. */
+interface Discovery {
+  readonly agent: AcpAgent
+  /** L'inventaire, lu sous les mêmes bornes et le même compteur d'inactivité. */
+  readonly inventory: () => Promise<Inventory>
+}
+
+/**
+ * Lance l'agent, relève son inventaire, le tout **borné**.
+ *
+ * ⚠️ **Le process ne doit jamais survivre à l'abandon.** `createAcpAgent` ne rend
+ * la main qu'après `initialize` : si une borne expire avant, sa promesse est
+ * encore **en vol**, et l'agent qu'elle produira sera vivant… sans personne pour
+ * le fermer. D'où le `pending.then(close)` de chaque sortie en erreur : un agent
+ * lent qui finit quand même par démarrer est tué dès qu'il existe, au lieu de
+ * laisser un orphelin par chargement de plugin.
+ */
+const discover = async (
+  options: Parameters<typeof createAcpAgent>[0],
+  timeoutMs: number,
+  idleTimeoutMs: number,
+): Promise<Discovery> => {
+  // Le compteur d'inactivité est alimenté par le **stderr** de l'agent : c'est
+  // le seul flux observable depuis l'extérieur pendant une découverte, et le seul
+  // qui distingue un agent qui travaille d'un agent bloqué. On ne le relaie pas
+  // — un agent bavard au chargement inonderait le journal du serveur —, on ne
+  // fait que le remettre à zéro.
+  const signals: { beat: () => void } = { beat: () => {} }
+  const pending = createAcpAgent({
+    ...options,
+    stderr: "pipe",
+    onStderr: () => signals.beat(),
+    // ⚠️ Le timeout d'`initialize` est aligné sur la borne de découverte : sinon
+    // l'agent dispose de 30 s pour répondre là où le plugin n'en attend que 10,
+    // et la borne de découverte ne bornerait... rien du tout.
+    initializeTimeoutMs: options.initializeTimeoutMs ?? timeoutMs,
+  })
+
+  const launch = withBounds(pending, timeoutMs, idleTimeoutMs)
+  signals.beat = launch.beat
+
+  let agent: AcpAgent
+  try {
+    agent = await launch.result
+  } catch (error) {
+    void pending.then((late) => late.close()).catch(() => undefined)
+    throw error
+  }
+
+  return {
+    agent,
+    inventory: () => withBounds(agent.inventory(), timeoutMs, idleTimeoutMs).result,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,14 +454,38 @@ const watch = (ctx: Context, refreshMs: number, refresh: () => Promise<void>): (
 export default Plugin.define({
   id: PLUGIN_ID,
 
+  /**
+   * Point d'entrée de l'hôte.
+   *
+   * ⚠️ Ce `try/catch` est la **seule** garantie de l'invariant affiché en tête
+   * de ce fichier : rien de ce que fait le plugin ne doit faire tomber le
+   * chargement d'OpenCode. Les étapes internes ont chacune leur garde, mais une
+   * exception inattendue — une API de l'hôte qui change, un `Model.Info` rejeté
+   * par `Provider.Info.default` — remonterait sinon jusqu'à l'hôte, qui
+   * abandonnerait le chargement du plugin **et** de tous les suivants.
+   *
+   * On ne peut rien distinguer d'ici sans le marqueur « module évalué » écrit
+   * plus haut : c'est exactement pour ça qu'il est hors de ce `try`.
+   */
   async setup(ctx) {
+    try {
+      return await runSetup(ctx)
+    } catch (error) {
+      log(`chargement abandonné, provider non enregistré : ${reason(error)}`)
+      return
+    }
+  },
+})
+
+/** Le travail de `setup`, sans le filet : c'est `setup` qui le porte. */
+async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined> {
     // ── 1. Options ──────────────────────────────────────────────────────────
     const parsed = parsePluginConfig(ctx.options)
     if (!parsed.ok) {
       log(`configuration ignorée : ${parsed.message}`)
       return
     }
-    const { agents, refreshMs } = parsed.value
+    const { agents, refreshMs, discoveryTimeoutMs, discoveryIdleTimeoutMs } = parsed.value
     const agent = agents[0]
     if (agent === undefined) return
 
@@ -314,21 +520,34 @@ export default Plugin.define({
     // par `model()`. On ne partage pas le cache de `opencode-transport.ts` : y
     // emprunter chargerait toute la pile `effect` + `@opencode/ai` dès le
     // chargement du plugin — dans le process du serveur — pour un simple relevé.
-    let acp: AcpAgent
+    //
+    // ⚠️ Les deux étapes sont **bornées** (`discover`) : c'est le seul endroit du
+    // projet où une attente peut bloquer le chargement d'OpenCode, parce que
+    // l'hôte await `setup` avant de rendre la main. Un agent muet, mort ou bloqué
+    // doit donner « provider non enregistré », pas « OpenCode ne démarre pas ».
+    let discovered: Discovery
     try {
-      acp = await createAcpAgent({
-        command: settings.value.command,
-        ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
-        ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
-        ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
-        // Pas de `policy` : le défaut de `createAcpAgent` est `denyAllPermissions`
-        // (mode « cerveau brut », §7.4). Le plugin ne fait que de la découverte,
-        // il n'ouvre aucun tour — mais il ne doit pas pouvoir faire mieux.
-      })
+      discovered = await discover(
+        {
+          command: settings.value.command,
+          ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
+          ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
+          ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
+          // Pas de `policy` : le défaut de `createAcpAgent` est `denyAllPermissions`
+          // (mode « cerveau brut », §7.4). Le plugin ne fait que de la découverte,
+          // il n'ouvre aucun tour — mais il ne doit pas pouvoir faire mieux.
+        },
+        discoveryTimeoutMs,
+        discoveryIdleTimeoutMs,
+      )
     } catch (error) {
+      // L'erreur nomme **l'agent** : « agent indisponible » sans le nom de
+      // l'agent configuré serait un diagnostic inutilisable quand la liste en
+      // contient plusieurs, ou quand le défaut (`copilot`) n'est pas celui-là.
       log(`agent « ${agent.id} » indisponible, provider non enregistré : ${reason(error)}`)
       return
     }
+    const acp = discovered.agent
 
     const options: PublishOptions = {
       label: `ACP — ${acp.info.name}`,
@@ -342,7 +561,7 @@ export default Plugin.define({
     // (19 valeurs au premier `session/new`, 20 après un `set_config_option`).
     let inventory: Inventory
     try {
-      inventory = await acp.inventory()
+      inventory = await discovered.inventory()
     } catch (error) {
       await acp.close()
       log(`inventaire illisible pour « ${agent.id} », provider non enregistré : ${reason(error)}`)
@@ -377,8 +596,12 @@ export default Plugin.define({
     let signature = inventorySignature(inventory)
 
     // ── 6. Rafraîchissement ─────────────────────────────────────────────────
+    // ⚠️ La passe de rafraîchissement passe par `discovered.inventory()` et non
+    // par `acp.inventory()` : elle est donc **bornée** elle aussi. Une
+    // découverte qui traîne en arrière-plan ne peut pas laisser une session ACP
+    // ouverte pour toujours — et, à la.await, pas de rejet non plus.
     const stop = watch(ctx, refreshMs, async () => {
-      const next = await acp.inventory()
+      const next = await discovered.inventory()
       const nextSignature = inventorySignature(next)
       // ⚠️ Rien n'a changé : on ne touche à rien. `ctx.provider.reload()`
       // reconstruit tout le catalogue, donc l'appeler sans raison ferait perdre
@@ -408,5 +631,4 @@ export default Plugin.define({
         await acp.close()
       }
     }
-  },
-})
+}

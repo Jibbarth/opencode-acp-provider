@@ -55,10 +55,12 @@
  * | `FAKE_EXIT_AT_INIT=1`          | quitte avant de répondre à `initialize`                     |
  * | `FAKE_SLOW_INIT_MS=<n>`         | `initialize` ne répond qu'après `<n>` ms (teste le timeout)  |
  * | `FAKE_SLOW_MS=<n>`             | latence volontaire, interruptible par `session/cancel`      |
+ * | `FAKE_CANCEL_FILE=<chemin>`     | note chaque `session/cancel` reçu (preuve datée de l'annulation) |
  * | `FAKE_OUTPUT=<x>`              | forme de la réponse : `contract` (défaut), `raw`, `fenced`, `hallucinated`, `bad-type` |
+ * | `FAKE_PROMPT_FILE=<chemin>`    | écrit le prompt **reçu**, caractère par caractère, dans ce fichier |
  */
 
-import { writeFileSync } from "node:fs"
+import { appendFileSync, writeFileSync } from "node:fs"
 import { Readable, Writable } from "node:stream"
 import * as acp from "@agentclientprotocol/sdk"
 
@@ -255,6 +257,16 @@ const USAGE = {
 /** Fenêtre de contexte, dans `usage_update`. */
 const CONTEXT_USED = 12_345
 
+/**
+ * Sépare deux invites déposées dans le même `FAKE_PROMPT_FILE`.
+ *
+ * Une invite est du texte libre : elle peut contenir n'importe quelle ligne. Le
+ * séparateur est donc une **ligne entière**, et non une chaîne insensible à ce
+ * que le corps contient. Le test ne dépose de toute façon qu'un tour par
+ * fichier — c'est la robustesse du dépôt, pas son découpage, qui compte.
+ */
+const PROMPT_SEPARATOR = "-----8<-- PROMPT REÇU --8<-----"
+
 const chunk = (text: string): acp.SessionUpdate => ({
   sessionUpdate: "agent_message_chunk",
   content: { type: "text", text },
@@ -344,6 +356,12 @@ class FakeAgent {
   /** `session/cancel` : on mémorise la session, `wait()` le remarque au tick suivant. */
   cancel(params: acp.CancelNotification): void {
     this.cancelled.add(params.sessionId)
+    // `FAKE_CANCEL_FILE=<chemin>` : on dépose la preuve **datée** de l'annulation.
+    // Sans elle, un test ne peut vérifier que l'annulation a *été demandée* — ce
+    // qui est précisément le point : un retour rapide ne prouve pas que
+    // `session/cancel` est parti, seulement qu'on a cessé d'attendre.
+    const file = process.env["FAKE_CANCEL_FILE"]
+    if (file !== undefined) appendFileSync(file, `${Date.now()} ${params.sessionId}\n`)
   }
 
   /**
@@ -378,6 +396,17 @@ class FakeAgent {
     params: acp.PromptRequest,
     cx: acp.AgentContext,
   ): Promise<acp.PromptResponse> {
+    // `FAKE_PROMPT_FILE=<chemin>` : on dépose le prompt **exactement tel qu'il
+    // a été reçu** sur le fil. C'est la seule preuve possible de ce que
+    // `fromRequest` + `renderRequest` reconstruisent (§14.2) : l'écho de la
+    // branche « ACK » passe par le contrat de sortie et son extracteur tolérant,
+    // donc il ne prouve pas qu'un caractère n'a pas été perdu en route.
+    // `appendFileSync` et non `writeFileSync` : deux tours sur la même session
+    // écrivent alors deux invites, séparées par un marqueur.
+    const promptFile = process.env["FAKE_PROMPT_FILE"]
+    if (promptFile !== undefined) {
+      appendFileSync(promptFile, `${PROMPT_SEPARATOR}\n${promptText(params)}\n`)
+    }
     const text = userText(promptText(params))
     const notify = (update: acp.SessionUpdate): Promise<void> =>
       cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update })
