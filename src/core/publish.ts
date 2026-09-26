@@ -25,7 +25,8 @@ import type { AcpModel, Inventory, SessionMode } from "./types.js"
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * The provider id used by an agent that was given no `id`.
+ * The **historic** provider id, and the only one an unnamed agent keeps when the
+ * catalogue says `acp` is already declared (see {@link agentProviderId}).
  *
  * Note: the plugin publishes this exact value in the provider `settings`, which
  * is the only channel OpenCode leaves to reach the transport - `model(modelID,
@@ -410,18 +411,14 @@ export type PluginConfigResult =
   | { readonly ok: true; readonly value: PluginConfig }
   | { readonly ok: false; readonly message: string }
 
-/** Agent used when the plugin is configured without `agents`. */
-export const DEFAULT_AGENT: RawAgent = {
-  id: "copilot",
-  providerSlug: undefined,
-  command: "copilot",
-  args: ["--acp"],
-  cwd: undefined,
-  env: undefined,
-  allowedTools: undefined,
-  session: undefined,
-  limits: undefined,
-}
+/**
+ * No agent is configured out of the box: picking one for the user would put a
+ * command they never named in their config, and the plugin would register a
+ * provider they did not ask for.
+ */
+export const NO_AGENT_CONFIGURED =
+  'aucun agent ACP configuré : ajoutez-en un dans plugins[].options.agents, ' +
+  'ou dans la clé "acp" de votre opencode.json'
 
 /** Default minimum delay between two rediscoveries. */
 export const DEFAULT_REFRESH_MS = 60_000
@@ -440,12 +437,6 @@ export const DEFAULT_DISCOVERY_TIMEOUT_MS = 10_000
 /** Default inactivity bound, in ms: same order of magnitude as the global one. */
 export const DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS = 10_000
 
-/** The default discovery bounds, ready to spread into a `PluginConfig`. */
-const DEFAULT_BOUNDS = {
-  refreshMs: DEFAULT_REFRESH_MS,
-  discoveryTimeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS,
-  discoveryIdleTimeoutMs: DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
-} as const
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -599,16 +590,15 @@ const readAgent = (
 /**
  * Reads the plugin options (`opencode.jsonc` -> `plugins[].options`).
  *
- * Note: an absent or empty `agents` yields `DEFAULT_AGENT` (`copilot --acp`)
- * rather than an error: a plugin that fails to load takes the whole plugin list
- * down with it, and "nothing configured" almost always means "the default
- * agent".
+ * Note: an absent or empty `agents` is refused rather than defaulted. The
+ * failure is reported and the plugin registers nothing; it must not raise, so
+ * the rest of the plugin list keeps loading.
  *
  * Note: unknown plugin keys are ignored, never rejected (cf. `readAgent`).
  */
 export const parsePluginConfig = (input: unknown): PluginConfigResult => {
   if (input === undefined || input === null) {
-    return { ok: true, value: { agents: [DEFAULT_AGENT], ...DEFAULT_BOUNDS } }
+    return { ok: false, message: NO_AGENT_CONFIGURED }
   }
   if (!isRecord(input)) {
     return {
@@ -662,13 +652,13 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
 
   const raw = input["agents"]
   if (raw === undefined) {
-    return { ok: true, value: { agents: [DEFAULT_AGENT], ...bounds } }
+    return { ok: false, message: NO_AGENT_CONFIGURED }
   }
   if (!Array.isArray(raw)) {
     return invalid("agents", 'doit être un tableau d\'objets [{ "command": "copilot", "args": ["--acp"] }]')
   }
   if (raw.length === 0) {
-    return { ok: true, value: { agents: [DEFAULT_AGENT], ...bounds } }
+    return { ok: false, message: NO_AGENT_CONFIGURED }
   }
 
   const agents: RawAgent[] = []

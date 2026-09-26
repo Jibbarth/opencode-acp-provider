@@ -12,12 +12,24 @@
  * category values (including `auto`), 6 effort levels, 3 modes.
  */
 
+const COPILOT: RawAgent = {
+  id: "copilot",
+  providerSlug: undefined,
+  command: "copilot",
+  args: ["--acp"],
+  cwd: undefined,
+  env: undefined,
+  allowedTools: undefined,
+  session: undefined,
+  limits: undefined,
+}
+
+import { NO_AGENT_CONFIGURED } from "../src/core/publish.js"
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
 import {
-  DEFAULT_AGENT,
   DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
   DEFAULT_DISCOVERY_TIMEOUT_MS,
   DEFAULT_LIMITS,
@@ -399,15 +411,20 @@ describe("parsePluginConfig (pure)", () => {
     if (!result.ok) throw new Error(`attendu ok, obtenu : ${result.message}`)
     return result.value
   }
+  const ko = (input: unknown): string => {
+    const result = parsePluginConfig(input)
+    if (result.ok) throw new Error("attendu un refus, obtenu une configuration")
+    return result.message
+  }
 
-  test("without options, the default agent is `copilot --acp`", () => {
-    expect(ok(undefined).agents[0]).toEqual(DEFAULT_AGENT)
-    expect(DEFAULT_AGENT.command).toBe("copilot")
-    expect(DEFAULT_AGENT.args).toEqual(["--acp"])
+  test("without options, no agent is invented and nothing is registered", () => {
+    // No agent is invented: the plugin registers nothing rather than
+    // guessing a command the user never named.
+    expect(ko(undefined)).toBe(NO_AGENT_CONFIGURED)
   })
 
   test("`agents: []` also falls back to the default agent", () => {
-    expect(ok({ agents: [] }).agents[0]).toEqual(DEFAULT_AGENT)
+    expect(ko({ agents: [] })).toBe(NO_AGENT_CONFIGURED)
   })
 
   test("a declared agent is read field by field", () => {
@@ -441,8 +458,8 @@ describe("parsePluginConfig (pure)", () => {
   })
 
   test("the default refresh interval is one minute", () => {
-    expect(ok({}).refreshMs).toBe(DEFAULT_REFRESH_MS)
-    expect(ok({ refreshMs: 0 }).refreshMs).toBe(0)
+    expect(ok({ agents: [COPILOT] }).refreshMs).toBe(DEFAULT_REFRESH_MS)
+    expect(ok({ agents: [COPILOT], refreshMs: 0 }).refreshMs).toBe(0)
   })
 
   test("without an `id`, the agent is named by its command", () => {
@@ -547,7 +564,7 @@ describe("parsePluginConfig (pure)", () => {
     // would send them to `parseSettings` on every turn, where they are ignored.
     // `undefined` fields are **omitted** so as not to overwrite, at merge time,
     // what the user put in `opencode.jsonc`.
-    expect(providerSettingsOf(DEFAULT_AGENT)).toEqual({ command: "copilot", args: ["--acp"] })
+    expect(providerSettingsOf(COPILOT)).toEqual({ command: "copilot", args: ["--acp"] })
     expect(
       providerSettingsOf({
         id: "codex",
@@ -579,8 +596,8 @@ describe("parsePluginConfig (pure)", () => {
     // OpenCode will merge, not about the provider happening to behave the same.
     expect(providerSettingsOf(silent)).toEqual({ command: "copilot" })
     expect(Object.keys(providerSettingsOf(silent))).not.toContain("session")
-    expect(providerSettingsOf(DEFAULT_AGENT)).toEqual(
-      providerSettingsOf({ ...DEFAULT_AGENT, session: undefined }),
+    expect(providerSettingsOf(COPILOT)).toEqual(
+      providerSettingsOf({ ...COPILOT, session: undefined }),
     )
 
     for (const [agent, expected] of [
@@ -653,7 +670,11 @@ describe("discovery bounds", () => {
   })
 
   test("absent, they fall back to their defaults", () => {
-    for (const input of [undefined, null, {}, { agents: [] }]) {
+    // Bounds are optional, but the agent list is not: with none configured
+    // there is nothing to publish, so the case is a refusal rather than a
+    // default.
+    expect(parsePluginConfig({}).ok).toBe(false)
+    for (const input of [{ agents: [COPILOT] }, { agents: [COPILOT], refreshMs: 1 }]) {
       const parsed = parsePluginConfig(input)
       expect(parsed.ok).toBe(true)
       if (!parsed.ok) return
@@ -663,7 +684,11 @@ describe("discovery bounds", () => {
   })
 
   test("they are configurable, for instance for an agent slow to start", () => {
-    const parsed = parsePluginConfig({ discoveryTimeoutMs: 120_000, discoveryIdleTimeoutMs: 5_000 })
+    const parsed = parsePluginConfig({
+      agents: [COPILOT],
+      discoveryTimeoutMs: 120_000,
+      discoveryIdleTimeoutMs: 5_000,
+    })
     expect(parsed.ok).toBe(true)
     if (!parsed.ok) return
     expect(parsed.value.discoveryTimeoutMs).toBe(120_000)
