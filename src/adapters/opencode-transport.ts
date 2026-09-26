@@ -51,6 +51,7 @@ import type {
   NormalizedRequest,
 } from "../core/types.js"
 import { allowAllPermissions, denyAllPermissions } from "../core/types.js"
+import { PROVIDER_ID } from "../core/publish.js"
 import { SessionPool } from "../core/session-pool.js"
 import type { TurnLease } from "../core/session-pool.js"
 import { agentKey, agentLabel, allowsEveryTool } from "../settings.js"
@@ -61,8 +62,23 @@ import type { AcpBody, AcpFrame, ReducerState } from "./opencode-protocol.js"
 /** The route's id: stable, and readable in a diagnostic. */
 export const ROUTE_ID = "acp-stdio"
 
-/** The value of `route.provider`: the provider identity as OpenCode reports it. */
-export const PROVIDER = ProviderID.make("acp")
+/**
+ * The provider identity a route declares.
+ *
+ * Note: **not a constant.** `Route.make`'s `provider` is the id OpenCode will
+ * see on the `LanguageModel`, and every ACP provider publishes its models under
+ * the id its own `settings` carry - the plugin writes it there, because
+ * `model(modelID, settings)` is the only thing OpenCode calls on a provider
+ * package and no other trace of the provider reaches the transport. Freezing
+ * `"acp"` here would give `acp-copilot` and `acp-codex` the same route identity,
+ * and the two agents' models would become indistinguishable to the host.
+ *
+ * Note: the parameter is the one field actually read, so that a **rejected**
+ * configuration can still be named after the provider it came from - the error
+ * a user reads is `acp-codex: settings.command est obligatoire`, not `acp: ...`.
+ */
+export const providerIdOf = (settings: { readonly provider?: string | undefined }): ProviderID =>
+  ProviderID.make(settings.provider ?? PROVIDER_ID)
 
 /**
  * A **fake** but valid URL.
@@ -593,7 +609,7 @@ export const makeTransport = (
 export const makeRoute = (settings: AcpProviderSettings): Route<AcpBody, AcpPrepared> =>
   Route.make({
     id: ROUTE_ID,
-    provider: PROVIDER,
+    provider: providerIdOf(settings),
     // The protocol is built **here**, hence with the settings: that is what
     // lets `systemSuffix` reach `body.from` with no global state.
     protocol: makeProtocol(settings),

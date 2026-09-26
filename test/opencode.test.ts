@@ -664,6 +664,53 @@ describe("provider settings", () => {
     // yield two distinct agents.
     expect(agentKey(withTools.value)).not.toBe(agentKey(without.value))
   })
+  test("the process key includes the provider id, otherwise two agents share a session", () => {
+    // The credentials are per agent. Two providers configured with the same
+    // command would otherwise share one process - hence one authentication
+    // session, and one pool of ACP sessions: the second provider's first turn
+    // could be handed a session the first one had filled.
+    const first = fakeSettings({}, { provider: "acp-copilot" })
+    const second = fakeSettings({}, { provider: "acp-codex" })
+    expect(agentKey(first)).not.toBe(agentKey(second))
+    // And the default id is not a key of its own: a hand-written
+    // `providers.acp.settings` and the published one must land on the same agent.
+    const anonymous = fakeSettings()
+    const explicit = fakeSettings({}, { provider: "acp" })
+    expect(agentKey(anonymous)).toBe(agentKey(explicit))
+  })
+
+  test("an empty `provider` is refused: the id names the provider in every error", () => {
+    const parsed = parseSettings({ command: "copilot", provider: "  " })
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) return
+    expect(parsed.message).toContain("settings.provider")
+  })
+
+  test("the route declares the configured provider, one agent after another", () => {
+    // `Route.make`'s `provider` is the id OpenCode sees on the `LanguageModel`.
+    // Freezing it would make `acp-copilot/x` and `acp-codex/x` the same model.
+    for (const id of ["acp-copilot", "acp-codex"]) {
+      const languageModel = model("claude-sonnet-5", fakeSettings({}, { provider: id }))
+      expect({ id, provider: String(languageModel.provider) }).toEqual({ id, provider: id })
+    }
+    // Absent, it is the default: the configuration written before several
+    // agents were possible keeps working untouched.
+    expect(String(model("claude-sonnet-5", fakeSettings()).provider)).toBe("acp")
+  })
+
+  test("a rejected configuration is still named after its provider", () => {
+    // `parseSettings` fails before the identity could be read from its result,
+    // so the raw settings are the only place left to find it - and the message
+    // the user reads has to say which of his two providers is misconfigured.
+    try {
+      model("x", { provider: "acp-codex" })
+      throw new Error("aurait dû lever")
+    } catch (error) {
+      if (!(error instanceof ProviderConfigurationError)) throw error
+      expect(String(error.provider)).toBe("acp-codex")
+      expect(error.message).toContain("settings.command")
+    }
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

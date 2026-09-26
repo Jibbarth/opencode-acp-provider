@@ -17,7 +17,7 @@ import { ProviderConfigurationError } from "@opencode/ai/schema/index"
 import type { LanguageModel, ProviderOptions } from "@opencode/ai/schema/index"
 import type { ProviderPackage } from "@opencode/ai"
 
-import { makeRoute, PROVIDER } from "./adapters/opencode-transport.js"
+import { makeRoute, providerIdOf } from "./adapters/opencode-transport.js"
 import { parseSettings } from "./settings.js"
 import type { AcpProviderSettings, RawProviderSettings } from "./settings.js"
 
@@ -39,11 +39,24 @@ export type ModelContract = (modelID: string, settings: RawProviderSettings) => 
  * it between two providers would let one be driven by the other's configuration.
  * The cost is nil: a `Route` is only a description, and the agent itself is
  * cached at module level.
+ *
+ * Note: one module serves **every** ACP provider, which is why the provider
+ * identity is read from the settings rather than fixed here. Two providers
+ * pointing at the same `package` differ only by the settings OpenCode hands
+ * back, so anything else would make them the same provider.
  */
 export const model: ModelContract = (modelID, settings) => {
   const parsed = parseSettings(settings)
   if (!parsed.ok) {
-    throw new ProviderConfigurationError({ provider: PROVIDER, message: parsed.message })
+    // The provider identity comes from the settings for the same reason the
+    // route takes it from there: this function is called without any other
+    // context, and an error naming `acp-copilot` is the one the user can match
+    // to the provider they selected. The `typeof` guard is what makes the
+    // identity readable on a configuration that was **rejected**, which is the
+    // only moment it is worth reporting: a non-string `provider` has no id to
+    // give, so the default stands in.
+    const id = typeof settings.provider === "string" ? settings : { provider: undefined }
+    throw new ProviderConfigurationError({ provider: providerIdOf(id), message: parsed.message })
   }
   return makeRoute(parsed.value).model({ id: modelID })
 }

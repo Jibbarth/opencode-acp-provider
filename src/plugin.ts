@@ -1,19 +1,29 @@
 /**
- * The OpenCode plugin - it is what makes the provider visible.
+ * The OpenCode plugin - it is what makes the providers visible.
  *
  * It does three things, and **nothing else**:
  *
  * 1. reads `ctx.options` (the agents declared in `opencode.jsonc`);
- * 2. launches the ACP agent, reads its `configOptions` inventory, and registers
- *    it in the catalogue: one `Provider.Info` plus one `Model.Info` per model;
- * 3. watches OpenCode's event stream and **republishes** when the inventory has
- *    moved, then closes the agent on shutdown.
+ * 2. launches each ACP agent, reads its `configOptions` inventory, and registers
+ *    it in the catalogue: **one provider per agent**, with one `Model.Info` per
+ *    model and its own effort variants;
+ * 3. watches OpenCode's event stream and **republishes** when an inventory has
+ *    moved, then closes every agent on shutdown.
+ *
+ * Note: **one provider per agent**, not one provider for the list. Credentials
+ * are per agent, and a single provider would have to choose: either its settings
+ * name one command and the other agent is unreachable, or the transport holds
+ * two agents behind one identity and OpenCode can no longer tell which model
+ * belongs to which - nor which settings to hand back on the first turn. Each
+ * provider therefore carries its own agent's id, inventory, variants, process and
+ * pool of ACP sessions.
  *
  * Note: **none of these steps may bring down OpenCode's startup.** A plugin that
  * throws in `setup` is not "one plugin in default state": it is a list of
  * plugins refusing to start, and the user loses every other plugin too. Every
  * error is therefore logged and reduced to "nothing is registered" - an absent
- * provider is visible, a dead server is not.
+ * provider is visible, a dead server is not. One agent failing costs that agent,
+ * and the others are still published.
  *
  * Note: this is the **only** file in the project depending on
  * `@opencode/plugin`. All the transformation logic lives in `core/publish.ts`,
@@ -38,10 +48,11 @@ import {
   inventorySignature,
   inventoryToModels,
   parsePluginConfig,
+  providerIdOf,
   providerInfo,
   providerSettingsOf,
 } from "./core/publish.js"
-import type { PublishOptions, RawModelInfo, RawProviderInfo } from "./core/publish.js"
+import type { PublishOptions, RawAgent, RawModelInfo, RawProviderInfo } from "./core/publish.js"
 import { parseSettings } from "./settings.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,11 +353,33 @@ interface Publication {
 }
 
 const publish = (options: PublishOptions, packageURL: string, inventory: Inventory): Publication => {
-  const providerID = Provider.ID.make(PROVIDER_ID)
+  const providerID = Provider.ID.make(options.id ?? PROVIDER_ID)
   return {
     info: toProviderInfo(providerInfo(options, packageURL)),
     models: inventoryToModels(inventory, options).map((raw) => toModelInfo(providerID, raw)),
   }
+}
+
+/**
+ * Is this provider id already **taken by somebody else**?
+ *
+ * Note: `owned` is what separates "my own entry, replace it" from "a foreign
+ * entry under the same id, refuse". Refusing is the decision: the id then belongs
+ * to a built-in provider or to one the user declared in `opencode.jsonc`, and
+ * overwriting it would replace a working provider with an ACP inventory, with
+ * nothing in the log to explain the models that vanished. Renaming instead is no
+ * option either - the next free name is not stable across restarts, so `/model`
+ * would show a different id every time the user added a provider.
+ *
+ * Note: `list` is **optional at the call site**. The `acp-` prefix is the real
+ * protection, this is the belt; a host whose editor does not expose `list` must
+ * lose the belt and keep the providers, not the other way round. A plugin that
+ * registers nothing is indistinguishable from one that never loaded.
+ */
+const isTakenByAnother = (editor: ProviderEditor, id: string, owned: ReadonlySet<string>): boolean => {
+  if (owned.has(id)) return false
+  if (typeof editor.list !== "function") return false
+  return editor.list().some((record) => record.provider.id === id)
 }
 
 /**
@@ -357,8 +390,18 @@ const publish = (options: PublishOptions, packageURL: string, inventory: Invento
  * without ever duplicating the provider. `dispose` is still needed so the
  * previous transformation stops contributing to the catalogue.
  */
-const register = (ctx: Context, publication: Publication): Promise<Registration> =>
+const register = (
+  ctx: Context,
+  publication: Publication,
+  owned: ReadonlySet<string>,
+): Promise<Registration> =>
   ctx.provider.transform((editor: ProviderEditor) => {
+    if (isTakenByAnother(editor, publication.info.id, owned)) {
+      throw new Error(
+        `identifiant de provider « ${publication.info.id} » déjà pris par un provider existant ; ` +
+          "donne un autre `id` à cet agent (le préfixe `acp-` rend la collision improbable).",
+      )
+    }
     editor.add({ info: publication.info, models: publication.models })
   })
 
@@ -463,161 +506,241 @@ export default Plugin.define({
   },
 })
 
+/** A registered agent, and everything that has to be undone for it. */
+interface Registered {
+  /** The provider id this agent is published under. */
+  readonly id: string
+  /** Stops the inventory watcher. */
+  readonly stop: () => void
+  /** Drops this agent's contribution to the catalogue. */
+  readonly dispose: () => Promise<void>
+  /** Kills the discovery agent process. */
+  readonly closeAgent: () => Promise<void>
+}
+
+/**
+ * Brings one agent all the way to a registered provider.
+ *
+ * Note: **every** failure path returns `undefined` instead of throwing. That is
+ * what makes the list of agents independent: a dead agent - a command that does
+ * not exist, a timeout, an id already taken - must cost the user that agent and
+ * nothing else. A single `try/catch` around the whole loop would instead make
+ * the order of the configuration decide whether the *working* agents are
+ * registered at all.
+ *
+ * Note: the ACP process is closed on every failure exit. A discovery that ends
+ * without a registration has opened a process nobody will ever close, and
+ * `setup` returning would leave one orphan per agent.
+ */
+const bringUp = async (
+  ctx: Context,
+  agent: RawAgent,
+  providerId: string,
+  packageURL: string,
+  bounds: { readonly timeoutMs: number; readonly idleTimeoutMs: number; readonly refreshMs: number },
+  owned: Set<string>,
+): Promise<Registered | undefined> => {
+  // The settings are validated **before** any spawn, with the exact rules
+  // `model()` will apply on every turn: a missing `command` must fail here,
+  // with its path, not on the first prompt.
+  const settings = parseSettings(providerSettingsOf(agent, providerId))
+  if (!settings.ok) {
+    log(`agent « ${agent.id} » ignoré : ${settings.message}`)
+    return undefined
+  }
+
+  // This is a **second** process, distinct from the one the transport will
+  // spawn through `model()`. The `opencode-transport.ts` cache is deliberately
+  // not shared: borrowing it would load the whole `effect` + `@opencode/ai`
+  // stack as soon as the plugin loads - in the server process - for a single
+  // capture.
+  //
+  // Both steps are **bounded** (`discover`): this is the only place in the
+  // project where a wait can block OpenCode's startup, because the host awaits
+  // `setup` before yielding. A mute, dead or stuck agent must produce "provider
+  // not registered", not "OpenCode does not start".
+  let discovered: Discovery
+  try {
+    discovered = await discover(
+      {
+        command: settings.value.command,
+        ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
+        ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
+        ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
+        // No `policy`: `createAcpAgent`'s default is `denyAllPermissions`. The
+        // plugin only performs discovery, it opens no turn - but it must not be
+        // able to do better.
+      },
+      bounds.timeoutMs,
+      bounds.idleTimeoutMs,
+    )
+  } catch (error) {
+    // The error names the **agent**: "agent unavailable" without the
+    // configured agent's name is an unusable diagnostic when the list holds
+    // several, or when the default (`copilot`) is not that one.
+    log(`agent « ${agent.id} » indisponible, « ${providerId} » non enregistré : ${reason(error)}`)
+    return undefined
+  }
+  const acp = discovered.agent
+
+  const options: PublishOptions = {
+    id: providerId,
+    label: `ACP — ${acp.info.name}`,
+    settings: providerSettingsOf(agent, providerId),
+    ...(agent.limits === undefined ? {} : { limits: agent.limits }),
+  }
+
+  // `AcpAgent.inventory()` opens a throwaway session, reads, closes: the
+  // capture is therefore always fresh, which is exactly the defect it papers
+  // over (19 values on the first `session/new`, 20 after a `set_config_option`).
+  let inventory: Inventory
+  try {
+    inventory = await discovered.inventory()
+  } catch (error) {
+    await acp.close()
+    log(`inventaire illisible pour « ${agent.id} », « ${providerId} » non enregistré : ${reason(error)}`)
+    return undefined
+  }
+  if (inventory.models.length === 0) {
+    await acp.close()
+    log(`« ${agent.id} » ne propose aucun modèle, « ${providerId} » non enregistré`)
+    return undefined
+  }
+  // The **raw** capture is logged: the published count may be smaller (`auto`
+  // is filtered out), and it is the gap between the two that says whether the
+  // agent proposed anything other than models.
+  log(
+    `${acp.info.name} v${acp.info.version} (${providerId}) : ${inventory.models.length} valeur(s) de ` +
+      `modèle, ${inventory.thoughtLevels.length} niveau(s) d'effort`,
+  )
+
+  // A rejected `transform` would leave the ACP agent alive with nothing
+  // cleaning up behind it: it is closed before returning, and logged. The
+  // "never bring down OpenCode's startup" principle applies to this step too.
+  let registration: Registration
+  try {
+    registration = await register(ctx, publish(options, packageURL, inventory), owned)
+  } catch (error) {
+    await acp.close()
+    log(`« ${providerId} » non enregistré : ${reason(error)}`)
+    return undefined
+  }
+  owned.add(providerId)
+  let signature = inventorySignature(inventory)
+
+  // The refresh pass goes through `discovered.inventory()` and not
+  // `acp.inventory()`, so it is **bounded** too. A discovery dragging on in the
+  // background cannot leave an ACP session open forever - and, awaited, cannot
+  // leak a rejection either.
+  const stop = watch(ctx, bounds.refreshMs, async () => {
+    const next = await discovered.inventory()
+    const nextSignature = inventorySignature(next)
+    // Nothing changed: nothing is touched. `ctx.provider.reload()` rebuilds the
+    // whole catalogue, so calling it without reason would lose the current
+    // `/model` selection over an identical inventory.
+    if (nextSignature === signature) return
+    log(`${providerId} : inventaire modifié, ${next.models.length} modèle(s)`)
+    // The new one is registered **before** the old one is disposed: if the
+    // registration fails, the previous catalogue stays in place and `/model`
+    // keeps working with a dated but valid inventory.
+    const fresh = await register(ctx, publish(options, packageURL, next), owned)
+    await registration.dispose()
+    registration = fresh
+    signature = nextSignature
+    await ctx.provider.reload()
+  })
+
+  // The order matters: the watcher is stopped **before** the agent, otherwise
+  // a rediscovery in flight would fail on an already dead agent - and that
+  // error would mask the real cause, the shutdown. The `finally` is the only
+  // guarantee that the agent is killed, even if `dispose` fails.
+  return {
+    id: providerId,
+    stop,
+    dispose: () => registration.dispose(),
+    closeAgent: () => acp.close(),
+  }
+}
+
 /** `setup`'s work, without the safety net: `setup` is what carries it. */
 async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined> {
-    // ── 1. Options ──────────────────────────────────────────────────────────
-    const parsed = parsePluginConfig(ctx.options)
-    if (!parsed.ok) {
-      log(`configuration ignorée : ${parsed.message}`)
-      return
-    }
-    const { agents, refreshMs, discoveryTimeoutMs, discoveryIdleTimeoutMs } = parsed.value
-    const agent = agents[0]
-    if (agent === undefined) return
+  // ── 1. Options ──────────────────────────────────────────────────────────
+  const parsed = parsePluginConfig(ctx.options)
+  if (!parsed.ok) {
+    log(`configuration ignorée : ${parsed.message}`)
+    return
+  }
+  const { agents, refreshMs, discoveryTimeoutMs, discoveryIdleTimeoutMs } = parsed.value
 
-    // Only one agent is registered, and it is the **first**: the route carries a
-    // fixed `provider` (`adapters/opencode-transport.ts`), so a second provider
-    // would carry the same id. Rather than publishing it silently, it is said
-    // out loud - and the ignored agents are named.
-    for (const ignored of agents.slice(1)) {
-      log(`agent « ${ignored.id} » ignoré : un seul provider ACP est supporté en P3a`)
-    }
+  // ── 2. Provider package entry point ─────────────────────────────────────
+  let packageURL: string
+  try {
+    packageURL = resolvePackageURL(import.meta.url)
+  } catch (error) {
+    log(reason(error))
+    return
+  }
 
-    // The settings are validated **before** any spawn, with the exact rules
-    // `model()` will apply on every turn: a missing `command` must fail here,
-    // with its path, not on the first prompt.
-    const settings = parseSettings(providerSettingsOf(agent))
-    if (!settings.ok) {
-      log(`agent « ${agent.id} » ignoré : ${settings.message}`)
-      return
+  // ── 3. One provider per agent ────────────────────────────────────────────
+  // Agents are brought up **one after another**, and that is a decision rather
+  // than an accident: each discovery spawns an agent that authenticates, and N
+  // of them starting together at boot is exactly the burst `discoveryTimeoutMs`
+  // exists to avoid. It also keeps the log in the order the user wrote.
+  const registered: Registered[] = []
+  const owned = new Set<string>()
+  for (const agent of agents) {
+    const id = providerIdOf(agent.providerSlug)
+    // Two agents resolving to the same id would fight over one catalogue entry:
+    // `editor.add` replaces, so the second would silently take the first's
+    // models while `/model` still showed the first's name. First one wins, and
+    // the loser is named.
+    if (owned.has(id)) {
+      log(`agent « ${agent.id} » ignoré : l'identifiant « ${id} » est déjà pris dans cette configuration`)
+      continue
     }
-
-    // ── 2. Provider package entry point ─────────────────────────────────────
-    let packageURL: string
-    try {
-      packageURL = resolvePackageURL(import.meta.url)
-    } catch (error) {
-      log(reason(error))
-      return
-    }
-
-    // ── 3. Launching the agent ──────────────────────────────────────────────
-    // This is a **second** process, distinct from the one the transport will
-    // spawn through `model()`. The `opencode-transport.ts` cache is deliberately
-    // not shared: borrowing it would load the whole `effect` + `@opencode/ai`
-    // stack as soon as the plugin loads - in the server process - for a single
-    // capture.
-    //
-    // Both steps are **bounded** (`discover`): this is the only place in the
-    // project where a wait can block OpenCode's startup, because the host awaits
-    // `setup` before yielding. A mute, dead or stuck agent must produce "provider
-    // not registered", not "OpenCode does not start".
-    let discovered: Discovery
-    try {
-      discovered = await discover(
-        {
-          command: settings.value.command,
-          ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
-          ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
-          ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
-          // No `policy`: `createAcpAgent`'s default is `denyAllPermissions`. The
-          // plugin only performs discovery, it opens no turn - but it must not be
-          // able to do better.
-        },
-        discoveryTimeoutMs,
-        discoveryIdleTimeoutMs,
-      )
-    } catch (error) {
-      // The error names the **agent**: "agent unavailable" without the
-      // configured agent's name is an unusable diagnostic when the list holds
-      // several, or when the default (`copilot`) is not that one.
-      log(`agent « ${agent.id} » indisponible, provider non enregistré : ${reason(error)}`)
-      return
-    }
-    const acp = discovered.agent
-
-    const options: PublishOptions = {
-      label: `ACP — ${acp.info.name}`,
-      settings: providerSettingsOf(agent),
-      ...(agent.limits === undefined ? {} : { limits: agent.limits }),
-    }
-
-    // ── 4. Discovery ────────────────────────────────────────────────────────
-    // `AcpAgent.inventory()` opens a throwaway session, reads, closes: the
-    // capture is therefore always fresh, which is exactly the defect it papers
-    // over (19 values on the first `session/new`, 20 after a `set_config_option`).
-    let inventory: Inventory
-    try {
-      inventory = await discovered.inventory()
-    } catch (error) {
-      await acp.close()
-      log(`inventaire illisible pour « ${agent.id} », provider non enregistré : ${reason(error)}`)
-      return
-    }
-    if (inventory.models.length === 0) {
-      await acp.close()
-      log(`« ${agent.id} » ne propose aucun modèle, provider non enregistré`)
-      return
-    }
-    // The **raw** capture is logged: the published count may be smaller (`auto`
-    // is filtered out), and it is the gap between the two that says whether the
-    // agent proposed anything other than models.
-    log(
-      `${acp.info.name} v${acp.info.version} (${agent.id}) : ${inventory.models.length} valeur(s) de ` +
-        `modèle, ${inventory.thoughtLevels.length} niveau(s) d'effort`,
+    const up = await bringUp(
+      ctx,
+      agent,
+      id,
+      packageURL,
+      { timeoutMs: discoveryTimeoutMs, idleTimeoutMs: discoveryIdleTimeoutMs, refreshMs },
+      owned,
     )
+    if (up !== undefined) registered.push(up)
+  }
 
-    // ── 5. Registration ─────────────────────────────────────────────────────
-    // A rejected `transform` would leave the ACP agent alive with nothing
-    // cleaning up behind it: it is closed before returning, and logged. The
-    // "never bring down OpenCode's startup" principle applies to this step too.
-    let registration: Registration
-    try {
-      registration = await register(ctx, publish(options, packageURL, inventory))
-    } catch (error) {
-      await acp.close()
-      log(`enregistrement refusé par l'hôte, provider non enregistré : ${reason(error)}`)
-      return
-    }
-    let signature = inventorySignature(inventory)
+  if (registered.length === 0) {
+    log("aucun agent enregistré, aucun provider ACP publié")
+    return
+  }
+  const dropped = agents.length - registered.length
+  log(
+    `${registered.length} provider(s) ACP : ${registered.map((entry) => entry.id).join(", ")}` +
+      (dropped > 0 ? ` — ${dropped} agent(s) écarté(s)` : ""),
+  )
 
-    // ── 6. Refreshing ───────────────────────────────────────────────────────
-    // The refresh pass goes through `discovered.inventory()` and not
-    // `acp.inventory()`, so it is **bounded** too. A discovery dragging on in
-    // the background cannot leave an ACP session open forever - and, awaited,
-    // cannot leak a rejection either.
-    const stop = watch(ctx, refreshMs, async () => {
-      const next = await discovered.inventory()
-      const nextSignature = inventorySignature(next)
-      // Nothing changed: nothing is touched. `ctx.provider.reload()` rebuilds
-      // the whole catalogue, so calling it without reason would lose the current
-      // `/model` selection over an identical inventory.
-      if (nextSignature === signature) return
-      log(`inventaire modifié : ${next.models.length} modèle(s)`)
-      // The new one is registered **before** the old one is disposed: if the
-      // registration fails, the previous catalogue stays in place and `/model`
-      // keeps working with a dated but valid inventory.
-      const fresh = await register(ctx, publish(options, packageURL, next))
-      await registration.dispose()
-      registration = fresh
-      signature = nextSignature
-      await ctx.provider.reload()
-    })
-
-    // ── 7. Shutdown ─────────────────────────────────────────────────────────
-    // The order matters: the watcher is stopped **before** the agent, otherwise
-    // a rediscovery in flight would fail on an already dead agent - and that
-    // error would mask the real cause, the shutdown. The `finally` is the only
-    // guarantee that the agent is killed, even if `dispose` fails.
-    return async () => {
-      stop()
+  // ── 4. Shutdown ─────────────────────────────────────────────────────────
+  // Every agent is stopped, disposed, then killed, and **all** of them even if
+  // one fails: a second agent whose `dispose` throws must not leave its process
+  // - and its ACP sessions - alive until the server exits.
+  return async () => {
+    for (const entry of registered) entry.stop()
+    for (const entry of registered) {
       try {
-        await registration.dispose()
-      } finally {
-        await closeProviderSessions()
-        await acp.close()
+        await entry.dispose()
+      } catch (error) {
+        log(`« ${entry.id} » non retiré du catalogue : ${reason(error)}`)
       }
     }
+    await closeProviderSessions()
+    for (const entry of registered) {
+      try {
+        await entry.closeAgent()
+      } catch (error) {
+        log(`agent « ${entry.id} » non arrêté : ${reason(error)}`)
+      }
+    }
+  }
 }
 
 /**

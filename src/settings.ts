@@ -14,6 +14,8 @@
  * for a configuration error occurring **before** any request.
  */
 
+import { PROVIDER_ID } from "./core/publish.js"
+
 /** Redirection of the ACP agent's stderr. */
 export type StderrMode = "inherit" | "ignore" | "pipe"
 
@@ -35,6 +37,19 @@ export type SessionMode = "reuse" | "fresh"
  * here would let them drift apart.
  */
 export type AcpProviderSettings = Readonly<{
+  /**
+   * The id of the provider this model belongs to, e.g. `"acp-copilot"`.
+   *
+   * Note: published by the plugin, never typed by the user. It exists because
+   * `model(modelID, settings)` is the **only** thing OpenCode calls on a
+   * provider package: without a key carrying the provider's identity, every ACP
+   * route would declare the same one and two agents would be indistinguishable
+   * in `/model`. It is part of `agentKey` for the same reason it exists: two
+   * providers must not share an agent process, hence its sessions.
+   *
+   * Absent: the default {@link PROVIDER_ID}.
+   */
+  provider: string | undefined
   /** The command to launch, e.g. `"copilot"` or `"npx"`. */
   command: string
   /** Command arguments, e.g. `["--acp"]`. */
@@ -203,6 +218,12 @@ export const parseSettings = (input: unknown): SettingsResult => {
     return invalid("command", 'est obligatoire et ne peut pas être vide (ex. "copilot")')
   }
 
+  const provider = optionalString(input, "provider")
+  if (!provider.ok) return provider
+  if (provider.value !== undefined && provider.value.trim() === "") {
+    return invalid("provider", "ne peut pas être une chaîne vide — omets le champ pour le provider par défaut")
+  }
+
   const args = optionalStringArray(input, "args")
   if (!args.ok) return args
   const cwd = optionalString(input, "cwd")
@@ -229,6 +250,7 @@ export const parseSettings = (input: unknown): SettingsResult => {
   return {
     ok: true,
     value: {
+      provider: provider.value,
       command: command.value,
       args: args.value,
       cwd: cwd.value,
@@ -256,9 +278,18 @@ export const parseSettings = (input: unknown): SettingsResult => {
  * process, only the request (`AcpPrepared`). Neither is `effort`, for the same
  * reason: it is a variant value applied by `set_config_option` on the turn's
  * session, not a property of the agent.
+ *
+ * Note: the provider id **is** in it, and that is the point of one provider per
+ * agent. Two providers configured with the same command would otherwise share
+ * one process - hence one authentication session, one set of credentials, and
+ * one pool of ACP sessions: the second provider's first turn could be handed a
+ * session the first one had filled, and the second would inherit whatever
+ * authentication state the first had reached. Separate providers are exactly
+ * what makes that impossible, and the cost is one extra process per agent.
  */
 export const agentKey = (settings: AcpProviderSettings): string =>
   JSON.stringify([
+    settings.provider ?? PROVIDER_ID,
     settings.command,
     settings.args ?? [],
     settings.cwd ?? null,

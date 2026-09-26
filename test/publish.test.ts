@@ -27,11 +27,14 @@ import {
   inventorySignature,
   inventoryToModels,
   parsePluginConfig,
+  normalizeProviderSlug,
+  providerIdOf,
   providerInfo,
   providerSettingsOf,
 } from "../src/core/publish.js"
 import { resolvePackageURL } from "../src/plugin.js"
 import { parseSettings } from "../src/settings.js"
+import type { RawAgent } from "../src/core/publish.js"
 import type { AcpMode, AcpOption, Inventory } from "../src/core/types.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,6 +234,84 @@ describe("inventoryToModels (pure)", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The provider id: one provider per agent
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("the provider id (pure)", () => {
+  /** The parsed agents, or a failure that names what the test got wrong. */
+  const agentsOf = (input: unknown): readonly RawAgent[] => {
+    const result = parsePluginConfig(input)
+    if (!result.ok) throw new Error(`attendu ok, obtenu : ${result.message}`)
+    return result.value.agents
+  }
+
+  test("an unnamed agent keeps the historic `acp`", () => {
+    // The single most important backward-compatibility fact: a configuration
+    // written before several agents were possible must keep publishing the
+    // provider its `providers.acp.settings` refers to.
+    expect(providerIdOf(undefined)).toBe("acp")
+    expect(providerIdOf("")).toBe("acp")
+  })
+
+  test("a named agent gets `acp-<id>`, so it cannot land on a built-in provider", () => {
+    expect(providerIdOf("copilot")).toBe("acp-copilot")
+    expect(providerIdOf("codex")).toBe("acp-codex")
+  })
+
+  test("the id is reduced to what an id may contain", () => {
+    // An id is typed after `provider/model`, put in a CLI filter and put in a
+    // URL: `acp-Mon Agent!` would need quoting in the first and is a path in
+    // the third.
+    expect(normalizeProviderSlug("  Copilot  ")).toBe("copilot")
+    expect(normalizeProviderSlug("Mon Agent!")).toBe("mon-agent")
+    expect(normalizeProviderSlug("codex_acp")).toBe("codex-acp")
+    expect(normalizeProviderSlug("--x--")).toBe("x")
+    expect(normalizeProviderSlug("../../etc")).toBe("etc")
+    expect(normalizeProviderSlug("a..b")).toBe("a-b")
+    expect(normalizeProviderSlug("9router")).toBe("9router")
+  })
+
+  test("two agents of the same command get two distinct provider ids", () => {
+    // The credentials are per agent, and the inventory too: a single provider
+    // would make them share a process, its authentication state and its ACP
+    // sessions.
+    const ids = ["copilot-stable", "copilot-next"].map(providerIdOf)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  test("`providerInfo` publishes the id it is given, and `acp` without one", () => {
+    const url = "file:///home/user/projet/src/index.ts"
+    expect(providerInfo({}, url).id).toBe("acp")
+    expect(providerInfo({ id: "acp-copilot" }, url).id).toBe("acp-copilot")
+  })
+
+  test("the id travels in the settings, and only when it is not the default", () => {
+    // `model(modelID, settings)` is the only thing OpenCode calls on a provider
+    // package: this key is the sole channel, which is also why the default is
+    // left out - a hand-written `providers.acp.settings` stays as written.
+    const agent = agentsOf({ agents: [{ command: "copilot", args: ["--acp"] }] })[0]
+    if (agent === undefined) throw new Error("agent manquant")
+    expect(providerSettingsOf(agent)).toEqual({ command: "copilot", args: ["--acp"] })
+    expect(providerSettingsOf(agent, "acp-copilot")).toEqual({
+      command: "copilot",
+      args: ["--acp"],
+      provider: "acp-copilot",
+    })
+  })
+
+  test("the published id is read back by `parseSettings`, so the route agrees with the catalogue", () => {
+    // The loop that must close: catalogue says `acp-copilot`, the route must
+    // declare `acp-copilot`, and the two only meet through these settings.
+    const agent = agentsOf({ agents: [{ id: "Copilot", command: "copilot", args: ["--acp"] }] })[0]
+    if (agent === undefined) throw new Error("agent manquant")
+    const parsed = parseSettings(providerSettingsOf(agent, providerIdOf(agent.providerSlug)))
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.value.provider).toBe("acp-copilot")
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // `providerInfo`
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -325,6 +406,7 @@ describe("parsePluginConfig (pure)", () => {
     })
     expect(agents[0]).toEqual({
       id: "codex",
+      providerSlug: "codex",
       command: "npx",
       args: ["-y", "@agentclientprotocol/codex-acp"],
       cwd: "/srv/projet",
@@ -345,8 +427,30 @@ describe("parsePluginConfig (pure)", () => {
     expect(ok({ agents: [{ command: "gemini" }] }).agents[0]?.id).toBe("gemini")
   })
 
-  test("a missing or empty command is an error naming the field", () => {
-    for (const agents of [[{}], [{ command: "  " }], [{ command: 12 }]]) {
+  test("an explicit `id` is normalised into a provider id, an implicit one is not", () => {
+    // The distinction IS the backward compatibility: an agent the user never
+    // named keeps `acp`, the id his `providers.acp.settings` is filed under.
+    expect(ok({ agents: [{ command: "copilot", args: ["--acp"] }] }).agents[0]?.providerSlug).toBeUndefined()
+    expect(ok({ agents: [{ id: "copilot", command: "copilot" }] }).agents[0]?.providerSlug).toBe("copilot")
+  })
+
+  test("an `id` with no usable character is refused rather than silently defaulted", () => {
+    // The user asked for a name: falling back to `acp` would hide the typo
+    // behind a provider that works.
+    for (const id of ["///", "  ", "\u00e9\u00e8"]) {
+      const result = parsePluginConfig({ agents: [{ id, command: "copilot" }] })
+      if (id === "  ") {
+        // Blank is not a name: it is the absence of one, which is legal.
+        expect(result.ok).toBe(true)
+        continue
+      }
+      expect(result.ok).toBe(false)
+      if (result.ok) continue
+      expect(result.message).toContain("options.agents[0].id")
+    }
+  })
+
+  test("a missing or empty command is an error naming the field", () => {    for (const agents of [[{}], [{ command: "  " }], [{ command: 12 }]]) {
       const result = parsePluginConfig({ agents })
       expect(result.ok).toBe(false)
       if (result.ok) continue

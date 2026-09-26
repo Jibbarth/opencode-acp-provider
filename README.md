@@ -31,6 +31,7 @@ Le projet suit les phases du `PLAN.md`. Où en est-on, sans arrondir :
 | **P3b — recette réelle** : `acp/<modèle>` visible dans `/model`, un tour complet | **fait, vérifié** |
 | P4 — permissions fines, erreurs §8 | à faire (`session/cancel` fait, voir « Annulation ») |
 | R1 — sessions ACP persistantes (`PLAN.md` §10) | fait, testé (voir « Sessions persistantes ») |
+| R2 — plusieurs agents, un provider par agent | fait, testé (voir « Plusieurs agents ») |
 | P6 — variantes par modèle, serveurs MCP versés à l'agent | à faire |
 | P7 — adaptateur HTTP `/v1/chat/completions` | à faire |
 
@@ -53,9 +54,6 @@ en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarr
 
 ### Limites connues
 
-- **Un seul agent par instance.** Le plugin enregistre le **premier** de la liste
-  `agents` ; les suivants sont journalisés et ignorés. La route porte un
-  `provider` fixe (`acp`), donc deux agents ne pourraient pas cohabiter.
 - **`auto` est filtré.** C'est une pseudo-valeur : l'agent choisit le modèle à
   chaque tour sans le dire, donc un `Model.Info` serait faux (limites, coût) sans
   jamais le signaler. Voir `PSEUDO_MODEL_IDS` dans `src/core/publish.ts`.
@@ -128,8 +126,7 @@ le contexte de l'agent sans aucun signe.
 ## Sessions persistantes
 
 Par défaut (`session: "fresh"`), chaque tour ouvre une session ACP neuve et
-renvoie **tout** l'historique dans le prompt. C'est correct, et c'est lent : un
-agent est stateful, et il oublie tout entre deux tours.
+renvoie **tout** l'historique dans le prompt. C'est correct, et c'est lent.
 
 Avec `session: "reuse"`, une **session ACP durable par conversation** est
 réutilisée d'un tour à l'autre, et **seul le delta** — les messages ajoutés
@@ -139,6 +136,48 @@ prompt cesse de grossir linéairement.
 ```jsonc
 { "command": "copilot", "args": ["--acp"], "session": "reuse" }
 ```
+
+### Ce que la reprise apporte — et ce qu'elle n'apporte pas
+
+**Mesuré sur `copilot --acp` v1.0.88** (agent `Copilot`), sonde
+`npm run verify:resume` : quatre tours, même script dans les deux modes, tour 1
+qui pose un nom de fichier à retenir.
+
+| | tour 1 | tour 2 | tour 3 | tour 4 |
+| --- | --- | --- | --- | --- |
+| `reuse` — durée | 4 761 ms | 1 518 ms | 3 383 ms | 1 547 ms |
+| `fresh` — durée | 8 251 ms | 2 940 ms | 7 539 ms | 9 788 ms |
+| `reuse` — `cacheWrite` | 17 629 | 18 377 | 19 045 | 19 764 |
+| `fresh` — `cacheWrite` | 17 628 | 17 684 | 17 737 | 17 789 |
+| `reuse` — `input` | 17 632 | 36 012 | 55 060 | 74 827 |
+| `fresh` — `input` | 17 631 | 17 687 | 17 740 | 17 792 |
+
+**La reprise n'apporte pas de mémoire : les deux modes s'en souviennent.** Sur les
+quatre tours, `copilot` a restitué le nom du fichier **8 fois sur 8**, en `reuse`
+comme en `fresh`. C'est expected — et c'est ce que contredit l'affirmation
+« un agent oublie tout entre deux tours » : en `fresh`, l'historique **rejoué
+dans le prompt** porte déjà l'information. Une session neuve n'amnésique pas,
+elle relit.
+
+Ce que la reprise apporte, en revanche, se lit dans `cacheWrite` :
+
+- en **`fresh`**, le prompt reconstruit est un **texte nouveau** à chaque tour :
+  l'agent le réécrit dans son cache à chaque fois (~17 700 par tour, indéfiniment) ;
+- en **`reuse`**, le préfixe est déjà dans la mémoire de l'agent : il n'écrit que
+  le delta (~750 à 1 900 par tour).
+
+D'où une latence par tour **~3× moindre** et plate, contre une latence qui
+**croit** avec la conversation en `fresh`.
+
+⚠️ Le contrepartie est dans la même colonne : `input` de l'agent **croit linéairement**
+en `reuse` (17 k → 75 k sur quatre tours), parce que sa session contient tout ce
+qu'il a déjà reçu, alors qu'en `fresh` il est borné par la taille de l'historique
+rendu. Sur une longue conversation, `reuse` atteint donc la fenêtre de contexte
+de l'agent **plus tôt**. C'est le vrai compromis, et il n'a rien d'un oubli.
+
+Ce que la reprise n'apporte donc **pas** : une mémoire que `fresh` n'aurait pas.
+Ce qu'elle apporte : un coût par tour constant. `fresh` reste le défaut — plus
+simple, et correct — mais pour la raison mesurée ci-dessus, pas pour une autre.
 
 ### Comment une conversation est reconnue
 
@@ -232,7 +271,7 @@ Tout se passe dans `plugins[].options`. Sans configuration, l'agent par défaut 
 
 | Champ | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `agents` | `AgentConfig[]` | `[{ "command": "copilot", "args": ["--acp"] }]` | Les agents à découvrir (le premier est enregistré) |
+| `agents` | `AgentConfig[]` | `[{ "command": "copilot", "args": ["--acp"] }]` | Les agents à découvrir ; **chacun devient un provider** |
 | `refreshMs` | `number` | `60000` | Délai minimum entre deux redécouvertes ; `0` désactive |
 | `discoveryTimeoutMs` | `number` | `10000` | Borne haute de la découverte (lancement + `initialize` + inventaire) |
 | `discoveryIdleTimeoutMs` | `number` | `10000` | Délai maximum sans signe de vie de l'agent pendant la découverte |
@@ -256,7 +295,7 @@ de route est tué dès qu'il existe : aucun orphelin par chargement de plugin.
 | `env` | `Record<string,string>` | Variables **ajoutées** à celles du serveur |
 | `allowedTools` | `string[]` | `["*"]` = tout autoriser ; absent = tout refuser (§7.4) |
 | `limits` | `{ context, output }` | Limites annoncées dans `/model` |
-| `id` | `string` | Étiquette pour les journaux ; défaut : la commande |
+| `id` | `string` | Étiquette **et** identifiant de provider ; défaut : aucun (`acp`) |
 Exemple :
 
 ```jsonc
@@ -281,6 +320,86 @@ Exemple :
 }
 ```
 
+## Plusieurs agents
+
+Chaque entrée de `agents` donne **un provider** : son propre inventaire de
+modèles, ses propres variantes d'effort, son propre process d'agent et son propre
+pool de sessions ACP.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-acp-provider",
+      "options": {
+        "agents": [
+          { "id": "copilot", "command": "copilot", "args": ["--acp"] },
+          { "command": "npx", "args": ["-y", "@agentclientprotocol/codex-acp"] }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`/model` affiche alors `acp-copilot/claude-sonnet-5` **et** `acp/claude-sonnet-5`
+côte à côte, et le réglage se fait par provider :
+
+```jsonc
+{ "provider": { "acp-copilot": { "options": { "session": "reuse" } } } }
+```
+
+### L'identifiant du provider
+
+| `agents[].id` | provider publié |
+| --- | --- |
+| absent | `acp` |
+| `"copilot"` | `acp-copilot` |
+| `"Mon Agent!"` | `acp-mon-agent` |
+
+Trois règles, et chacune a une raison :
+
+- **Un agent sans `id` garde `acp`.** C'est la compatibilité : une configuration
+  écrite avant les agents multiples continue de publier le provider auquel son
+  bloc `providers.acp.settings` fait référence.
+- **Un `id` nommé est préfixé par `acp-`.** C'est ce qui rend une collision avec
+  un provider d'OpenCode improbable : OpenCode livre `openai`, `anthropic`,
+  `github-copilot`…, et l'utilisateur peut déclarer les siens. `editor.add`
+  **remplace** l'entrée qui porte le même `id` — sans ce préfixe, un agent nommé
+  `copilot` remplacerait purement et simplement un provider existant.
+- **L'`id` est réduit à `[a-z0-9-]`** (minuscules, espaces et ponctuation
+  remplacés par `-`). Un identifiant est tapé après `provider/model`, utilisé
+  comme filtre dans le TUI et mis dans une URL : `acp-Mon Agent!` devrait être
+  échappé au moins une fois. Un `id` qui ne laisse **aucun** caractère utilisable
+  (`"///"`) est **refusé** plutôt que ramené à `acp` : l'utilisateur a demandé un
+  nom, et le lui donner par défaut cacherait la faute de frappe derrière une
+  configuration qui marche.
+
+### Que faire d'un identifiant en conflit
+
+**L'agent est écarté, et le journal nomme l'identifiant.** Deux cas :
+
+- **Deux agents de la configuration revendiquent le même id** — après
+  normalisation, `copilot` et `Copilot` ne font qu'un. Le **premier** gagne,
+  l'autre est journalisé. Laisser les deux passer serait pire qu'un doublon :
+  `editor.add` remplace, donc `/model` montrerait les modèles du second sous le
+  nom du premier — une substitution silencieuse.
+- **L'id est déjà pris par un autre provider** (construit-in ou déclaré par
+  l'utilisateur dans `providers`). L'agent est écarté. Le renommer
+  automatiquement n'est pas une option : « le prochain nom libre » n'est pas
+  stable d'un redémarrage à l'autre, donc `/model` changerait d'identifiant à
+  chaque provider ajouté. Refuser est le seul comportement déterministe, et le
+  message indique quoi faire.
+
+Dans les deux cas les autres agents sont enregistrés normalement, et le journal
+termine par `1 agent(s) écarté(s)`.
+
+⚠️ **Un agent en échec n'en bloque pas d'autres**, mais la découverte est
+**séquentielle** : le démarrage de N agents est additionnel, pas parallèle. C'est
+délibéré — chaque découverte lance un agent qui s'authentifie, et N agents qui
+démarrent ensemble au boot sont exactement le pic que `discoveryTimeoutMs` existe
+pour éviter. Un agent mort coûte au plus sa borne, une fois.
+
 ## Mappings ACP → OpenCode
 
 Relevé de référence sur `copilot --acp` (agent `Copilot` v1.0.88) : 20 valeurs de
@@ -297,9 +416,17 @@ permissions.
 Le `Model.ID` est **exactement** la valeur ACP : c'est ce que l'adaptateur
 renvoie à `set_config_option`, sans table de correspondance.
 
-Le provider s'appelle `acp` et son `name` est `ACP — <agentInfo.name>`. Son
+Le provider s'appelle `acp`, ou `acp-<id>` pour un agent nommé (voir « Plusieurs
+agents »), et son `name` est `ACP — <agentInfo.name>`. Son
 `package` est une URL `file://` **absolue** vers le module exportant `model`,
 calculée depuis `import.meta.url` (`resolvePackageURL` dans `src/plugin.ts`).
+
+Le même module sert **tous** les providers ACP : OpenCode n'appelle qu'une chose
+d'un package provider, `model(modelID, settings)`, et rien d'autre n'y porte
+l'identité du provider. L'id voyage donc **dans les settings** — le plugin
+l'écrit sous la clé `provider`, et `parseSettings` le relit. C'est aussi ce qui
+isole deux agents dans `agentKey` : deux providers ne partagent ni process,
+ni authentification, ni sessions ACP.
 
 ## Réglage par modèle
 
@@ -357,10 +484,11 @@ trois outils avec schémas JSON, transcript avec appel et résultat d'outil.
 
 ```bash
 bun install
-bun test            # 253 tests, dont la chaîne ACP complète contre test/fake-acp.ts
+bun test            # 330 tests, dont la chaîne ACP complète contre test/fake-acp.ts
 bun run typecheck   # tsc --noEmit, strict + noUncheckedIndexedAccess
 npm run verify:package   # exécute le paquet pour vérifier son contrat (Node)
-bun run verify:real copilot --acp   # sonde hors suite : exige un agent installé
+npm run verify:real copilot --acp    # sonde hors suite : exige un agent installé
+npm run verify:resume copilot --acp  # idem, `session: "reuse"` mesuré contre `fresh`
 ```
 
 ### `verify:package` — le contrat, vérifié **par exécution**

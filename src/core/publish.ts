@@ -25,15 +25,61 @@ import type { AcpModel, Inventory } from "./types.js"
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * The published provider id.
+ * The provider id used by an agent that was given no `id`.
  *
- * Note: it must stay **equal** to `PROVIDER` in `adapters/opencode-transport.ts`.
- * That is the id the route declares, and OpenCode matches a model to its
- * provider by `(providerID, modelID)`. Two diverging values would not break
- * compilation - the two files have nothing in common - but would make the model
- * invisible in `/model`, which is worse than an error.
+ * Note: the plugin publishes this exact value in the provider `settings`, which
+ * is the only channel OpenCode leaves to reach the transport - `model(modelID,
+ * settings)` receives nothing else. The id therefore travels **with the
+ * settings**, never as a frozen constant in `adapters/opencode-transport.ts`:
+ * OpenCode matches a model to its provider by `(providerID, modelID)`, and two
+ * providers carrying the same route identity would make `acp-copilot/x`
+ * indistinguishable from `acp-codex/x`.
  */
 export const PROVIDER_ID = "acp"
+
+/**
+ * Prefix of every **named** agent's provider id.
+ *
+ * Note: what it buys is the absence of a collision. OpenCode ships providers
+ * named `openai`, `anthropic`, `github-copilot`… and the user may have declared
+ * his own; `acp-` is a namespace this project owns, so an agent named `copilot`
+ * cannot land on top of a built-in. The alternative - publishing the agent's `id`
+ * verbatim - would make that collision not merely possible but likely, and
+ * `editor.add` **replaces** the entry with the same id: the user's own provider
+ * would be overwritten by an ACP inventory, without a word.
+ */
+export const PROVIDER_PREFIX = "acp-"
+
+/**
+ * A provider id fragment, reduced to what an id may contain.
+ *
+ * Note: only `[a-z0-9-]` survives. An id ends up in a `provider/model` string
+ * typed by a human, in a CLI filter, and in a URL; a `.`, a `/` or a space would
+ * have to be quoted at least once, and a `..` would be a path. The `acp-` prefix
+ * also makes a leading digit harmless.
+ */
+export const normalizeProviderSlug = (raw: string): string =>
+  raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+
+/**
+ * The provider id an agent is published under.
+ *
+ * Note: `undefined` (no explicit `id`) means the **historic** `acp`, not a slug
+ * derived from the command. A user who has never named his agent keeps the
+ * provider id - and the `providers.acp.settings` block - he has today; the id
+ * only becomes `acp-<id>` when the user asked for it by naming the agent.
+ *
+ * Note: an empty slug yields {@link PROVIDER_ID} too. `readAgent` already
+ * refuses one, so the case cannot come from a configuration; making the function
+ * total here costs nothing and removes a bare `acp-` from the reachable set.
+ */
+export const providerIdOf = (slug: string | undefined): string =>
+  slug === undefined || slug === "" ? PROVIDER_ID : `${PROVIDER_PREFIX}${slug}`
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Announced limits and capabilities
@@ -134,6 +180,8 @@ export interface RawProviderInfo {
 
 /** What the plugin knows about the agent and the inventory does not. */
 export interface PublishOptions {
+  /** Provider id; `PROVIDER_ID` otherwise. See {@link providerIdOf}. */
+  readonly id?: string
   /** Readable provider label, e.g. `"ACP - Copilot"`. */
   readonly label?: string
   /** Provider settings, handed back to `model()`. */
@@ -242,7 +290,7 @@ export const inventoryToModels = (
  * `Provider.Info` without reinventing them.
  */
 export const providerInfo = (options: PublishOptions, packageURL: string): RawProviderInfo => ({
-  id: PROVIDER_ID,
+  id: options.id ?? PROVIDER_ID,
   name: options.label?.trim() === "" || options.label === undefined ? "ACP" : options.label,
   activation: "enabled",
   package: packageURL,
@@ -275,6 +323,18 @@ export const inventorySignature = (inventory: Inventory): string =>
 export interface RawAgent {
   /** Label chosen by the user; used for messages, not for the provider. */
   readonly id: string
+  /**
+   * The `id` the user **explicitly** gave, normalised; `undefined` when none.
+   *
+   * Note: distinct from `id`, which falls back to the command so that every log
+   * line can name the agent. The distinction is the whole backward-compatibility
+   * story: an unnamed agent keeps the historic `acp` provider id, a named one
+   * gets `acp-<slug>` (see {@link providerIdOf}). Folding the two together
+   * would silently rename the provider of every existing configuration. It is
+   * optional because an agent that names nothing simply has none - and because a
+   * hand-built `RawAgent` (a test fixture, mostly) should not have to say so.
+   */
+  readonly providerSlug?: string | undefined
   readonly command: string
   readonly args: readonly string[] | undefined
   readonly cwd: string | undefined
@@ -326,6 +386,7 @@ export type PluginConfigResult =
 /** Agent used when the plugin is configured without `agents`. */
 export const DEFAULT_AGENT: RawAgent = {
   id: "copilot",
+  providerSlug: undefined,
   command: "copilot",
   args: ["--acp"],
   cwd: undefined,
@@ -440,6 +501,19 @@ const readAgent = (
   }
   const id = raw["id"]
   if (id !== undefined && typeof id !== "string") return invalid(`${path}.id`, "doit être une chaîne")
+  // An explicit `id` becomes a **provider id**, hence a slug: validated here,
+  // where the path of the offending field is still known, and not at
+  // registration, where it would only be one more anonymous failure among the
+  // agents. An id that normalises to nothing (`"///"`) is refused rather than
+  // silently falling back to `acp`: the user asked for a name, and giving him
+  // the default would hide the typo behind a working configuration.
+  const providerSlug = id === undefined || id.trim() === "" ? undefined : normalizeProviderSlug(id)
+  if (providerSlug === "") {
+    return invalid(
+      `${path}.id`,
+      'ne contient aucun caractère utilisable dans un identifiant (attendu : lettres, chiffres, "-" ; ex. "copilot")',
+    )
+  }
   const args = readStringArray(raw, path, "args")
   if (!args.ok) return args
   const cwd = raw["cwd"]
@@ -457,6 +531,7 @@ const readAgent = (
       // The `id` is a label: falling back to the command guarantees that every
       // log line can name the agent, even if the user gave none.
       id: id === undefined || id.trim() === "" ? command : id,
+      providerSlug,
       command,
       args: args.value,
       cwd: cwd === undefined ? undefined : cwd,
@@ -560,11 +635,21 @@ export const parsePluginConfig = (input: unknown): PluginConfigResult => {
  * turn). Undefined fields are **omitted** rather than set: they would otherwise
  * overwrite, at merge time, the value the user put in `opencode.jsonc` under
  * `providers.acp.settings`.
+ *
+ * Note: `providerId` **is** published, and only when it differs from the
+ * default. `model(modelID, settings)` receives no other trace of which provider
+ * it is building a route for, so this key is the sole place the id can travel -
+ * and omitting it for the default `acp` leaves a hand-written
+ * `providers.acp.settings` exactly as the user wrote it.
  */
-export const providerSettingsOf = (agent: RawAgent): Readonly<Record<string, unknown>> => ({
+export const providerSettingsOf = (
+  agent: RawAgent,
+  providerId: string = PROVIDER_ID,
+): Readonly<Record<string, unknown>> => ({
   command: agent.command,
   ...(agent.args === undefined ? {} : { args: [...agent.args] }),
   ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
   ...(agent.env === undefined ? {} : { env: { ...agent.env } }),
   ...(agent.allowedTools === undefined ? {} : { allowedTools: [...agent.allowedTools] }),
+  ...(providerId === PROVIDER_ID ? {} : { provider: providerId }),
 })

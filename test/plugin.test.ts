@@ -134,7 +134,10 @@ describe("the plugin registers a provider from a fake agent", () => {
     if (typeof published !== "object" || published === null) throw new Error(stdout)
     const record = published as Record<string, unknown>
     expect(record["dispose"]).toBe("function")
-    expect(record["id"]).toBe("acp")
+    // The agent named itself `faux`, so it gets **its own** provider: one
+    // provider per agent is what keeps two agents' credentials, inventories and
+    // sessions apart.
+    expect(record["id"]).toBe("acp-faux")
     // This is the point of the package contract tests: the registered URL must
     // be an absolute `file://` pointing at a file that exists - otherwise `/model`
     // shows the provider and the first turn fails with `ERR_MODULE_NOT_FOUND`.
@@ -299,5 +302,173 @@ describe("discovery is bounded", () => {
     // then it is checked to have been killed as it was born.
     await Bun.sleep(6_000)
     expect(countFake()).toBe(before)
+  }, 30_000)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Several agents: one provider each
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("one provider per agent", () => {
+  /**
+   * Runs `setup` in a fresh process and reports what reached the catalogue.
+   *
+   * Note: a real host context is **not** built. The plugin only reads `options`,
+   * `provider.transform` and `event.subscribe`, and the editor is the part under
+   * test here: `list()` decides whether a provider id is refused, so a minimal
+   * editor lacking it would quietly skip the check instead of exercising it.
+   */
+  const setup = async (
+    agents: string,
+    catalogue: string = "[]",
+  ): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const script = `
+      const module = await import(${JSON.stringify(PLUGIN)})
+      const added = []
+      const catalogue = ${catalogue}
+      const context = new Proxy({}, {
+        get: (_target, key) => {
+          if (key === "options") return { agents: ${agents}, refreshMs: 0 }
+          if (key === "provider") return {
+            transform: (fn) => {
+              fn({ add: (entry) => { added.push(entry) }, list: () => catalogue })
+              return Promise.resolve({ dispose: () => {} })
+            },
+            reload: () => Promise.resolve(),
+          }
+          if (key === "event") return { subscribe: () => ({ [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }) }
+          return undefined
+        },
+      })
+      const dispose = await module.default.setup(context)
+      console.log(JSON.stringify({
+        dispose: typeof dispose,
+        providers: added.map((entry) => ({
+          id: entry.info.id,
+          name: entry.info.name,
+          models: entry.models.map((m) => m.id),
+          settings: entry.info.settings,
+        })),
+      }))
+      await dispose?.()
+      process.exit(0)
+    `
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+      cwd: process.cwd(),
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    return { code, stdout, stderr }
+  }
+
+  /** One entry of the JSON the harness above prints. */
+  interface Published {
+    readonly id: string
+    readonly name: string
+    readonly models: readonly string[]
+    readonly settings: Readonly<Record<string, unknown>>
+  }
+
+  const read = (stdout: string): { dispose: string; providers: readonly Published[] } => {
+    const parsed: unknown = JSON.parse(stdout.trim())
+    if (typeof parsed !== "object" || parsed === null) throw new Error(stdout)
+    return parsed as { dispose: string; providers: readonly Published[] }
+  }
+
+  /** A list of two entries, each running the same fake agent under its own name. */
+  const twoAgents = (first: string, second: string) =>
+    `[
+      { ${first} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] },
+      { ${second} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] },
+    ]`
+
+  const NAMED = (id: string) => `id: ${JSON.stringify(id)},`
+
+  test("two named agents are published side by side, each with its own inventory", async () => {
+    const { code, stdout, stderr } = await setup(twoAgents(NAMED("copilot"), NAMED("codex")))
+    expect(code).toBe(0)
+    // The whole point of R2: `acp-copilot/…` and `acp-codex/…` coexist in `/model`.
+    const { dispose, providers } = read(stdout)
+    expect(dispose).toBe("function")
+    expect(providers.map((entry) => entry.id)).toEqual(["acp-copilot", "acp-codex"])
+    for (const entry of providers) {
+      // Its **own** inventory, published with its own models...
+      expect(entry.models).toEqual(["gpt-5.6-terra", "claude-sonnet-5"])
+      // ... and its own id, carried to the transport through the settings: that
+      // key is the only way `model()` learns which provider it is building.
+      expect(entry.settings["provider"]).toBe(entry.id)
+      expect(entry.settings["command"]).toBe(process.execPath)
+    }
+    // Both reached the catalogue, and neither was reported as dropped.
+    expect(stderr).not.toContain("non enregistré")
+    expect(stderr).toContain("2 provider(s) ACP : acp-copilot, acp-codex")
+  }, 30_000)
+
+  test("an unnamed agent keeps the `acp` provider id, so old configurations still apply", async () => {
+    // The backward-compatibility half: a `providers.acp.settings` block in a
+    // user's `opencode.jsonc` must keep addressing the same provider.
+    const { code, stdout } = await setup(twoAgents(NAMED("copilot"), ""))
+    expect(code).toBe(0)
+    const { providers } = read(stdout)
+    expect(providers.map((entry) => entry.id)).toEqual(["acp-copilot", "acp"])
+    // The default id is **not** published: a hand-written `providers.acp.settings`
+    // must be handed back exactly as the user wrote it.
+    expect(providers[1]?.settings).toEqual({ command: process.execPath, args: ["run", FAKE] })
+  }, 30_000)
+
+  test("an agent that does not start does not prevent the others from registering", async () => {
+    // The failure mode that mattered when a single provider was registered: one
+    // broken entry in the list used to cost the user the whole configuration.
+    const { code, stdout, stderr } = await setup(`[
+      { ${NAMED("fantome")} command: "opencode-acp-commande-inexistante-42" },
+      { ${NAMED("copilot")} command: process.execPath, args: ["run", ${JSON.stringify(FAKE)}] },
+    ]`)
+    expect(code).toBe(0)
+    expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-copilot"])
+    // And the failure is still explained, with the agent it concerns.
+    expect(stderr).toContain("agent « fantome » indisponible")
+  }, 30_000)
+
+  test("two agents claiming the same id: the first wins, and the loser is named", async () => {
+    // `editor.add` **replaces** the entry with the same id, so letting the
+    // second through would hand `/model` the second agent's models under the
+    // first agent's name - a silent substitution.
+    const { code, stdout, stderr } = await setup(twoAgents(NAMED("copilot"), NAMED("Copilot")))
+    expect(code).toBe(0)
+    // `Copilot` and `copilot` normalise to the same id: the normalisation is
+    // what makes that collision detectable at all.
+    expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-copilot"])
+    expect(stderr).toContain("agent « Copilot » ignoré")
+    expect(stderr).toContain("acp-copilot")
+  }, 30_000)
+
+  test("an id already taken by another provider is refused, and the log says so", async () => {
+    // The collision that the `acp-` prefix makes improbable but cannot forbid:
+    // the user may have declared a provider under that very id.
+    const taken = `[{ provider: { id: "acp-copilot" }, models: new Map() }]`
+    const { code, stdout, stderr } = await setup(twoAgents(NAMED("copilot"), NAMED("codex")), taken)
+    expect(code).toBe(0)
+    // The other agent is published, and the refused one is named with what to
+    // do about it - rather than overwriting a provider the user configured.
+    expect(read(stdout).providers.map((entry) => entry.id)).toEqual(["acp-codex"])
+    expect(stderr).toContain("« acp-copilot »")
+    expect(stderr).toContain("déjà pris")
+    expect(stderr).toContain("1 agent(s) écarté(s)")
+  }, 30_000)
+
+  test("no agent at all: nothing is published, and it is said once", async () => {
+    const { code, stdout, stderr } = await setup(`[
+      { ${NAMED("fantome")} command: "opencode-acp-commande-inexistante-42" },
+    ]`)
+    expect(code).toBe(0)
+    // `dispose: "undefined"` is the contract with the host: nothing registered,
+    // nothing to undo at unload.
+    expect(read(stdout)).toEqual({ dispose: "undefined", providers: [] })
+    expect(stderr).toContain("aucun agent enregistré")
   }, 30_000)
 })
