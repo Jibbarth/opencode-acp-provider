@@ -769,3 +769,61 @@ en réutilisant `acp/` tel quel (le client ACP est identique).
    codex) plaident pour un provider par agent (`acp-copilot`, `acp-codex`).
 6. **Faut-il gérer le streaming de `rawInput` des tool calls ACP ?** Hors du chemin 7.3 (où la
    sortie est un bloc JSON), donc non bloquant.
+
+---
+
+## 14. Feuille de route après P3b
+
+P3b est validé : dans un vrai `opencode serve`, le plugin se charge, le provider `acp` est
+enregistré, **19 modèles** paraissent dans `/model`, et un tour via `acp/claude-sonnet-5`
+renvoie la réponse attendue. La chaîne complète est donc prouvée de bout en bout.
+
+> ⚠️ **Piège de recette à retenir.** `opencode models` sort **avant** que les plugins aient
+> fini de charger : il affiche zéro modèle `acp/` sans que quoi que ce soit soit faux, et le
+> résultat est intermittent. Pour vérifier, il faut un serveur persistant
+> (`opencode serve --port N`) puis `/api/plugin` et `/api/model` en basic auth
+> `opencode:<mot de passe>`.
+
+Les priorités ci-dessous viennent d'une analyse de `intellectronica/opencode-acpx` (MIT,
+compatible), un projet qui atteint le même objectif mais **sur OpenCode 1.x** et avec un
+choix de conception différent (voir §14.1).
+
+| # | Action | Pourquoi | V/E |
+| --- | --- | --- | --- |
+| **R1** | **Sessions ACP persistantes** | Le plus grand écart fonctionnel : aujourd'hui une session neuve par requête, donc **l'agent oublie tout entre deux tours** | très haute / L |
+| **R2** | **Plusieurs agents** (`acp-copilot`, `acp-codex`, …) | Lève la limite n°1 du README ; credentials distinctes par agent | haute / M |
+| **R3** | **Aligner `@opencode/ai` sur 2.0.16** | Supprime le risque de double instance `LanguageModel`/`Usage` entre notre provider (2.0.3) et l'hôte (2.0.16) | haute / XS |
+| **R4** | **Rendre les échecs de chargement visibles** | Un package qui ne se charge ne produit **aucune** erreur : journaliser **hors de `setup()`** | haute / S |
+| **R5** | **`verify:package` qui exécute le module** (leur `prepack`) | Import réel de `dist/plugin.js` + `dist/index.js`, vérification des exports, de l'URL `file://` et des candidats | haute / M |
+| **R6** | **Annulation : `session/cancel`** | Condition de « `Esc` interrompt proprement » (§8) | haute / XS |
+| **R7** | **Borner la découverte** (`discoveryTimeoutMs`) | `setup()` appelle `acp.inventory()` : un agent muet bloquerait le chargement d'OpenCode | moyenne / S |
+| **R8** | **Agents internes servis localement** | `title`/`summary`/`compaction` ne doivent pas déclencher un agent ACP complet | moyenne / M |
+| **R9** | **Supprimer les cartes outils vides** | Notre parseur peut produire un `tool-call` sans information utile | moyenne / XS |
+| **R10** | **Catalogue de secours** | Éviter qu'un agent lent au démarrage fasse disparaître le provider | faible / S |
+| **R11** | **Adaptateur HTTP** (§P7) | `core/` est déjà prêt ; débogage et compatibilité large | moyenne / M |
+
+### 14.1 Ce que `opencode-acpx` fait différemment — et pourquoi on ne le copie pas
+
+Leur mécanisme central est **`providerExecuted: true`** : ils laissent l'agent ACP agir,
+et marquent ses appels comme déjà exécutés pour qu'OpenCode ne les rejoue pas. Conséquence :
+**OpenCode n'a ni snapshot, ni undo, ni permissions sur ces actions**.
+
+Nous faisons l'inverse (§7.3) : l'agent **propose**, OpenCode **exécute**. C'est un produit
+différent — un modèle dans un éditeur, pas un agent autonome dans un éditeur — et c'est un
+choix assumé, à garder.
+
+En revanche, deux de leurs techniques méritent d'être étudiées quand R1 sera fait :
+
+- **la segmentation de tour** : `session/prompt` ACP *bloque* en attendant une permission, alors
+  que la boucle OpenCode attend un `tool-call`. Ils ferment le segment, laissent OpenCode
+  rendre l'interaction, puis **reprennent le tour ACP à son curseur d'événements** ;
+- **les tours persistants avec file FIFO par session** : c'est exactement R1.
+
+Leur `session/identity.ts` et `session/keyed-queue.ts` sont **MIT** et adaptables.
+
+### 14.2 Un point à vérifier en priorité
+
+Le tour de recette rapporte `tokens=2/24`. C'est peut-être le seul comptage non mis en cache
+de l'agent (le `cacheWrite` est mesuré séparément), mais **si notre reconstruction de
+`LLMRequest` perd le system prompt ou les outils, c'est un vrai bug** qui n'apparaîtrait pas
+sur une réponse courte. À vérifier avant R1.
