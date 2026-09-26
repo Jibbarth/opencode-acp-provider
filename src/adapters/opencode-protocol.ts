@@ -252,6 +252,15 @@ export interface ReducerState {
   readonly terminal: boolean
   /** The last turn `usage` reported by the agent, if any. */
   readonly usage: Usage | undefined
+  /**
+   * The agent's own reading of its context window, if it announced one.
+   *
+   * Note: `usage_update` is monotonic, so the **last** one of the turn is also
+   * the highest. It is not a cost (see `core/types.ts`) but the only figure that
+   * measures what the agent actually holds, which is what OpenCode's `/compact`
+   * threshold is compared against.
+   */
+  readonly context: number | undefined
   /** Number of permission decisions taken during the turn (observability). */
   readonly permissions: number
 }
@@ -276,6 +285,7 @@ export const initialState: ReducerState = {
   finished: false,
   terminal: false,
   usage: undefined,
+  context: undefined,
   permissions: 0,
 }
 
@@ -330,27 +340,106 @@ const renderJson = (value: unknown): string => {
   }
 }
 
+/**
+ * How far ACP's `input` may drift from the agent's own context window before the
+ * counter is believed to describe the session rather than the turn.
+ *
+ * Note: a `fresh` session reports its turn's own prompt and lands at 0.97x the
+ * window, so the gap between "tokens sent" and "tokens reserved" - a few per
+ * cent, and the only difference a correct agent has any reason to show - never
+ * reaches this ratio. A **resumed** session reports the cache accounting
+ * accumulated over the whole session, measured at 4.4x the window at turn 6.
+ * That ratio is cumulative, so it crosses two within the first turns of a
+ * conversation - which is where OpenCode's `/compact` threshold starts firing on
+ * a figure that is not a context at all.
+ *
+ * Note: the direction matters. A window **above** the counter is ordinary - a
+ * model reserves more than one turn sends - and is never substituted. Only a
+ * counter far above the window is a cumulative one, and only that direction can
+ * be corrected without inventing a number.
+ */
+const CONTEXT_OVERRIDE_RATIO = 2
+
+/**
+ * The window to believe instead of ACP's `input`, or `undefined` to keep it.
+ *
+ * Note: a silent agent (`context === undefined`) keeps the counter - there is
+ * nothing to compare it with, and guessing is worse than forwarding. An empty
+ * window does the same: zero is not a context, it is an agent that counted
+ * nothing, and believing it would hide the conversation from `/compact` for
+ * good.
+ */
+const contradictedWindow = (input: number, context: number | undefined): number | undefined => {
+  if (context === undefined) return undefined
+  const window = Math.round(context)
+  if (window <= 0) return undefined
+  return input > window * CONTEXT_OVERRIDE_RATIO ? window : undefined
+}
+
+/** The three terms of a `Usage`'s input split, each possibly unreported. */
+interface InputTerms {
+  readonly input: number | undefined
+  readonly nonCached: number | undefined
+  readonly cacheRead: number | undefined
+  readonly cacheWrite: number | undefined
+}
+
+/**
+ * `Usage`'s input split, once the agent's context window has had its say.
+ *
+ * Note: overriding rescales the **whole** split, not only its total. The cached
+ * share is a property of the prompt and is worth keeping; the cumulative
+ * counter is the only thing that is wrong, and leaving `cacheRead` alone would
+ * put a term above the window it is a part of - and break the invariant.
+ *
+ * Note: `floor` then `min` is what makes `nonCached >= 0` hold whatever the
+ * rounding and whatever nonsense the agent announces (more cached tokens than
+ * sent ones), so `nonCached + cacheRead + cacheWrite = input` stays exact.
+ */
+const inputTermsOf = (
+  input: number | undefined,
+  cacheRead: number | undefined,
+  cacheWrite: number | undefined,
+  context: number | undefined,
+): InputTerms => {
+  if (input === undefined) return { input: undefined, nonCached: undefined, cacheRead, cacheWrite }
+  const read = cacheRead ?? 0
+  const write = cacheWrite ?? 0
+  const window = contradictedWindow(input, context)
+  if (window === undefined) {
+    return { input, nonCached: Math.max(0, input - read - write), cacheRead, cacheWrite }
+  }
+  const scaledRead = Math.min(window, Math.floor((read * window) / input))
+  const scaledWrite = Math.min(window - scaledRead, Math.floor((write * window) / input))
+  return {
+    input: window,
+    nonCached: window - scaledRead - scaledWrite,
+    cacheRead: cacheRead === undefined ? undefined : scaledRead,
+    cacheWrite: cacheWrite === undefined ? undefined : scaledWrite,
+  }
+}
+
 /** ACP usage -> a `Usage` instance, or `undefined` if the agent said nothing. */
-const toUsage = (event: Extract<AcpEvent, { type: "usage"; kind: "turn" }>): Usage | undefined => {
+const toUsage = (
+  event: Extract<AcpEvent, { type: "usage"; kind: "turn" }>,
+  context: number | undefined,
+): Usage | undefined => {
   const { input, output, total, reasoning, cacheRead, cacheWrite } = event
   const reported = [input, output, total, reasoning, cacheRead, cacheWrite]
   // An empty `usage` is no better than no `usage` at all: OpenCode would show
   // "0 tokens" for a turn it simply failed to count.
   if (reported.every((value) => value === undefined)) return undefined
   // Documented `Usage` invariant: `nonCached + cacheRead + cacheWrite = input`.
-  // ACP does not report it, so it is derived - with `Math.max(0, ...)` because an
-  // agent announcing more cached tokens than sent tokens must not produce a
-  // negative counter downstream.
-  const nonCachedInputTokens =
-    input === undefined ? undefined : Math.max(0, input - (cacheRead ?? 0) - (cacheWrite ?? 0))
+  // ACP does not report it, so it is derived.
+  const terms = inputTermsOf(input, cacheRead, cacheWrite, context)
   return new Usage({
-    ...(input === undefined ? {} : { inputTokens: input }),
+    ...(terms.input === undefined ? {} : { inputTokens: terms.input }),
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(total === undefined ? {} : { totalTokens: total }),
     ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
-    ...(cacheRead === undefined ? {} : { cacheReadInputTokens: cacheRead }),
-    ...(cacheWrite === undefined ? {} : { cacheWriteInputTokens: cacheWrite }),
-    ...(nonCachedInputTokens === undefined ? {} : { nonCachedInputTokens }),
+    ...(terms.cacheRead === undefined ? {} : { cacheReadInputTokens: terms.cacheRead }),
+    ...(terms.cacheWrite === undefined ? {} : { cacheWriteInputTokens: terms.cacheWrite }),
+    ...(terms.nonCached === undefined ? {} : { nonCachedInputTokens: terms.nonCached }),
   })
 }
 
@@ -523,10 +612,10 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
     }
 
     case "usage": {
-      // The context window is not the turn's cost: counting it here would show a
-      // "tokens used" figure that goes down and up as the stream progresses.
-      if (event.kind === "context") return { state: next, events }
-      const usage = toUsage(event)
+      // The context window is not the turn's cost: it is kept aside, never
+      // added to the counters, and only read when the counters contradict it.
+      if (event.kind === "context") return { state: { ...next, context: event.used }, events }
+      const usage = toUsage(event, next.context)
       return { state: usage === undefined ? next : { ...next, usage }, events }
     }
 

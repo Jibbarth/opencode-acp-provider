@@ -386,7 +386,7 @@ describe("AcpEvent -> LLMEvent reducer", () => {
     expect(state.terminal).toBe(true)
   })
 
-  test("context window usage is ignored, turn usage is a Usage instance", () => {
+  test("a turn usage is a Usage instance, and a near-by context changes nothing", () => {
     const { events } = replay([
       { type: "usage", kind: "context", used: 12_345 },
       say("x"),
@@ -432,6 +432,132 @@ describe("AcpEvent -> LLMEvent reducer", () => {
       { type: "done", stopReason: "end_turn" },
     ])
     expect(first(events, "finish").usage?.nonCachedInputTokens).toBe(0)
+  })
+
+  // Note: the figures below are the ones `verify:sessions` measured on
+  // `copilot --acp` at turn 6, and they are the whole justification for the
+  // threshold: the two modes disagree by a factor of four on `input` while
+  // their real context windows differ by 10%.
+  describe("the context window contradicts a cumulative counter", () => {
+    test("fresh mode: the counter is the turn, and it stays", () => {
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 27_591 },
+        { type: "usage", kind: "turn", input: 26_645, output: 412, total: 27_057, cacheWrite: 26_500 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      const usage = first(events, "finish").usage
+      // 0.97x the window: the gap between "tokens sent" and "tokens reserved",
+      // which is why the correction needs a threshold and not a blind override.
+      expect(usage?.inputTokens).toBe(26_645)
+      expect(usage?.cacheWriteInputTokens).toBe(26_500)
+      expect(usage?.nonCachedInputTokens).toBe(145)
+    })
+
+    test("reuse mode: the window replaces a counter 4.4x too high", () => {
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 30_812 },
+        {
+          type: "usage",
+          kind: "turn",
+          input: 136_867,
+          output: 431,
+          total: 137_298,
+          cacheRead: 106_805,
+          cacheWrite: 29_962,
+        },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      const usage = first(events, "finish").usage
+      // 30 812 instead of 136 867: the figure OpenCode compares to its
+      // `/compact` threshold, and the one it displays as a context window.
+      expect(usage?.inputTokens).toBe(30_812)
+      // The cached share is rescaled, not dropped: left as it was it would sit
+      // above the window it is a part of, and break the invariant.
+      const read = usage?.cacheReadInputTokens ?? 0
+      const write = usage?.cacheWriteInputTokens ?? 0
+      expect(read + write).toBeLessThanOrEqual(30_812)
+      expect(usage?.nonCachedInputTokens).toBe(30_812 - read - write)
+      // The turn's own cost is untouched: the context event says nothing about
+      // what the turn spent.
+      expect(usage?.outputTokens).toBe(431)
+      expect(usage?.totalTokens).toBe(137_298)
+    })
+
+    test("the last context of the turn is the one that counts", () => {
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 20_000 },
+        say("x"),
+        { type: "usage", kind: "context", used: 30_812 },
+        { type: "usage", kind: "turn", input: 136_867 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      expect(first(events, "finish").usage?.inputTokens).toBe(30_812)
+    })
+
+    test("a silent agent keeps the counter: there is nothing to compare it with", () => {
+      const { events } = replay([
+        { type: "usage", kind: "turn", input: 136_867, cacheRead: 106_805, cacheWrite: 29_962 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      const usage = first(events, "finish").usage
+      expect(usage?.inputTokens).toBe(136_867)
+      expect(usage?.cacheReadInputTokens).toBe(106_805)
+      expect(usage?.cacheWriteInputTokens).toBe(29_962)
+      expect(usage?.nonCachedInputTokens).toBe(100)
+    })
+
+    test("a window above the counter is not a contradiction", () => {
+      // The `Usage` invariant is deliberately one-directional: `input` is the
+      // precise figure for a turn, and a window reserving more than the turn
+      // spent is ordinary. Substituting the larger number would inflate the
+      // context OpenCode believes is filled.
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 200_000 },
+        { type: "usage", kind: "turn", input: 30_812, cacheWrite: 12_000 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      const usage = first(events, "finish").usage
+      expect(usage?.inputTokens).toBe(30_812)
+      expect(usage?.nonCachedInputTokens).toBe(18_812)
+    })
+
+    test("an over-cached agent is rescaled without ever going negative", () => {
+      // More cached tokens than sent ones already breaks the invariant on the
+      // counter itself; rescaling must not turn that into a negative term.
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 1_000 },
+        { type: "usage", kind: "turn", input: 5_000, cacheRead: 4_000, cacheWrite: 4_000 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      const usage = first(events, "finish").usage
+      const read = usage?.cacheReadInputTokens ?? 0
+      const write = usage?.cacheWriteInputTokens ?? 0
+      expect(usage?.inputTokens).toBe(1_000)
+      expect(usage?.nonCachedInputTokens).toBe(1_000 - read - write)
+      expect(usage?.nonCachedInputTokens).toBe(0)
+    })
+
+    test("a window that only doubles the counter is not enough to override", () => {
+      // Exactly at the ratio: the correction must not fire on the boundary from
+      // below, or a single noisy turn would move the context OpenCode believes.
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 10_000 },
+        { type: "usage", kind: "turn", input: 20_000 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      expect(first(events, "finish").usage?.inputTokens).toBe(20_000)
+    })
+
+    test("an empty window is not a context", () => {
+      // An agent that announces nothing but zeros would otherwise convince
+      // OpenCode the conversation is empty, and `/compact` would never fire.
+      const { events } = replay([
+        { type: "usage", kind: "context", used: 0 },
+        { type: "usage", kind: "turn", input: 90_000 },
+        { type: "done", stopReason: "end_turn" },
+      ])
+      expect(first(events, "finish").usage?.inputTokens).toBe(90_000)
+    })
   })
 
   test("a permission is counted but produces no LLMEvent", () => {
@@ -967,6 +1093,39 @@ describe("end to end: the real route against the ACP agent", () => {
     expect(usage?.cacheReadInputTokens).toBe(7)
     expect(usage?.cacheWriteInputTokens).toBe(9)
     expect(usage?.nonCachedInputTokens).toBe(24)
+  })
+
+  test("a cumulative counter is replaced by the context window the agent announced", async () => {
+    // `FAKE_CUMULATIVE_USAGE` makes the fake account for the turn the way a
+    // resumed session does - session cache, not turn - while `FAKE_EMIT_USAGE_UPDATE`
+    // has it announce its real window. Only the whole chain proves the two reach
+    // the same reducer: the reducer tests give the events directly.
+    const settings = fakeSettings({ FAKE_CUMULATIVE_USAGE: "1", FAKE_EMIT_USAGE_UPDATE: "1" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    const usage = first(events, "finish").usage
+    expect(usage?.inputTokens).toBe(12_345)
+    const read = usage?.cacheReadInputTokens ?? 0
+    const write = usage?.cacheWriteInputTokens ?? 0
+    // The turn's own cost is untouched, and the split still adds up.
+    expect(usage?.outputTokens).toBe(2)
+    expect(usage?.nonCachedInputTokens).toBe(12_345 - read - write)
+    expect(usage?.nonCachedInputTokens).toBeGreaterThan(0)
+  })
+
+  test("a cumulative counter is forwarded as-is when the agent is silent", async () => {
+    // No `usage_update`: there is nothing to compare the counter with, and
+    // forwarding it is the only honest thing left.
+    const settings = fakeSettings({ FAKE_CUMULATIVE_USAGE: "1" })
+    const languageModel = model("gpt-5.6-terra", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "gpt-5.6-terra", request)
+
+    expect(first(events, "finish").usage?.inputTokens).toBe(136_867)
   })
 
   test("an interrupted stream does not hang and emits no orphan finish", async () => {

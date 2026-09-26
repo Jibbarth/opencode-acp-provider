@@ -41,6 +41,7 @@
  * | ------------------------------ | ---------------------------------------------------------- |
  * | `FAKE_EMIT_TOOL_CALL=1`        | emits `tool_call` + `tool_call_update` (pending->in_progress->completed) |
  * | `FAKE_EMIT_USAGE_UPDATE=1`     | emits a `usage_update` notification (context window)       |
+ * | `FAKE_CUMULATIVE_USAGE=1`      | the turn reports the **session's** cache accounting, as a resumed agent does |
  * | `FAKE_STOP_REASON=<x>`         | the turn's `stopReason` (`max_tokens`, `refusal`, `cancelled`) |
  * | `FAKE_BOOLEAN_OPTION=1`        | adds a `configOption` of `type: "boolean"`                 |
  * | `FAKE_NO_CONFIG_OPTIONS=1`     | `session/new` **omits** `configOptions` (non-conforming third party) |
@@ -252,6 +253,19 @@ const USAGE = {
   cachedWriteTokens: 9,
 }
 
+/**
+ * The same turn as a **resumed** agent accounts for it: the whole session's
+ * cache, which is what makes `input` a running total instead of the window.
+ */
+const CUMULATIVE_USAGE = {
+  totalTokens: 137_298,
+  inputTokens: 136_867,
+  outputTokens: 2,
+  thoughtTokens: 1,
+  cachedReadTokens: 106_805,
+  cachedWriteTokens: 29_962,
+}
+
 /** Context window, in `usage_update`. */
 const CONTEXT_USED = 12_345
 
@@ -411,7 +425,7 @@ class FakeAgent {
       cx.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update })
     const finish = (stopReason: acp.StopReason = STOP_REASON): acp.PromptResponse => ({
       stopReason,
-      usage: USAGE,
+      usage: flag("FAKE_CUMULATIVE_USAGE") ? CUMULATIVE_USAGE : USAGE,
     })
     const interrupted = (): boolean => this.cancelled.has(params.sessionId)
 

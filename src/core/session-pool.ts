@@ -10,10 +10,10 @@
  * The pool is **generic** (`SessionPool<AcpSession>` on the transport side,
  * `SessionPool<Fake>` in tests) and therefore knows neither ACP nor OpenCode.
  * It knows exactly two things about a session: open it, and close it. That is
- * what makes its three policies - reuse, bounded LRU, serialisation queue -
- * testable without starting a single subprocess.
+ * what makes its four policies - reuse, bounded LRU, serialisation queue,
+ * orphan sweep - testable without starting a single subprocess.
  *
- * The three rules, and the reason for each:
+ * The four rules, and the reason for each:
  *
  * 1. One turn at a time per session. Two concurrent `session/prompt` calls on
  *    the same session steal each other's notifications, and the second
@@ -34,10 +34,22 @@
  *    would send a delta to an agent that never saw the end of the previous
  *    turn. `poison()` marks the session; it is closed when the turn is
  *    released, never mid-flight - a stream is not cut from under its consumer.
+ * 4. A rewritten conversation closes the session it was. The key is anchored on
+ *    the first message, and `/compact` rewrites exactly that: the session is
+ *    then alive under a key nothing will ask for again, and would sit there -
+ *    holding the pre-compact conversation in the agent's memory - until the LRU
+ *    reached it. The rule the pool adds to the two above is that being *unreachable*
+ *    is a reason to die, exactly like being unusable.
  */
 
 import type { NormalizedMessage } from "./types.js"
-import { historyDigests, planTurn, sessionKey } from "./session-key.js"
+import {
+  conversationKey,
+  historyDigests,
+  planTurn,
+  sessionKey,
+  sharesMessage,
+} from "./session-key.js"
 import type { ResumeRefusal, SessionIdentity, TurnPlan } from "./session-key.js"
 
 /** All the pool knows how to do to a session: close it. */
@@ -85,6 +97,8 @@ export interface TurnLease<S extends ManagedSession> {
 /** A live session, and what we know about it. */
 interface Pooled<S extends ManagedSession> {
   readonly session: S
+  /** The identity alone: survives the anchor, unlike the key. */
+  readonly family: string
   /** Digests of everything the session already received, in order. */
   digests: readonly string[]
   /** Usage counter, for the LRU. */
@@ -93,6 +107,8 @@ interface Pooled<S extends ManagedSession> {
   busy: boolean
   /** The memory is no longer reliable (poisoned turn). */
   poisoned: boolean
+  /** Already closed and removed: a second `drop` must not close it again. */
+  dropped: boolean
 }
 
 /** What an `acquire` decided, once the session is settled. */
@@ -175,7 +191,7 @@ export class SessionPool<S extends ManagedSession> {
     const gate = this.enter(key)
     try {
       await gate.turn
-      const settled = await this.settle(key, digests, messages, open)
+      const settled = await this.settle(identity, key, digests, messages, open)
       const pooled = settled.pooled
       let released = false
       return {
@@ -212,7 +228,12 @@ export class SessionPool<S extends ManagedSession> {
     const records = [...this.records.values()]
     this.records.clear()
     this.gates.clear()
-    await Promise.all(records.map((record) => this.discard(record.session)))
+    await Promise.all(
+      records.map((record) => {
+        record.dropped = true
+        return this.discard(record.session)
+      }),
+    )
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -227,6 +248,7 @@ export class SessionPool<S extends ManagedSession> {
    * half-modified pool.
    */
   private async settle(
+    identity: SessionIdentity,
     key: string,
     digests: readonly string[],
     messages: readonly NormalizedMessage[],
@@ -252,11 +274,38 @@ export class SessionPool<S extends ManagedSession> {
       // only way not to keep in memory a session nothing will ever reuse.
       await this.drop(key, known)
       this.evict()
-      return this.openNew(key, digests, messages, open, plan.reason)
+      return this.openNew(key, known.family, digests, messages, open, plan.reason)
     }
 
+    // No session is indexed under this key. That is a first turn, or a
+    // conversation whose anchor moved - and the two are told apart by the
+    // history itself.
+    const family = conversationKey(identity)
+    await this.dropRewritten(family, digests)
     this.evict()
-    return this.openNew(key, digests, messages, open, "inconnue")
+    return this.openNew(key, family, digests, messages, open, "inconnue")
+  }
+
+  /**
+   * Closes the sessions this history used to be, before opening a new one.
+   *
+   * Note: a rewritten **anchor** moves the key, so the session that held the
+   * conversation is still in the pool under a key nothing will ever ask for
+   * again. Only the overlap of the two histories gives it away (see
+   * `sharesMessage`): same identity, same agent memory, and messages in
+   * common - which a genuinely new conversation of the same project has no
+   * reason to have.
+   *
+   * Note: a **busy** session is left alone, like in the LRU. Its turn is
+   * streaming; closing it would cut the response from under its consumer, and
+   * the next turn of that conversation will notice the rewrite by itself.
+   */
+  private async dropRewritten(family: string, digests: readonly string[]): Promise<void> {
+    const orphans = [...this.records.entries()].filter(
+      ([, record]) =>
+        record.family === family && !record.busy && sharesMessage(record.digests, digests),
+    )
+    for (const [key, record] of orphans) await this.drop(key, record)
   }
 
   /**
@@ -268,6 +317,7 @@ export class SessionPool<S extends ManagedSession> {
    */
   private async openNew(
     key: string,
+    family: string,
     digests: readonly string[],
     messages: readonly NormalizedMessage[],
     open: () => Promise<S>,
@@ -275,10 +325,12 @@ export class SessionPool<S extends ManagedSession> {
   ): Promise<Settled<S>> {
     const pooled: Pooled<S> = {
       session: await open(),
+      family,
       digests,
       usedAt: ++this.clock,
       busy: true,
       poisoned: false,
+      dropped: false,
     }
     this.records.set(key, pooled)
     return { pooled, reused: false, delta: messages, reason }
@@ -309,8 +361,16 @@ export class SessionPool<S extends ManagedSession> {
     }
   }
 
-  /** Removes a session from the pool, then closes it. */
+  /**
+   * Removes a session from the pool, then closes it.
+   *
+   * Note: **idempotent**, because two paths can name the same record at once -
+   * the rewrite sweep and a fire-and-forget `evict` - and a second `session/close`
+   * on an already closed session is an error the agent would rightly refuse.
+   */
   private async drop(key: string, record: Pooled<S>): Promise<void> {
+    if (record.dropped) return
+    record.dropped = true
     if (this.records.get(key) === record) this.records.delete(key)
     await this.discard(record.session)
   }

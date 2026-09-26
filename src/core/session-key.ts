@@ -92,6 +92,20 @@ export const historyDigests = (messages: readonly NormalizedMessage[]): readonly
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The **family** a session belongs to: the identity alone, without any anchor.
+ *
+ * Note: a session opened for one identity can never serve another - the agent
+ * memory, the working directory and the applied model are not shareable - so
+ * this is the widest scope in which two live sessions can ever concern the same
+ * conversation. It is what lets a session that lost its anchor be recognised
+ * as belonging to the conversation now arriving, and only to it.
+ */
+export const conversationKey = (identity: SessionIdentity): string =>
+  createHash("sha256")
+    .update(JSON.stringify([identity.agent, identity.cwd, identity.model]))
+    .digest("hex")
+
+/**
  * A **stable** session key: it depends only on the identity and the **first**
  * message, so it survives the conversation growing.
  *
@@ -101,6 +115,11 @@ export const historyDigests = (messages: readonly NormalizedMessage[]): readonly
  * conversation. A key covering more history would change every turn, making
  * reuse impossible; a shorter key (the agent alone) would confuse two distinct
  * conversations — the anchor is exactly the compromise.
+ *
+ * Note: rewriting the **first** message is the one scenario the anchor cannot
+ * survive, and `/compact` does exactly that. The key then points at nothing
+ * while the session it named is still alive, which is why the pool also tracks
+ * {@link conversationKey}.
  *
  * An **empty** conversation (no message) gets a key computed without an anchor:
  * `prepare` rejects a message-less request anyway, but the function must not
@@ -164,6 +183,31 @@ export const isContinuous = (
     if (current[i] !== previous[i]) return false
   }
   return true
+}
+
+/**
+ * Do these two histories mention at least one **same** message?
+ *
+ * Note: the proof of continuity is a prefix, so a shared message proves nothing
+ * about resuming — it answers the other question. A history that keeps some of
+ * a live session's messages while no longer extending them has been **rewritten**:
+ * the summary a `/compact` puts at rank 0, the branch a fork opens, the edit that
+ * rewrote the first message. The session is then unreachable by key and will
+ * stay so, whatever the conversation does next.
+ *
+ * Note: an empty overlap proves nothing at all, and must not be read as a
+ * rewrite. Two conversations of the same directory, of the same model, on the
+ * same agent, routinely share nothing - and a false rewrite would cost a live
+ * session its whole memory.
+ */
+export const sharesMessage = (
+  previous: readonly string[],
+  current: readonly string[],
+): boolean => {
+  for (const digest of previous) {
+    if (current.includes(digest)) return true
+  }
+  return false
 }
 
 /**

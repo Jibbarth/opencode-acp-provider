@@ -43,6 +43,7 @@ import {
 } from "../src/core/session-pool.js"
 import type { ManagedSession } from "../src/core/session-pool.js"
 import {
+  conversationKey,
   describeIdentity,
   historyDigests,
   isContinuous,
@@ -50,6 +51,7 @@ import {
   planTurn,
   refusalLabel,
   sessionKey,
+  sharesMessage,
 } from "../src/core/session-key.js"
 import type { ResumeRefusal, SessionIdentity } from "../src/core/session-key.js"
 import type { NormalizedMessage } from "../src/core/types.js"
@@ -245,6 +247,20 @@ describe("session key: stable, and distinct when it must be", () => {
     expect(sessionKey(IDENTITY, [])).not.toBe(sessionKey(IDENTITY, [user("M1")]))
   })
 
+  test("the family is the identity alone, and it survives the anchor", () => {
+    // Two keys of two conversations of the same project: same family, so a
+    // session that lost its anchor can still be recognised as theirs.
+    expect(conversationKey(IDENTITY)).toBe(conversationKey(IDENTITY))
+    expect(conversationKey(IDENTITY)).not.toBe(sessionKey(IDENTITY, CONVERSATION))
+    for (const autre of [
+      { ...IDENTITY, agent: "codex --acp" },
+      { ...IDENTITY, cwd: "/srv/autre" },
+      { ...IDENTITY, model: "claude-sonnet-5" },
+    ] satisfies SessionIdentity[]) {
+      expect(conversationKey(autre)).not.toBe(conversationKey(IDENTITY))
+    }
+  })
+
   test("the identity is described in French, for the logs", () => {
     // A diagnostic printing a 64-character digest says nothing: it needs the
     // agent, the directory and the model.
@@ -335,6 +351,38 @@ describe("continuity: is the received history an extension of the one already se
     const previous = historyDigests(CONVERSATION)
     const suite = [...CONVERSATION, assistant("A2"), user("M3")]
     expect(isContinuous(previous, historyDigests(suite))).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("shared messages: is this history the one that session was?", () => {
+  test("a compaction keeps the recent tail, so the two histories overlap", () => {
+    // What OpenCode's `/compact` does: a summary at rank 0, the recent messages
+    // verbatim. That is the only thing making the session recognisable.
+    const avant = historyDigests(CONVERSATION)
+    const apres = historyDigests([user("résumé"), tool("call-1", "R1"), user("M4")])
+    expect(sharesMessage(avant, apres)).toBe(true)
+    expect(isContinuous(avant, apres)).toBe(false)
+  })
+
+  test("a fork overlaps the branch it was taken from", () => {
+    const avant = historyDigests(CONVERSATION)
+    const branche = historyDigests([user("autre piste"), ...CONVERSATION])
+    expect(sharesMessage(avant, branche)).toBe(true)
+  })
+
+  test("two conversations of the same project share nothing", () => {
+    // The false positive that must never happen: a second tab would lose its
+    // session on the strength of a coincidence.
+    const autre = historyDigests([user("Autre onglet"), assistant("Bonjour")])
+    expect(sharesMessage(historyDigests(CONVERSATION), autre)).toBe(false)
+  })
+
+  test("an empty history shares nothing, and shares it with an empty one", () => {
+    const vide = historyDigests([])
+    expect(sharesMessage(vide, historyDigests(CONVERSATION))).toBe(false)
+    expect(sharesMessage(vide, vide)).toBe(false)
   })
 })
 
@@ -465,6 +513,147 @@ describe("session pool: reuse and delta", () => {
     expect(second.reason).toBe("inconnue")
     expect(book.opened).toHaveLength(2)
     second.release()
+  })
+
+  // Note: OpenCode's own `/compact` replaces the **first** message by a summary
+  // and keeps the recent tail verbatim (`[summary][recent 15k][pending work]`),
+  // so the anchor the key is built on moves while the rest of the history
+  // survives: the pool is never handed the key of the session that held the
+  // conversation, and that session holds verbatim messages the new history
+  // still carries. Without the sweep below, it stays alive under a key nothing
+  // will ever ask for again: one live ACP session per compaction.
+  describe("a rewritten anchor", () => {
+    /** A compaction of {@link CONVERSATION}: summary in, recent tail kept. */
+    const COMPACTED: readonly NormalizedMessage[] = [
+      user("résumé de M1 à M3"),
+      tool("call-1", "R1"),
+      user("M4"),
+    ]
+
+    test("the session the conversation was is closed, and the pool does not grow", async () => {
+      const pool = new SessionPool<FakeSession>()
+      const book = ledger()
+
+      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      premier.release()
+      const apres = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
+
+      expect(apres.reused).toBe(false)
+      expect(book.opened).toHaveLength(2)
+      expect(book.opened[0]?.closed).toBe(true)
+      // The one that carries the compacted conversation is the only one left.
+      expect(pool.size).toBe(1)
+      expect(pool.keys()).toEqual([sessionKey(IDENTITY, COMPACTED)])
+      apres.release()
+    })
+
+    test("repeating it never accumulates sessions, bound or not", async () => {
+      // Every compaction costs a `session/new` but must not cost a live session.
+      const pool = new SessionPool<FakeSession>({ max: 2 })
+      const book = ledger()
+      let history: readonly NormalizedMessage[] = CONVERSATION
+
+      for (let tour = 0; tour < 5; tour += 1) {
+        const lease = await pool.acquire(IDENTITY, history, opening(book, `s${String(tour)}`))
+        lease.release()
+        expect(pool.size).toBe(1)
+        // A new summary, the same kept tail, a new pending message.
+        history = [user(`résumé ${String(tour)}`), tool("call-1", "R1"), user(`M${String(tour)}bis`)]
+      }
+
+      expect(book.opened).toHaveLength(5)
+      // Every session but the last one has been closed: none is unreachable.
+      expect(book.opened.slice(0, 4).map((session) => session.closes)).toEqual([1, 1, 1, 1])
+      expect(book.opened[4]?.closed).toBe(false)
+    })
+
+    test("another conversation of the same project is not mistaken for it", async () => {
+      // Same agent, same directory, same model, and nothing in common: a second
+      // tab must keep its session. A shared message is the only thing that
+      // makes two histories the same conversation.
+      const pool = new SessionPool<FakeSession>()
+      const book = ledger()
+
+      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      premier.release()
+      const autre = await pool.acquire(IDENTITY, [user("Autre onglet"), assistant("Bonjour")], opening(book, "s2"))
+      autre.release()
+
+      expect(book.opened[0]?.closed).toBe(false)
+      expect(pool.size).toBe(2)
+    })
+
+    test("a session carrying a turn is never closed by the sweep", async () => {
+      // The first conversation is still streaming when the compacted branch of
+      // it opens: cutting a response from under its consumer is not a price
+      // worth paying for a tidier pool. The orphan survives this turn and is
+      // collected by the next rewrite, or by the LRU.
+      const pool = new SessionPool<FakeSession>()
+      const book = ledger()
+
+      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      const apres = await pool.acquire(IDENTITY, COMPACTED, opening(book, "s2"))
+      expect(book.opened[0]?.closed).toBe(false)
+      premier.release()
+      apres.release()
+      const suivant = await pool.acquire(
+        IDENTITY,
+        [...COMPACTED, assistant("A4")],
+        opening(book, "s3"),
+      )
+      expect(suivant.reused).toBe(true)
+      expect(book.opened).toHaveLength(2)
+      expect(book.opened[0]?.closes).toBe(0)
+      suivant.release()
+      // A second compaction is a key miss, and now the orphan is collectable.
+      const encore = await pool.acquire(IDENTITY, [user("résumé 2"), tool("call-1", "R1")], opening(book, "s4"))
+      expect(book.opened[0]?.closes).toBe(1)
+      encore.release()
+    })
+
+    test("replacing a session closes it exactly once", async () => {
+      // The same-key path and the sweep must never both name the same record.
+      const pool = new SessionPool<FakeSession>()
+      const book = ledger()
+
+      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      premier.release()
+      // Anchor intact, tail rewritten: the key still matches, so this is a
+      // **replacement**, and the sweep must not add a second close.
+      const reecrit = [user("M1"), assistant("A1"), user("M2 modifie")]
+      const second = await pool.acquire(IDENTITY, reecrit, opening(book, "s2"))
+      expect(second.reused).toBe(false)
+      if (second.reused) return
+      expect(second.reason).toBe("historique")
+      expect(book.opened[0]?.closes).toBe(1)
+      second.release()
+      // And a later rewrite of the new session closes it once too.
+      const troisieme = await pool.acquire(IDENTITY, [user("M1 modifie"), assistant("A1")], opening(book, "s3"))
+      troisieme.release()
+      expect(book.opened[1]?.closes).toBe(1)
+    })
+
+    test("a session that refuses to close does not fail the turn", async () => {
+      // An agent that died between the compaction and the sweep: closing it
+      // fails, and the turn must go on with the whole compacted history.
+      const pool = new SessionPool<FakeSession>()
+      const book = ledger()
+
+      const premier = await pool.acquire(IDENTITY, CONVERSATION, opening(book, "s1"))
+      premier.release()
+      const cassee: FakeSession = new FakeSession("cassee")
+      cassee.close = () => Promise.reject(new Error("session déjà morte"))
+      const apres = await within(
+        pool.acquire(IDENTITY, COMPACTED, () => Promise.resolve(cassee)),
+        1_000,
+        "le tour après compaction",
+      )
+
+      expect(apres.reused).toBe(false)
+      expect(apres.delta).toEqual(COMPACTED)
+      expect(pool.size).toBe(1)
+      apres.release()
+    })
   })
 
   test("a different cwd opens a fresh session", async () => {

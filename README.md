@@ -66,10 +66,12 @@ en basic auth `opencode:<mot de passe>` (le mot de passe est affiché au démarr
   exactement une extension de celui déjà envoyé, et toute divergence (édition,
   fork, `/compact`, changement de modèle) retombe sur une session neuve. Le
   défaut reste `"fresh"`.
-- **`reuse` gonfle le compteur de tokens d'OpenCode.** Mesuré : sur une session
-  reprise, `copilot` annonce un `input` cumulé (≈ 4,4× sa fenêtre réelle), que
-  nous forwardons tel quel. La fenêtre de l'agent n'est pas affectée ; le seuil de
-  `/compact`, si. Voir « Sessions persistantes ».
+- **`reuse` annonce un `input` cumulé, et nous le corrigeons quand l'agent se
+  contredit.** Mesuré : sur une session reprise, `copilot` annonce un `input`
+  cumulé (≈ 4,4× sa fenêtre réelle) au lieu de la fenêtre de contexte qu'il
+  publie lui-même par `usage_update`. Le réducteur substitue donc la fenêtre dès
+  qu'elle est plus de 2× plus petite, ce qui laisse `fresh` intact (0,97×) et
+  laisse passer tel quel un agent muet. Voir « Sessions persistantes ».
 - **Le rafraîchissement est déclenché, pas continu.** L'inventaire est relu au
   plus une fois par `refreshMs` (60 s par défaut), et seulement après un
   `session.idle`. Le `config_option_update` des sessions du transport n'est pas
@@ -202,14 +204,38 @@ le seuil de `/compact` d'OpenCode finit par rencontrer. (Ce qui est mesuré ici 
 le forwarding et le facteur ; le seuil exact d'OpenCode et sa façon d'agréger les
 usages par message ne sont pas dans ce dépôt et n'ont pas été extraits.)
 
-En `reuse`, une conversation se ferait donc compacter trop tôt, et l'indicateur
-de tokens afficherait un contexte qui n'existe pas. C'est la raison mesurée pour
-laquelle `fresh` reste le défaut — et elle n'a rien à voir avec un oubli de
-l'agent.
+En `reuse`, une conversation se ferait donc compacter ~4× trop tôt, et
+l'indicateur de tokens afficherait un contexte qui n'existe pas. C'est **corrigé**
+— voir « Le compteur de tokens » — mais la mesure reste ce qui a fait de `reuse`
+une option et non le défaut : `fresh` reste le défaut, plus simple et sans état.
 
 Ce que la reprise n'apporte donc **pas** : une mémoire que `fresh` n'aurait pas.
 Ce qu'elle apporte : un prompt et une latence par tour constants. `fresh` reste le
-défaut — plus simple, correct, et le seul à annoncer un comptage de tokens exact.
+défaut — plus simple, correct, et le seul dont le comptage de tokens ne dépende
+d'aucune correction.
+
+### Le compteur de tokens
+
+L'agent ne se contredit pas toujours. En `fresh`, son `input` **est** la fenêtre
+(0,97×) ; en `reuse`, c'est la comptabilité cumulée de la session (4,4×). Le même
+`events` porte les deux, et l'`usage_update` que l'agent envoie pendant le tour
+donne la seule lecture non ambiguë de ce qu'il occupe réellement.
+
+Le réducteur (`adapters/opencode-protocol.ts`) retient donc cette lecture et ne
+s'en sert **que** lorsque le compteur la contredit nettement : au-delà de 2×. Ce
+seuil n'est pas un réglage arbitraire — c'est ce qui sépare les deux régimes
+mesurés. `fresh` est à 0,97×, l'écart naturel entre « jetons envoyés » et « jetons
+réservés » n'atteint pas 2×, et `reuse` le dépasse dès le deuxième tour : au-delà
+de la fenêtre, le compteur ferait compacter OpenCode trois tours avant l'heure
+au lieu de quatre fois trop tôt. Un agent qui n'envoie aucun `usage_update` n'a
+rien contre quoi comparer, et son `input` est donc forwardé tel quel.
+
+La correction porte sur le **total**, jamais sur le coût du tour : `output` et
+`total` sont ceux de l'agent. Et elle rescale les trois termes de l'entrée, pas
+seulement leur somme — `cacheRead` laissé tel quel dépasserait la fenêtre dont il
+fait partie. `nonCached + cacheRead + cacheWrite = input` reste donc vrai à
+l'arrondi près, y compris pour un agent qui annonce plus de jetons en cache que
+jetons envoyés.
 
 ### Comment une conversation est reconnue
 
@@ -236,12 +262,24 @@ détecterait pas.
 | Tour suivant normal | Delta envoyé, session réutilisée |
 | Message **édité** | Empreinte différente à ce rang → session neuve, tout l'historique |
 | **Fork**, prépend | Idem |
-| `/compact` (historique raccourci) | Idem |
+| `/compact` (résumé en rang 0) | Clé différente → session neuve, **et l'ancienne est fermée** |
 | **Changement de modèle** | Clé différente → session neuve (une session a appliqué son modèle par `set_config_option`) |
 | `cwd` ou agent différent | Clé différente → session neuve |
 | Rejeu du même tour | Delta vide refusé → session neuve (un prompt sans message produirait un `ACK:` muet) |
 | Tour annulé, agent mort | Session **empoisonnée** → fermée, tour suivant sur une session neuve |
 | Hors LRU (8 sessions) | La moins récemment utilisée est fermée, **sauf** si elle porte un tour |
+
+Une session **inatteignable** est fermée dès qu'on la reconnaît comme telle. Une
+réécriture de l'ancre (ce que fait `/compact`) déplace la clé, et l'ancienne
+session resterait alors vivante sous une clé que rien ne redemandera — une
+session ACP perdue par compaction, jusqu'à l'arrêt du serveur. Le pool la
+reconnaît à ce qu'il reste : **même agent, même dossier, même modèle, et des
+messages encore présents dans l'historique reçu** — ce qu'un `/compact` laisse
+toujours, puisqu'il garde la fin récente des échanges et ne remplace que le
+résumé de tête. Deux conversations réellement distinctes ne partagent aucun
+message, et la leur n'est donc jamais touchée. Une session qui porte encore un
+tour ne l'est pas davantage : le balayage attend qu'elle se libère, et le LRU
+ramasse ce qui traîne.
 
 ⚠️ Ce que la reprise **ne** fait pas : le système, le catalogue d'outils et le
 contrat de sortie sont **renvoyés en entier à chaque tour**. Seule l'historique
