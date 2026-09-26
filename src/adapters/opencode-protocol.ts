@@ -22,6 +22,12 @@
  * therefore always builds the instance, and only adds it to the state when the
  * agent actually reported counters.
  *
+ * Note: the **only** thing a turn inherits from the previous ones is what
+ * `initialStateFor` puts in the state: the catalogue, and the two fields of the
+ * repetition guard (`loopScope`, `pending`). The memory itself lives in
+ * `adapters/tool-loop.ts` and is asked once per request, never mid-stream, so
+ * replaying the same `(state, event)` sequence still gives the same events.
+ *
  * Note: **a turn's text is buffered.** The agent's `text` is no longer
  * translated as it arrives: it is accumulated, then decoded by `core/parse.ts`
  * at the `done`, and rendered in a single block. Until the whole answer has been
@@ -39,6 +45,8 @@ import type { AIError, FinishReason, LLMEvent, LLMRequest } from "@opencode/ai/s
 
 import { parseAgentOutput } from "../core/parse.js"
 import type { AgentOutput } from "../core/parse.js"
+import { carriesToolResult, judgeCall, loopMessage, loopScope } from "../core/tool-repetition.js"
+import type { CallFingerprint } from "../core/tool-repetition.js"
 import type {
   AcpEvent,
   AcpStopReason,
@@ -47,7 +55,9 @@ import type {
   NormalizedTool,
   PlanEntry,
 } from "../core/types.js"
+import { agentKey } from "../settings.js"
 import type { AcpProviderSettings } from "../settings.js"
+import { toolLoop } from "./tool-loop.js"
 
 /** The protocol's id, visible in `@opencode/ai` diagnostics. */
 export const PROTOCOL_ID = "acp"
@@ -253,6 +263,23 @@ export interface ReducerState {
   /** The last turn `usage` reported by the agent, if any. */
   readonly usage: Usage | undefined
   /**
+   * The conversation this turn belongs to (`core/tool-repetition.ts`).
+   *
+   * Note: `""` when there is none - which is the case of the exported
+   * `initialState` - and the guard is then **inert**: a test replaying a `tool`
+   * event neither consults nor pollutes the process-wide memory.
+   */
+  readonly loopScope: string
+  /**
+   * The call this conversation proposed last, and how many times, unless a tool
+   * result came back since.
+   *
+   * Note: read, never written, by the reducer. It is the memory's answer at
+   * request time, carried in the state so that `reduce` remains a function of
+   * `(state, event)` alone and replays identically.
+   */
+  readonly pending: CallFingerprint | undefined
+  /**
    * The agent's own reading of its context window, if it announced one.
    *
    * Note: `usage_update` is monotonic, so the **last** one of the turn is also
@@ -287,6 +314,8 @@ export const initialState: ReducerState = {
   usage: undefined,
   context: undefined,
   permissions: 0,
+  loopScope: "",
+  pending: undefined,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -454,6 +483,41 @@ const toolNameOf = (event: Extract<AcpEvent, { type: "tool" }>): string =>
   event.name !== "" ? event.name : event.title !== "" ? event.title : "tool"
 
 /**
+ * Refuses a call the guard recognises as a repetition, or `undefined` when the
+ * call passes. Either way the call becomes the conversation's latest
+ * proposal.
+ *
+ * Note: the decision is taken on `state.pending`, the memory's answer read once
+ * per request, so the verdict is a function of the state alone. The store is
+ * only ever **written** from here.
+ *
+ * Note: a refused call is remembered too, and that is what makes the count in
+ * the message honest: a host retrying the very same turn is told "3 times"
+ * rather than "twice" again, and is refused again. Only a **result** clears it.
+ *
+ * Note: the emitted sequence is deliberately the one of an `error` event: a
+ * `step-finish{error}` then a `provider-error`, and **nothing** after them. The
+ * core refuses any event following a terminal one ("Provider emitted X after
+ * the terminal event"), and a turn whose terminator is missing reads like a
+ * truncated stream - indistinguishable from a dead pipe, and useless here.
+ *
+ * Note: the caller owns what has already been emitted (an open step, an open
+ * reasoning block) and prepends it: this function only owns the refusal.
+ */
+const refuseRepeat = (state: ReducerState, name: string, input: unknown): Reduction | undefined => {
+  const decision = judgeCall(state.pending, { name, arguments: input })
+  toolLoop.remember(state.loopScope, decision.memory)
+  if (!decision.verdict.repeat) return undefined
+  return {
+    state: { ...state, stepFinished: true, terminal: true },
+    events: [
+      { type: "step-finish", index: state.step, reason: { normalized: "error" } },
+      { type: "provider-error", message: loopMessage(decision.verdict) },
+    ],
+  }
+}
+
+/**
  * Translates a **validated** agent output into `LLMEvent`s - the heart of the
  * project.
  *
@@ -489,6 +553,10 @@ const emitOutput = (state: ReducerState, output: AgentOutput): Reduction => {
   const id = `acp-call-${state.calls}`
   const { name } = output
   const input = output.arguments
+  // The repetition guard: an identical call, with no result since the last one,
+  // means the conversation is not advancing (see `core/tool-repetition.ts`).
+  const refused = refuseRepeat(state, name, input)
+  if (refused !== undefined) return refused
   const namespace = state.catalog.find((tool) => tool.name === name)?.namespace
   return {
     state: { ...state, calls: state.calls + 1, tools: new Set([...state.tools, id]) },
@@ -599,6 +667,11 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
       closeReasoning()
       const name = toolNameOf(event)
       const input = event.input ?? {}
+      // Same guard as the contract path, and for the same reason: an agent that
+      // re-proposes the identical call without ever having received its result
+      // is not working, it is looping.
+      const refused = refuseRepeat(next, name, input)
+      if (refused !== undefined) return { state: refused.state, events: [...events, ...refused.events] }
       events.push({ type: "tool-input-start", id: event.id, name })
       events.push({ type: "tool-input-delta", id: event.id, name, text: renderJson(input), input })
       events.push({ type: "tool-input-end", id: event.id, name })
@@ -667,6 +740,10 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
         parsed === undefined ? { state: next, events: [] } : emitOutput(next, parsed.output)
       events.push(...emitted.events)
       next = emitted.state
+      // A refused call has already emitted this turn's error **and** its terminal
+      // event. The `step-finish`/`finish` below would be refused by the core, so
+      // they are not emitted: the turn is over, with the message the user needs.
+      if (next.terminal) return { state: next, events }
 
       const reason = { normalized: finishReasonOf(next, event.stopReason) } as const
       events.push({
@@ -721,6 +798,9 @@ export const halt = (state: ReducerState): Reduction => {
       next = emitted.state
     }
   }
+  // Same as in `done`: a refusal emitted its own terminator, and a second one
+  // would be refused by the core.
+  if (next.terminal) return { state: next, events }
   const reason = { normalized: haltReason(next) } as const
   const usage = next.usage
   events.push({
@@ -830,11 +910,33 @@ interface Textual {
  * that follow carry only ACP data. It is copied **into the state** rather than
  * into a module variable: the reducer stays pure, and two concurrent turns do
  * not share their catalogue.
+ *
+ * Note: this is also where the **repetition guard** asks its memory what the
+ * conversation is still waiting for. A tool result in the request re-arms it -
+ * the previous call is answered, so proposing the same one again is ordinary
+ * work - and the answer is carried in the state, never read from the memory by
+ * the reducer itself.
  */
-export const initialStateFor = (request: LLMRequest): ReducerState => ({
-  ...initialState,
-  catalog: flattenTools(request.tools),
-})
+export const initialStateFor = (request: LLMRequest, settings: AcpProviderSettings): ReducerState => {
+  // The anchor is the request's first message, as the host spelled it: see
+  // `loopScope`. `settings.cwd` is the same default as the transport's
+  // `sessionCwd`, which cannot be imported here - the transport already imports
+  // this module.
+  const scope = loopScope(
+    {
+      agent: agentKey(settings),
+      cwd: settings.cwd ?? process.cwd(),
+      model: String(request.model.id),
+    },
+    renderJson(request.messages[0]?.content),
+  )
+  return {
+    ...initialState,
+    catalog: flattenTools(request.tools),
+    loopScope: scope,
+    pending: toolLoop.arm(scope, carriesToolResult(request.messages)),
+  }
+}
 
 /**
  * `LLMRequest` -> `NormalizedRequest`.
@@ -947,7 +1049,7 @@ export const makeProtocol = (settings: AcpProviderSettings): Protocol<
     },
     stream: {
       event: frameSchema,
-      initial: initialStateFor,
+      initial: (request) => initialStateFor(request, settings),
       step: (state, frame) => {
         const { state: next, events } = reduce(state, frame.ev)
         return Effect.succeed([next, events] as const)
