@@ -42,6 +42,8 @@ import { existsSync } from "node:fs"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
+import { appendLog } from "./adapters/plugin-log.js"
+
 import { Model, Plugin, Provider } from "@opencode/plugin"
 import type { Form } from "@opencode/schema/form"
 
@@ -111,6 +113,7 @@ const PLUGIN_ID = "opencode-acp-provider"
  */
 const log = (message: string): void => {
   process.stderr.write(`[${PLUGIN_ID}] ${message}\n`)
+  appendLog(`[${PLUGIN_ID}] ${message}\n`)
 }
 
 /** An arbitrary error's message, without its stack: this is a log, not a report. */
