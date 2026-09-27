@@ -35,7 +35,7 @@ import type { LLMEvent, LanguageModel } from "@opencode/ai/schema/index"
 
 import { halt, initialState, reduce } from "../src/adapters/opencode-protocol.js"
 import type { ReducerState } from "../src/adapters/opencode-protocol.js"
-import { acquireAgent, closeCachedAgents } from "../src/adapters/opencode-transport.js"
+import { acquireAgent, closeCachedAgents, forgetAgent } from "../src/adapters/opencode-transport.js"
 import type { AcpPrepared } from "../src/adapters/opencode-transport.js"
 import type { AcpEvent } from "../src/core/types.js"
 import { renderRequest } from "../src/core/prompt.js"
@@ -1346,6 +1346,18 @@ describe("provider package contract", () => {
     // Without that cache, every turn of a conversation would restart an
     // `initialize`.
     expect(acquireAgent(settings)).toBe(acquireAgent(settings))
+  })
+
+  test("forgetting the cache forces a fresh process", async () => {
+    // The cache holds a promise, not a liveness check. Forgetting it is what
+    // lets a caller decide that the cached agent is no longer the one it wants -
+    // the eviction behind a death mid-session.
+    const settings = fakeSettings()
+    const first = await acquireAgent(settings)
+    forgetAgent(settings)
+    const second = await acquireAgent(settings)
+    expect(second).not.toBe(first)
+    await second.close()
   })
 
   test("`@opencode/ai` is aligned with the version the host embeds", async () => {

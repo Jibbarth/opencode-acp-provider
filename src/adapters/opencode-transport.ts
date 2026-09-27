@@ -276,12 +276,29 @@ export const countRetainedSessions = (): number =>
  */
 const sessionCwd = (settings: AcpProviderSettings): string => settings.cwd ?? process.cwd()
 
+/** Drops the cached agent, so the next call spawns a fresh one. */
+export const forgetAgent = (settings: AcpProviderSettings): void => {
+  agents.delete(agentKey(settings))
+}
+
 /** Opens a fresh ACP session, attached to nothing. */
-const openSessionPromise = (settings: AcpProviderSettings): Promise<AcpSession> =>
-  acquireAgent(settings).then((agent) => agent.open({ cwd: sessionCwd(settings) }))
+const openSessionPromise = async (settings: AcpProviderSettings): Promise<AcpSession> => {
+  const open = () =>
+    acquireAgent(settings).then((agent) => agent.open({ cwd: sessionCwd(settings) }))
+  try {
+    return await open()
+  } catch (error) {
+    // The cache holds a promise, not a liveness check: an agent that died
+    // between two turns stays cached, and every later turn would fail on it with
+    // "ACP connection closed" for the rest of the session. Evict it and spawn
+    // once more - a dead agent must cost one turn, not the session.
+    forgetAgent(settings)
+    return await open()
+  }
+}
 
 /** Opens the session, with closure guaranteed by the request's `Scope`. */
-const openSession = (settings: AcpProviderSettings): Effect.Effect<
+export const openSession = (settings: AcpProviderSettings): Effect.Effect<
   AcpSession,
   AIError,
   Scope.Scope
