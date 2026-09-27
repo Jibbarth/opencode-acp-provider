@@ -24,6 +24,8 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const PLUGIN = fileURLToPath(new URL("../src/plugin.ts", import.meta.url))
@@ -36,6 +38,11 @@ const evaluatePlugin = async (args: readonly string[] = []): Promise<string> => 
     stdout: "pipe",
     stderr: "pipe",
     cwd: process.cwd(),
+    // The plugin logs to a file next to the user's own. Without this, every
+    // `bun test` appends its fake agents to the user's diagnostic - measured:
+    // 78 test entries against 40 real ones, in a file the user reads to find out
+    // why their agent died.
+    env: { ...process.env, XDG_DATA_HOME: join(tmpdir(), `acp-plugin-test-${process.pid}`) },
   })
   const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
   expect({ code, script }).toEqual({ code: 0, script })
