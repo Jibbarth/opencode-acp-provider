@@ -19,13 +19,16 @@ describe("the plugin's diagnostic file", () => {
     // the user, so this is the only channel that survives every host mode.
     expect(existsSync(dir)).toBe(false)
     appendLog("[acp] hello\n")
-    expect(readFileSync(LOG_PATH, "utf8")).toBe("[acp] hello\n")
+    expect(readFileSync(LOG_PATH, "utf8")).toContain("[acp] hello\n")
   })
 
   test("lines accumulate rather than overwriting each other", () => {
     // A log that truncates would take the evidence of a failure with it.
     appendLog("one\n")
     appendLog("two\n")
-    expect(readFileSync(LOG_PATH, "utf8")).toBe("one\ntwo\n")
+    const contents = readFileSync(LOG_PATH, "utf8")
+    expect(contents).toContain("one\n")
+    expect(contents).toContain("two\n")
+    expect(contents.indexOf("one")).toBeLessThan(contents.indexOf("two"))
   })
 })

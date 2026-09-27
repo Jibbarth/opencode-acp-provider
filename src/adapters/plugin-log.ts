@@ -31,7 +31,9 @@ export const LOG_PATH = join(DATA_DIR, "opencode", "acp-provider.log")
 export const appendLog = (line: string): void => {
   try {
     mkdirSync(dirname(LOG_PATH), { recursive: true })
-    appendFileSync(LOG_PATH, line, "utf8")
+    // The timestamp is what makes a sequence readable: without it, four
+    // removals and four additions look like a burst rather than a loop.
+    appendFileSync(LOG_PATH, `${new Date().toISOString()} ${line}`, "utf8")
   } catch {
     // Nothing: the plugin must never fail because its log is unavailable.
   }

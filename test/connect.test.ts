@@ -8,6 +8,7 @@ import {
   mergeAgents,
   parseConnectCredential,
   splitCommand,
+  trackChange,
 } from "../src/core/connect.js"
 import { parsePluginConfig } from "../src/core/publish.js"
 import type { RawAgent } from "../src/core/publish.js"
@@ -92,6 +93,40 @@ describe("/connect: the form answers", () => {
 })
 
 describe("/connect and the config file", () => {
+  test("a change is applied only after being seen twice, so a flicker cannot churn", () => {
+    // Measured: four removals, then four additions, each pass spawning a process
+    // and disposing a registration - and that churn closed the session's
+    // connection. One differing reading must therefore not be enough.
+    const stable = "a"
+    const changed = "b"
+
+    expect(trackChange(stable, stable, undefined).apply).toBe(false)
+
+    const first = trackChange(stable, changed, undefined)
+    expect(first.apply).toBe(false)
+    expect(first.pending?.confirmations).toBe(1)
+
+    const second = trackChange(stable, changed, first.pending)
+    expect(second.apply).toBe(true)
+    expect(second.pending).toBeUndefined()
+  })
+
+  test("a change that does not repeat is withdrawn, and a later one starts over", () => {
+    const stable = "a"
+    const changed = "b"
+
+    const first = trackChange(stable, changed, undefined)
+    // The next poll sees the stable list again: the pending change is withdrawn.
+    const withdrawn = trackChange(stable, stable, first.pending)
+    expect(withdrawn.apply).toBe(false)
+    expect(withdrawn.pending).toBeUndefined()
+
+    // A different change afterwards is a first sighting, not a second.
+    const other = trackChange(stable, "c", withdrawn.pending)
+    expect(other.apply).toBe(false)
+    expect(other.pending?.confirmations).toBe(1)
+  })
+
   test("`/connect` comes first, and one id yields one provider", () => {
     const merged = mergeAgents([named("copilot")], [named("copilot"), named("codex")])
     expect(merged.map((agent) => agent.id)).toEqual(["copilot", "codex"])

@@ -119,6 +119,35 @@ const agentKey = (agent: RawAgent): string =>
   [agent.id, agent.providerSlug, agent.command, ...(agent.args ?? [])].join("\u0000")
 
 /**
+ * The fingerprint of a wanted list, and whether a change must be applied.
+ *
+ * Note: **why a change has to be seen twice before it is applied.** The
+ * connection read is the one input this loop cannot verify, and a single
+ * differing reading was enough to tear an agent down and rebuild it on the next
+ * poll - four removals, then four additions, each pass spawning a process and
+ * disposing a registration. That churn is what closed the session's connection.
+ * Two identical readings in a row cost five seconds and make the flicker
+ * harmless.
+ */
+export const trackChange = (
+  current: string,
+  seen: string,
+  pending: { readonly fingerprint: string; readonly confirmations: number } | undefined,
+): {
+  readonly fingerprint: string
+  readonly pending: { readonly fingerprint: string; readonly confirmations: number } | undefined
+  readonly apply: boolean
+} => {
+  if (seen === current) return { fingerprint: current, pending: undefined, apply: false }
+  const next =
+    pending?.fingerprint === seen
+      ? { fingerprint: seen, confirmations: pending.confirmations + 1 }
+      : { fingerprint: seen, confirmations: 1 }
+  if (next.confirmations < 2) return { fingerprint: current, pending: next, apply: false }
+  return { fingerprint: seen, pending: undefined, apply: true }
+}
+
+/**
  * What the catalogue depends on, as one comparable string.
  *
  * Note: the list is **sorted**, so reordering the configuration is not a change.

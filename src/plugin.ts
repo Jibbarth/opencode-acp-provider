@@ -58,6 +58,7 @@ import {
   diffAgents,
   mergeAgents,
   parseConnectCredential,
+  trackChange,
 } from "./core/connect.js"
 import type { AcpAgent, AcpAgentInfo, Inventory } from "./core/types.js"
 import {
@@ -970,6 +971,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
    */
   let settled: readonly RawAgent[] = wanted
   let fingerprint = agentsFingerprint(wanted)
+  let pending: { readonly fingerprint: string; readonly confirmations: number } | undefined
   let running = false
   const resync = async (): Promise<void> => {
     if (running) return
@@ -977,8 +979,10 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     try {
       const agent = await readConnectAgent(ctx)
       const next = mergeAgents(agent === undefined ? [] : [agent], config.agents)
-      // Nothing moved: no comparison of the catalogue, no `reload`, no process.
-      if (agentsFingerprint(next) === fingerprint) return
+      const seen = agentsFingerprint(next)
+      const confirmed = trackChange(fingerprint, seen, pending)
+      pending = confirmed.pending
+      if (!confirmed.apply) return
       const { added, removed } = diffAgents(settled, next)
       // An agent that had never been published has nothing to tear down and
       // nothing to announce: only what the catalogue really gained or lost is
@@ -1003,7 +1007,8 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
         log(`agent "${fresh.id}" added from /connect`)
       }
       settled = next
-      fingerprint = agentsFingerprint(next)
+      fingerprint = seen
+      pending = undefined
       if (moved) await reloadCatalogue(ctx)
     } catch (error) {
       log(`/connect resync ignored: ${reason(error)}`)
