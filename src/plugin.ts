@@ -57,7 +57,7 @@ import {
   mergeAgents,
   parseConnectCredential,
 } from "./core/connect.js"
-import type { AcpAgent, Inventory } from "./core/types.js"
+import type { AcpAgent, AcpAgentInfo, Inventory } from "./core/types.js"
 import {
   DEFAULT_DISCOVERY_IDLE_TIMEOUT_MS,
   DEFAULT_DISCOVERY_TIMEOUT_MS,
@@ -72,6 +72,7 @@ import {
 } from "./core/publish.js"
 import type { PluginConfig, PublishOptions, RawAgent, RawModelInfo, RawProviderInfo } from "./core/publish.js"
 import { parseSettings } from "./settings.js"
+import type { AcpProviderSettings } from "./settings.js"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plugin API types
@@ -282,6 +283,45 @@ interface Discovery {
   readonly agent: AcpAgent
   /** The inventory, read under the same bounds and the same inactivity counter. */
   readonly inventory: () => Promise<Inventory>
+}
+
+/**
+ * Spawns the agent, reads its inventory, **closes the process**.
+ *
+ * Note: the capture is deliberately short-lived. Keeping the discovery agent
+ * alive for the whole life of the provider meant **two** `copilot --acp`
+ * processes per agent at every moment - this one, plus the transport's, which
+ * is spawned on the first turn. Measured: launching one OpenCode instance
+ * started three, and the surplus instance is the one that dies, taking the
+ * session's connection with it ("ACP connection closed"). One agent, one
+ * process, at a time.
+ *
+ * Note: a refresh therefore pays a spawn. That is the right trade: a refresh
+ * is rare (bounded by `refreshMs`, and only after a finished turn), whereas a
+ * process held open for the session's lifetime is paid on every single turn.
+ */
+const captureInventory = async (
+  settings: AcpProviderSettings,
+  bounds: { readonly timeoutMs: number; readonly idleTimeoutMs: number },
+): Promise<{ readonly info: AcpAgentInfo; readonly inventory: Inventory }> => {
+  const found = await discover(
+    {
+      command: settings.command,
+      ...(settings.args === undefined ? {} : { args: settings.args }),
+      ...(settings.cwd === undefined ? {} : { cwd: settings.cwd }),
+      ...(settings.env === undefined ? {} : { env: settings.env }),
+      // No `policy`: `createAcpAgent`'s default is `denyAllPermissions`. The
+      // plugin only performs discovery, it opens no turn - but it must not be
+      // able to do better.
+    },
+    bounds.timeoutMs,
+    bounds.idleTimeoutMs,
+  )
+  try {
+    return { info: found.agent.info, inventory: await found.inventory() }
+  } finally {
+    await found.agent.close()
+  }
 }
 
 /**
@@ -571,31 +611,20 @@ const bringUp = async (
     return undefined
   }
 
-  // This is a **second** process, distinct from the one the transport will
-  // spawn through `model()`. The `opencode-transport.ts` cache is deliberately
-  // not shared: borrowing it would load the whole `effect` + `@opencode/ai`
-  // stack as soon as the plugin loads - in the server process - for a single
-  // capture.
-  //
-  // Both steps are **bounded** (`discover`): this is the only place in the
+  // The capture is **bounded** (`discover`): this is the only place in the
   // project where a wait can block OpenCode's startup, because the host awaits
   // `setup` before yielding. A mute, dead or stuck agent must produce "provider
   // not registered", not "OpenCode does not start".
-  let discovered: Discovery
+  //
+  // Note: the process is closed again as soon as the inventory is read - see
+  // `captureInventory`. Two agents alive at once was measured, and the surplus
+  // one is the one that dies.
+  let captured: { readonly info: AcpAgentInfo; readonly inventory: Inventory }
   try {
-    discovered = await discover(
-      {
-        command: settings.value.command,
-        ...(settings.value.args === undefined ? {} : { args: settings.value.args }),
-        ...(settings.value.cwd === undefined ? {} : { cwd: settings.value.cwd }),
-        ...(settings.value.env === undefined ? {} : { env: settings.value.env }),
-        // No `policy`: `createAcpAgent`'s default is `denyAllPermissions`. The
-        // plugin only performs discovery, it opens no turn - but it must not be
-        // able to do better.
-      },
-      bounds.timeoutMs,
-      bounds.idleTimeoutMs,
-    )
+    captured = await captureInventory(settings.value, {
+      timeoutMs: bounds.timeoutMs,
+      idleTimeoutMs: bounds.idleTimeoutMs,
+    })
   } catch (error) {
     // The error names the **agent**: "agent unavailable" without the
     // configured agent's name is an unusable diagnostic when the list holds
@@ -603,29 +632,17 @@ const bringUp = async (
     log(`agent "${agent.id}" unavailable, "${providerId}" not registered: ${reason(error)}`)
     return undefined
   }
-  const acp = discovered.agent
+  const { info, inventory } = captured
 
   const options: PublishOptions = {
     id: providerId,
-    label: `ACP — ${acp.info.name}`,
-    agent: acp.info.name,
+    label: `ACP — ${info.name}`,
+    agent: info.name,
     settings: providerSettingsOf(agent, providerId),
     ...(agent.limits === undefined ? {} : { limits: agent.limits }),
   }
 
-  // `AcpAgent.inventory()` opens a throwaway session, reads, closes: the
-  // capture is therefore always fresh, which is exactly the defect it papers
-  // over (19 values on the first `session/new`, 20 after a `set_config_option`).
-  let inventory: Inventory
-  try {
-    inventory = await discovered.inventory()
-  } catch (error) {
-    await acp.close()
-    log(`inventory unreadable for "${agent.id}", "${providerId}" not registered: ${reason(error)}`)
-    return undefined
-  }
   if (inventory.models.length === 0) {
-    await acp.close()
     log(`"${agent.id}" offers no model, "${providerId}" not registered`)
     return undefined
   }
@@ -633,7 +650,7 @@ const bringUp = async (
   // is filtered out), and it is the gap between the two that says whether the
   // agent proposed anything other than models.
   log(
-    `${acp.info.name} v${acp.info.version} (${providerId}): ${inventory.models.length} model value(s), ` +
+    `${info.name} v${info.version} (${providerId}): ${inventory.models.length} model value(s), ` +
       `${inventory.thoughtLevels.length} effort level(s)`,
   )
 
@@ -644,19 +661,27 @@ const bringUp = async (
   try {
     registration = await register(ctx, publish(options, packageURL, inventory), owned)
   } catch (error) {
-    await acp.close()
     log(`"${providerId}" not registered: ${reason(error)}`)
     return undefined
   }
   owned.add(providerId)
   let signature = inventorySignature(inventory)
 
-  // The refresh pass goes through `discovered.inventory()` and not
-  // `acp.inventory()`, so it is **bounded** too. A discovery dragging on in the
+  // The refresh pass goes through `captureInventory` too, so it is **bounded**
+  // as well and leaves no process behind. A discovery dragging on in the
   // background cannot leave an ACP session open forever - and, awaited, cannot
   // leak a rejection either.
   const stop = watch(ctx, bounds.refreshMs, async () => {
-    const next = await discovered.inventory()
+    let next: Inventory
+    try {
+      next = (await captureInventory(settings.value, {
+        timeoutMs: bounds.timeoutMs,
+        idleTimeoutMs: bounds.idleTimeoutMs,
+      })).inventory
+    } catch (error) {
+      log(`${providerId}: refresh ignored: ${reason(error)}`)
+      return
+    }
     const nextSignature = inventorySignature(next)
     // Nothing changed: nothing is touched. `ctx.provider.reload()` rebuilds the
     // whole catalogue, so calling it without reason would lose the current
@@ -677,11 +702,15 @@ const bringUp = async (
   // a rediscovery in flight would fail on an already dead agent - and that
   // error would mask the real cause, the shutdown. The `finally` is the only
   // guarantee that the agent is killed, even if `dispose` fails.
+  //
+  // Note: `closeAgent` is a no-op. The discovery process is already closed by
+  // `captureInventory`, so there is nothing left to kill here - and the
+  // transport's own agent is a different process, closed by its own pool.
   return {
     id: providerId,
     stop,
     dispose: () => registration.dispose(),
-    closeAgent: () => acp.close(),
+    closeAgent: async () => undefined,
   }
 }
 
