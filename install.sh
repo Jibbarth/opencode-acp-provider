@@ -2,10 +2,10 @@
 #
 # opencode-acp-provider - local installation from a dev checkout.
 #
-# Preferred path is `opencode plugin add github:<owner>/opencode-acp-provider`.
+# Preferred path is `opencode plugin add github:Jibbarth/opencode-acp-provider`.
 # Use this script when working from a clone:
 #
-#   git clone <repo> && cd opencode-acp-provider
+#   git clone https://github.com/Jibbarth/opencode-acp-provider && cd opencode-acp-provider
 #   ./install.sh                 # global configuration
 #   ./install.sh --local         # current directory configuration
 #

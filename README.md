@@ -7,7 +7,7 @@ as an **OpenCode model provider**. The agent's models show up in `/model` as
 ## Install
 
 ```bash
-opencode plugin add github:<owner>/opencode-acp-provider
+opencode plugin add github:Jibbarth/opencode-acp-provider
 ```
 
 ## Add an agent
@@ -49,7 +49,7 @@ plugin.
 <summary>Local install (dev checkout)</summary>
 
 ```bash
-git clone <url> opencode-acp-provider
+git clone https://github.com/Jibbarth/opencode-acp-provider
 cd opencode-acp-provider
 bun install
 ./install.sh                 # global config; --local for ./opencode.jsonc
