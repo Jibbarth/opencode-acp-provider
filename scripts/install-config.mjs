@@ -138,10 +138,10 @@ const parseJsonc = (text, path) => {
  */
 const isOurPackage = (specifier, repoRoot) => {
   if (typeof specifier !== "string") return false
-  if (specifier === "opencode-acp-provider") return true
+  if (specifier === "@barth/opencode-acp-provider" || specifier === "opencode-acp-provider") return true
   const bare = specifier.startsWith("file://") ? specifier.slice("file://".length) : specifier
   if (!bare.startsWith("/")) return false
-  const normalized = bare.replace(/\/plugin\.(ts|js)$/, "")
+  const normalized = bare.replace(/\/(plugin|index)\.(ts|js)$/, "")
   return normalized === repoRoot || normalized === resolve(repoRoot, "src") || normalized === resolve(repoRoot, "dist")
 }
 

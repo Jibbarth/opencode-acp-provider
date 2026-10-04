@@ -2,6 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+.env*
+*.log
+coverage/
+.opencode/
+*.tmp
 
 .agents/
 skills-lock.json

@@ -1,20 +1,27 @@
 {
-  "name": "opencode-acp-provider",
+  "name": "@barth/opencode-acp-provider",
   "version": "0.1.0",
   "description": "Expose an ACP (Agent Client Protocol) agent as an OpenCode model provider",
   "license": "MIT",
   "type": "module",
   "private": false,
-  "files": [
-    "src",
-    "bin"
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "acp",
+    "agent-client-protocol"
   ],
-  "bin": {
-    "acp-run": "./bin/acp-run.ts"
-  },
+  "files": [
+    "index.ts",
+    "src",
+    "LICENSE",
+    "README.md",
+    "docs"
+  ],
   "exports": {
-    ".": "./src/index.ts",
+    ".": "./index.ts",
     "./plugin": "./src/plugin.ts",
+    "./provider": "./src/index.ts",
     "./core": "./src/core/types.ts",
     "./core/models": "./src/core/models.ts",
     "./core/prompt": "./src/core/prompt.ts",
@@ -38,14 +45,14 @@
     "prepack": "npm run typecheck && npm run verify:package"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.5.0",
-    "@opencode/ai": "2.0.16",
-    "@opencode/schema": "2.0.16",
+    "@agentclientprotocol/sdk": "^1.7.0",
+    "@opencode/ai": "~2.0.22",
+    "@opencode/plugin": "~2.0.22",
+    "@opencode/schema": "~2.0.22",
     "effect": "4.0.0-rc.112",
-    "zod": "4.1.12"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@opencode/plugin": "2.0.16",
     "@types/bun": "1.4.0",
     "@types/node": "24.10.1",
     "typescript": "5.8.2"

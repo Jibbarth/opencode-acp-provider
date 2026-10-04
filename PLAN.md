@@ -1,7 +1,9 @@
 # Plan - `opencode-acp-provider`
 
-Expose an ACP agent (codex, copilot, gemini, qwen...) as an **OpenCode model
-provider**, so that it can be used from OpenCode's TUI.
+> **Archive.** Kept for history; no longer the source of truth.
+> Behaviour is documented in `README.md` + `docs/`.
+
+---
 
 - Implementation target: `/home/barth/Projects/opencode-acp-provider` (empty directory, not versioned)
 - Reference versions verified: `opencode v2.0.16`, `@opencode/ai 2.0.3`, `@opencode/plugin 2.0.3`, `effect 4.0.0-rc.112`, `bun 1.3.14`

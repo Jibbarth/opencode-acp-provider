@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# opencode-acp-provider - one-command installation.
+# opencode-acp-provider - local installation from a dev checkout.
+#
+# Preferred path is `opencode plugin add github:<owner>/opencode-acp-provider`.
+# Use this script when working from a clone:
 #
 #   git clone <repo> && cd opencode-acp-provider
 #   ./install.sh                 # global configuration
@@ -26,8 +29,11 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PLUGIN_ENTRY="$ROOT/src/plugin.ts"
-PLUGIN_ENTRY="$(cd -- "$(dirname -- "$PLUGIN_ENTRY")" && pwd -P)/$(basename -- "$PLUGIN_ENTRY")"
+# The server only loads directories from `plugins[].package` (a file path is
+# refused with "configured plugin path must be a directory"), and resolves the
+# plugin to `<dir>/index.ts`. The shim imports that same file directly.
+PLUGIN_DIR="$ROOT"
+PLUGIN_FILE="$ROOT/index.ts"
 
 MODE="install"
 SCOPE="global"
@@ -95,7 +101,7 @@ done
 # ─────────────────────────────────────────────────────────────────────────────
 
 [ -f "$ROOT/package.json" ] || die "$ROOT does not look like opencode-acp-provider (package.json absent)."
-[ -f "$PLUGIN_ENTRY" ] || die "plugin entry point not found: $PLUGIN_ENTRY"
+[ -f "$PLUGIN_FILE" ] || die "plugin entry point not found: $PLUGIN_FILE"
 
 # The provider is loaded by the OpenCode server, which resolves its dependencies
 # from node_modules: without an install, the first turn fails on an import.
@@ -110,13 +116,15 @@ for candidate in bun node; do
 done
 [ -n "$RUNNER" ] || die "no JavaScript runtime found (bun or node is required to write the configuration)."
 
-# OpenCode's version must match @opencode/plugin's: the plugin is loaded by the
-# server, and its version is what decides the contract.
-PINNED="$("$RUNNER" -e 'const p=require(process.argv[1]);process.stdout.write((p.devDependencies||{})["@opencode/plugin"]||"?")' "$ROOT/package.json" 2>/dev/null || echo '?')"
+# OpenCode's version must sit on the same `major.minor` line as
+# `@opencode/plugin`'s range: the plugin is loaded by the server, and its
+# version is what decides the contract.
+PINNED="$("$RUNNER" -e 'const p=require(process.argv[1]);process.stdout.write(((p.dependencies||{})["@opencode/plugin"]||(p.devDependencies||{})["@opencode/plugin"])||"?")' "$ROOT/package.json" 2>/dev/null || echo '?')"
 if command -v opencode >/dev/null 2>&1; then
   FOUND="$(opencode --version 2>/dev/null | sed -nE 's/.*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
-  if [ -n "$FOUND" ] && [ "$FOUND" != "$PINNED" ]; then
-    note "! OpenCode $FOUND while @opencode/plugin is pinned to $PINNED."
+  FLOOR="$(printf '%s' "$PINNED" | sed -nE 's/^~?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
+  if [ -n "$FOUND" ] && [ -n "$FLOOR" ] && { [ "${FOUND%.*}" != "${FLOOR%.*}" ] || [ "${FOUND##*.}" -lt "${FLOOR##*.}" ]; }; then
+    note "! OpenCode $FOUND outside @opencode/plugin's range $PINNED."
     note "  The plugin is loaded by the server: its version is the one that counts."
   fi
 else
@@ -189,7 +197,7 @@ fi
 if [ "$MODE" = "install" ] && [ -z "$ASSUME_YES" ] && [ -t 0 ]; then
   [ -f "$CONFIG" ] && note "existing configuration: $CONFIG (backup before writing)"
   note "target           : $CONFIG"
-  note "entry point      : $PLUGIN_ENTRY"
+  note "entry point      : $PLUGIN_DIR"
   printf 'Write? [y/N] '
   read -r reply
   case "$reply" in
@@ -202,9 +210,9 @@ fi
 # Merge
 # ─────────────────────────────────────────────────────────────────────────────
 
-# A `plugins` entry in a config array does not load, measured repeatedly on
-# both a global and a project config; a re-export file in a plugins directory
-# does. The shim also leaves the user configuration untouched.
+# The config entry points at the checkout directory (the server only loads
+# directories from `plugins[].package`); the shim re-exports the same plugin
+# and additionally reads the agent list from the user's own configuration.
 SHIM_PATH="$SHIM_DIR/$SHIM_NAME"
 
 if [ "$MODE" = "uninstall" ]; then
@@ -231,7 +239,7 @@ import { Plugin } from "@opencode/plugin"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import acp from "$PLUGIN_ENTRY"
+import acp from "$PLUGIN_FILE"
 
 const readUserAgents = () => {
   for (const name of ["opencode.json", "opencode.jsonc"]) {
@@ -253,22 +261,20 @@ SHIM_EOF
 note "written: $SHIM_PATH"
 
 [ -f "$SHIM_PATH" ] || die "the shim could not be written"
-grep -q "$PLUGIN_ENTRY" "$SHIM_PATH" || die "the shim does not point at the expected entry point"
+grep -q "$PLUGIN_FILE" "$SHIM_PATH" || die "the shim does not point at the expected entry point"
 
 if [ "$MODE" = "status" ]; then
   note "installed: $SHIM_PATH"
   exit 0
 fi
 
-# `install-config.mjs` is what merges the agent list into the user's config: it
+# `install-config.mjs` merges the agent list into the user's config: it
 # reads the JSONC, writes a backup, refuses a commented config without --force,
-# then reads the merge back and checks it. It never ran - the unconditional
-# `exit 0` below this comment returned before the `exec`, so an install wrote
-# the shim and stopped there, leaving the configuration merge silently undone.
+# then reads the merge back and checks it.
 exec "$RUNNER" "$ROOT/scripts/install-config.mjs" \
   "$MODE" \
   --config "$CONFIG" \
-  --plugin "$PLUGIN_ENTRY" \
+  --plugin "$PLUGIN_DIR" \
   --repo "$ROOT" \
   --agents "$AGENTS_JSON" \
   $FORCE

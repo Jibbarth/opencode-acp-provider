@@ -91,8 +91,8 @@ const entryOf = (subpath) => {
 console.log(`# paquet   : ${manifest.name}@${manifest.version}`)
 console.log(`# racine   : ${root}`)
 
-const pluginURL = entryOf("./plugin")
-const providerURL = entryOf(".")
+const pluginURL = entryOf(".")
+const providerURL = entryOf("./provider")
 
 if (pluginURL === undefined || providerURL === undefined) {
   console.error(
@@ -179,14 +179,14 @@ if (plugin !== undefined && typeof plugin.resolvePackageURL === "function") {
         `le fichier existe : ${target}`,
       )
       // Note: **the single instance.** If the computed URL does not designate the
-      // same file as `exports["."]`, the host loads **two** modules: two
+      // same file as `exports["./provider"]`, the host loads **two** modules: two
       // `LanguageModel`s, two `Usage` classes, and an `instanceof` that fails
       // with a message indistinguishable from a stream truncation. That is the
       // "double instance" risk, and it shows up here, in one comparison.
       check(
         "Provider.Info.package",
         target === fileURLToPath(providerURL),
-        `designates the same module as exports["."] (${target === fileURLToPath(providerURL) ? "yes" : `no: ${target} != ${fileURLToPath(providerURL)}`})`,
+        `designates the same module as exports["./provider"] (${target === fileURLToPath(providerURL) ? "yes" : `no: ${target} != ${fileURLToPath(providerURL)}`})`,
       )
     }
   }

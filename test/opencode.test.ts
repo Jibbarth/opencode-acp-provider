@@ -1506,8 +1506,20 @@ describe("provider package contract", () => {
     const ours = await read("../node_modules/@opencode/ai/package.json")
     const plugin = await read("../node_modules/@opencode/plugin/package.json")
     const hostDeps = asRecord(plugin["dependencies"])
+    const manifest = (await read("../package.json")) as { dependencies?: Record<string, string> }
+    const wanted = manifest.dependencies?.["@opencode/ai"] ?? ""
 
-    expect(ours["version"]).toBe("2.0.16")
+    // The manifest declares a `~` range: the installed copy must sit on the
+    // same `major.minor` line, at or above the floor. A `^` across minors or
+    // an older patch would hand the host a `Usage` class it does not share.
+    const satisfiesTilde = (version: unknown, floor: string): boolean => {
+      if (typeof version !== "string") return false
+      const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version)
+      const low = /^~?(\d+)\.(\d+)\.(\d+)$/.exec(floor)
+      if (match === null || low === null) return false
+      return match[1] === low[1] && match[2] === low[2] && Number(match[3]) >= Number(low[3])
+    }
+    expect(satisfiesTilde(ours["version"], wanted)).toBe(true)
     expect(hostDeps["@opencode/ai"]).toBe(ours["version"])
     // `@opencode/schema` must follow: that is where `LLMEvent` and `Usage` come
     // from, and both packages are resolved through the same path.

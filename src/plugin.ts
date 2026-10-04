@@ -32,10 +32,11 @@
  * `@opencode/plugin`. All the transformation logic lives in `core/publish.ts`,
  * which does not, and is therefore testable without a host.
  *
- * Note: `@opencode/plugin` is in `devDependencies`: at load time the host
- * provides it (as it provides `@opencode/ai` at `importPackage` time). Its
- * version tracks the **CLI**, hence `2.0.16` and not `2.0.3`, whose `Context`
- * exposes a `catalog` domain the 2.0.16 server does not implement.
+ * Note: `@opencode/plugin` is a runtime dependency, pinned to the **CLI**
+ * version (`2.0.16`, not `2.0.3`, whose `Context` exposes a `catalog` domain
+ * the 2.0.16 server does not implement). The host also provides it at load
+ * time; the pinned dependency is what makes a `plugin add` install resolve it
+ * on its own.
  */
 
 import { existsSync } from "node:fs"
@@ -147,23 +148,26 @@ log(`module evaluated: ${import.meta.url}`)
  * **Absolute** `file://` URL of the module exporting `model`.
  *
  * Note: it is computed **from `import.meta.url`**, never hardcoded. That is the
- * only way to work both in development (the plugin is `src/plugin.ts`) and
- * installed (it is `dist/plugin.js` inside `node_modules`). A frozen path works
- * in one case out of two and fails in the other with an `ERR_MODULE_NOT_FOUND`
- * **on the first turn** - very late, and unrelated to the configuration.
+ * only way to work in every layout: `src/plugin.ts` in development, the root
+ * `index.ts` re-export once installed via `plugin add`, and `dist/plugin.js`
+ * after a build. A frozen path works in one case and fails in the others with
+ * an `ERR_MODULE_NOT_FOUND` **on the first turn** - very late, and unrelated
+ * to the configuration.
  *
  * Note: the candidate order follows the real package layout. The plugin and the
- * provider are two files of the **same directory** in both layouts (the build
- * writes everything into `dist/`, the repository lives in `src/`). Existence is
- * therefore tested instead of guessed, and the compiled `.js` comes before the
- * `.ts`: that is what the host must import, and loading both would keep two
- * distinct agent process caches alive in the same server.
+ * provider are two files of the **same directory** in the `src/` and `dist/`
+ * layouts (existence is tested instead of guessed, compiled `.js` first:
+ * loading both would keep two agent process caches alive in the same server).
+ * The `src/` candidates cover the root `index.ts` re-export, which must resolve
+ * to `src/index.ts`, never to itself.
  */
 export const resolvePackageURL = (moduleURL: string): string => {
   const here = dirname(fileURLToPath(moduleURL))
   const candidates = [
     resolve(here, "index.js"),
+    resolve(here, "src", "index.js"),
     resolve(here, "..", "dist", "index.js"),
+    resolve(here, "src", "index.ts"),
     resolve(here, "index.ts"),
     resolve(here, "..", "src", "index.ts"),
   ]
