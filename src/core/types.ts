@@ -336,6 +336,16 @@ export interface AcpAgent {
   readonly info: AcpAgentInfo
   /** Protocol version negotiated during `initialize`. */
   readonly protocolVersion: number
+  /**
+   * The subprocess is gone, or we closed it - **not** merely unreachable.
+   *
+   * Note: a retry needs this. A `session/new` that rejects and a
+   * `set_config_option` the agent refuses look alike from the outside and need
+   * opposite treatment: the first is worth retrying on a fresh process, the
+   * second is an answer the user has to read. An error message cannot tell them
+   * apart; the process can.
+   */
+  readonly dead: boolean
   /** Full inventory (models, efforts, modes, permissions). */
   inventory(): Promise<Inventory>
   /** Shortcut: only the models of the `model` category. */

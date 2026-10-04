@@ -1188,6 +1188,133 @@ describe("end to end: resume sends only the delta", () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 8 bis. End to end: `reuse` when the agent dies
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("end to end: the reuse mode survives a dead agent", () => {
+  const temporary: string[] = []
+
+  const promptFile = async (label: string): Promise<string> => {
+    const directory = await mkdtemp(join(tmpdir(), `acp-reuse-death-${label}-`))
+    temporary.push(directory)
+    return join(directory, "prompts.txt")
+  }
+
+  /**
+   * A marker path the fake uses to die **once**, then behave.
+   *
+   * Note: inside a `mkdtemp` directory, and that is not tidiness. The fake skips
+   * its death when the marker already exists, so a path derived from anything
+   * reusable - a pid, a label - inherits a stale marker from an earlier run, the
+   * agent never dies, and the test asserts against a premise that stopped
+   * holding. It fails rarely and for no visible reason.
+   */
+  const deathMarker = async (label: string): Promise<string> => {
+    const directory = await mkdtemp(join(tmpdir(), `acp-reuse-marker-${label}-`))
+    temporary.push(directory)
+    return join(directory, "died")
+  }
+
+  afterAll(async () => {
+    for (const directory of temporary) await rm(directory, { recursive: true, force: true })
+  })
+
+  test("a retained session is not handed to the agent that replaces the dead one", async () => {
+    // The failure this covers is **silent**, which is why it is worth a test of
+    // its own. A pooled session is a live ACP session id, and it only means
+    // anything to the process that created it. Evicting the agent without
+    // closing its pool would let the next turn resume a session the replacement
+    // has never heard of - and that path never goes through `session/new`, so no
+    // amount of retrying there would notice.
+    //
+    // Note: `FAKE_DIE_ONCE_ON_CONFIG` fires on the **first** `set_config_option`,
+    // which is turn 1. So turn 2 finds a retained session belonging to a dead
+    // process: exactly the state under test.
+    await closeAllSessions()
+    const file = await promptFile("retained")
+    const settings = fakeSettings(
+      { FAKE_PROMPT_FILE: file, FAKE_DIE_ONCE_ON_CONFIG: await deathMarker("retained") },
+      { session: "reuse" },
+    )
+    const languageModel = model("claude-sonnet-5", settings)
+
+    // Turn 1 succeeds, and the recovery is invisible: the whole point.
+    const first = await runTurn(settings, "claude-sonnet-5", requestOf(languageModel, TOUR_1))
+    expect(first.filter((event) => event.type === "text-delta").map((event) => event.text)).toEqual([
+      "PONG",
+    ])
+
+    // Turn 2, same conversation. A session is retained, and the agent that owned
+    // it is gone.
+    const second = await runTurn(settings, "claude-sonnet-5", requestOf(languageModel, TOUR_2))
+    expect(second.filter((event) => event.type === "text-delta").map((event) => event.text)).toEqual([
+      "PONG",
+    ])
+
+    // The proof that the dead session was **dropped** and not handed over is
+    // twofold, and both halves matter.
+    const prompts = await readPrompts(file)
+    // Two prompts, not three: the death happened during turn 1's `initialize`
+    // phase, **before** any prompt was sent, so the retry's prompt is the first
+    // one recorded. A third would mean the corpse was prompted a second time.
+    expect(prompts).toHaveLength(2)
+    const last = prompts[1] ?? ""
+    // Turn 2 resumed a session - so MARKER-1 is absent - and that session must
+    // belong to the **live** agent. Had the dead one's session survived in the
+    // pool, `session/prompt` would have named an id the replacement never issued,
+    // and the turn would have failed instead of answering.
+    expect(occurrences(last, "MARKER-1")).toBe(0)
+    expect(occurrences(last, "MARKER-2")).toBe(1)
+    expect(last).toContain("## Conversation - continued")
+
+    // One session retained, and it is the live agent's - not the corpse's.
+    expect(countRetainedSessions()).toBe(1)
+  })
+
+  test("reuse still resumes normally once the agent is healthy again", async () => {
+    // The counterpart, and the one that would catch a fix that simply **disabled
+    // reuse**: if every death permanently emptied the pool, the delta would stop
+    // being a delta and this test would still pass. It has to see MARKER-1
+    // *absent* from the second prompt.
+    await closeAllSessions()
+    const file = await promptFile("healthy")
+    const settings = fakeSettings({ FAKE_PROMPT_FILE: file }, { session: "reuse" })
+    const languageModel = model("gpt-5.6-terra", settings)
+
+    await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_1))
+    await runTurn(settings, "gpt-5.6-terra", requestOf(languageModel, TOUR_2))
+
+    const prompts = await readPrompts(file)
+    expect(prompts).toHaveLength(2)
+    // Zero occurrences: the session really was resumed.
+    expect(occurrences(prompts[1] ?? "", "MARKER-1")).toBe(0)
+    expect(countRetainedSessions()).toBe(1)
+  })
+
+  test("a dead agent in reuse mode does not leave the queue stuck", async () => {
+    // The pool serialises turns per key. A turn that dies before `acquire`
+    // resolves must still free its place in the queue, or **every** later turn of
+    // that conversation waits forever - a hang, not an error, which is the worst
+    // failure mode this project has.
+    await closeAllSessions()
+    const settings = fakeSettings(
+      { FAKE_DIE_ONCE_ON_CONFIG: await deathMarker("queue") },
+      { session: "reuse" },
+    )
+    const languageModel = model("claude-sonnet-5", settings)
+
+    // Three turns in a row. If the first death wedged the key, this would hang
+    // rather than fail - and `bun test` would time out instead of reporting.
+    for (const tour of [TOUR_1, TOUR_2, TOUR_3]) {
+      const events = await runTurn(settings, "claude-sonnet-5", requestOf(languageModel, tour))
+      expect(events.filter((event) => event.type === "text-delta").map((event) => event.text)).toEqual([
+        "PONG",
+      ])
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 9. End to end: the `fresh` fallback stays intact
 // ─────────────────────────────────────────────────────────────────────────────
 

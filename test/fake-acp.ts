@@ -50,6 +50,9 @@
  * | `FAKE_SET_OMITS_CONFIG_OPTIONS=1` | `set_config_option` answers without `configOptions`      |
  * | `FAKE_ECHO_CONFIG=1`           | `PING` answers `PONG <model> <effort>`: the current options |
  * | `FAKE_REJECT_UNKNOWN_MODEL=1`  | `set_config_option` refuses a value outside the list (`Invalid model`) |
+ * | `FAKE_DIE_ONCE_ON_CONFIG=<path>` | exits at the first `set_config_option`, once (the recovery's case) |
+ * | `FAKE_DIE_ALWAYS_ON_CONFIG=1` | exits at **every** `set_config_option`, so a retry must give up |
+ * | `FAKE_SPAWN_FILE=<path>`      | appends one line per `initialize`: counts the processes really launched |
  * | `FAKE_PERMISSION_OPTIONS=<x>`  | `reject` \| `allow` \| `cancel`: only those options are offered |
  * | `FAKE_DIE_ON_PROMPT=1`         | exits mid-prompt (before the `stop`)                       |
  * | `FAKE_NOISY_STDOUT=1`          | writes non-JSON on stdout before the protocol              |
@@ -62,7 +65,7 @@
  * | `FAKE_ARGV_FILE=<path>`        | writes our argv (JSON): the only observable of the spawn arguments, which the protocol cannot carry |
  */
 
-import { appendFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, writeFileSync } from "node:fs"
 import { Readable, Writable } from "node:stream"
 import * as acp from "@agentclientprotocol/sdk"
 
@@ -322,6 +325,10 @@ class FakeAgent {
     if (capabilities !== undefined) {
       writeFileSync(capabilities, JSON.stringify(params.clientCapabilities ?? null))
     }
+    // `FAKE_SPAWN_FILE`: one line per process that reached `initialize`, so a
+    // test can count the spawns instead of inferring them from a duration.
+    const spawns = process.env["FAKE_SPAWN_FILE"]
+    if (spawns !== undefined) appendFileSync(spawns, `${process.pid}\n`)
     if (SLOW_INIT_MS > 0) {
       // Answers late but correctly: it is the **client's timeout** that must
       // fire, and it must kill the agent by exiting with an error.
@@ -353,6 +360,18 @@ class FakeAgent {
   setConfigOption(
     params: acp.SetSessionConfigOptionRequest,
   ): acp.SetSessionConfigOptionResponse {
+    // Note: **once**, enforced through a marker file. The recovery spawns a
+    // replacement, and a fake dying on every attempt would test the bound rather
+    // than the recovery. No answer and no clean close, either: the process simply
+    // goes away, which is what a crash looks like at the other end of the pipe.
+    const marker = process.env["FAKE_DIE_ONCE_ON_CONFIG"]
+    if (marker !== undefined && !existsSync(marker)) {
+      writeFileSync(marker, "died")
+      process.exit(7)
+    }
+    // `FAKE_DIE_ALWAYS_ON_CONFIG=1`: the same death on **every** attempt. Paired
+    // with `FAKE_SPAWN_FILE`, it is what proves the retry stops at one.
+    if (flag("FAKE_DIE_ALWAYS_ON_CONFIG")) process.exit(7)
     // `FAKE_REJECT_UNKNOWN_MODEL=1`: behaves like `copilot`, which answers
     // -32602 "Invalid model" with the list of accepted values.
     if (

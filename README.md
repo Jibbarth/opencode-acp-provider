@@ -296,6 +296,31 @@ Retained sessions are closed when the plugin unloads and by `closeAllSessions()`
 the LRU is bounded to 8 sessions per agent, and never evicts a session carrying
 a turn in progress.
 
+## When the agent dies
+
+An ACP agent is a **subprocess**, and it can go away at any moment: a crash, an
+`OOM`, a `/connect` edit, a long-lived OpenCode server restarting underneath it.
+The agent process is cached for the server's lifetime, so a dead one would
+otherwise poison every later turn of the session.
+
+Recovery is decided by **cause**, not by "it threw":
+
+| When | What happens |
+| --- | --- |
+| `session/new`, `set_config_option` (model, effort) | the agent is **replaced silently** and the turn replays. One `initialize` of latency, no error |
+| the same, twice | the second failure is reported. A command that cannot start must not respawn forever |
+| a refused value (a model the agent does not offer) | reported at once, with the accepted values. **Not** retried: a live agent refusing is an answer, not a death |
+| during `session/prompt` | reported, and the message says the turn was **not** replayed. Past the prompt the agent may already have run tools |
+
+The boundary is the prompt, and it is not a tuning choice: everything before it
+is a request whose effect the agent has not acted on yet, so replaying it is free.
+Everything after it may have written files.
+
+⚠️ A retained `reuse` session belongs to the process that created it, so evicting
+an agent also closes its pool. Handing such a session to a replacement would ask a
+process about a conversation it has never seen - and that path never goes through
+`session/new`, so no retrying there would ever notice.
+
 ## Installation
 
 The package exposes two entry points: the **plugin** (loaded by OpenCode) and the

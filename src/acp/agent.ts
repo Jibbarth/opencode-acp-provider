@@ -297,6 +297,7 @@ const createSession = (
   connection: acp.ClientConnection,
   session: acp.ActiveSession,
   permissionSinks: Map<string, PermissionSink>,
+  isDead: () => boolean,
 ): AcpSession => {
   // `configOptions` evolve over the session's life, so the **last raw capture**
   // returned by the agent is kept and `parseInventory` (a pure function)
@@ -439,7 +440,17 @@ const createSession = (
             for (const event of updateToEvents(update)) yield event
           }
         } catch (error) {
-          yield { type: "error", message: error instanceof Error ? error.message : String(error) }
+          // Note: a death is reported as one. The SDK raises a bare "ACP connection
+          // closed" when a connection drops - it never saw a process, so it cannot
+          // tell a crash from a refusal. Here the process is visible, and the
+          // message says the turn stopped partway and was not run again.
+          const detail = error instanceof Error ? error.message : String(error)
+          yield {
+            type: "error",
+            message: isDead()
+              ? `${detail} - the agent's process is gone, so the turn was interrupted and not replayed. Send the message again.`
+              : detail,
+          }
           // A stream that stops without `done` fails the `@opencode/ai` chain
           // with "The provider response ended unexpectedly.", so the turn is
           // explicitly closed.
@@ -697,6 +708,25 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
   }
 
   let closed = false
+  /**
+   * The process's own liveness, readable synchronously.
+   *
+   * Note: **the connection first**, not `deathReason`. `deathReason` is filled by
+   * an event handler, and an agent whose pipe has already closed can still have
+   * it `undefined`: the SDK's read loop sees the EOF and closes before Node
+   * delivers `exit`. The request is rejected *by* that close, so a check reading
+   * `deathReason` answers "alive" a microsecond after the failure - which is
+   * exactly when it gets consulted.
+   *
+   * Note: `connection.signal` aborts inside `close()`, the call that rejects the
+   * pending request, so `aborted` is already `true` when the catch runs.
+   */
+  const isDead = (): boolean =>
+    closed ||
+    connection?.signal.aborted === true ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+
   const assertAlive = (): void => {
     if (closed) throw new AcpAgentError(`${label}: agent closed`, label)
   }
@@ -708,7 +738,7 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
     const active = await connection.agent
       .buildSession(openOptions.cwd ?? options.cwd ?? process.cwd())
       .start()
-    return createSession(connection, active, permissionSinks)
+    return createSession(connection, active, permissionSinks, isDead)
   }
 
   // The inventory lives in the `session/new` response: a throwaway session is
@@ -725,6 +755,12 @@ export const createAcpAgent = async (options: AcpAgentOptions): Promise<AcpAgent
   return {
     info,
     protocolVersion: initResponse.protocolVersion,
+
+    // A getter, delegating to the same `isDead` the sessions use, so the two cannot
+    // disagree. A field would freeze the answer at construction time.
+    get dead(): boolean {
+      return isDead()
+    },
 
     inventory,
 

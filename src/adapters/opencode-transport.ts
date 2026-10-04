@@ -281,21 +281,48 @@ export const forgetAgent = (settings: AcpProviderSettings): void => {
   agents.delete(agentKey(settings))
 }
 
-/** Opens a fresh ACP session, attached to nothing. */
-const openSessionPromise = async (settings: AcpProviderSettings): Promise<AcpSession> => {
-  const open = () =>
-    acquireAgent(settings).then((agent) => agent.open({ cwd: sessionCwd(settings) }))
-  try {
-    return await open()
-  } catch (error) {
-    // The cache holds a promise, not a liveness check: an agent that died
-    // between two turns stays cached, and every later turn would fail on it with
-    // "ACP connection closed" for the rest of the session. Evict it and spawn
-    // once more - a dead agent must cost one turn, not the session.
-    forgetAgent(settings)
-    return await open()
-  }
+/**
+ * Is the cached agent **gone**, as opposed to merely unhelpful?
+ *
+ * Note: **never spawns** - it reads the cache and stops. The question it answers
+ * is whether a failure just seen is worth retrying, and spawning to find out
+ * would turn a diagnostic into a side effect.
+ *
+ * Note: a **rejected** promise counts as dead. `acquireAgent` removes those in
+ * its own `catch`, so this only covers the window before it runs, and an agent
+ * that never finished starting is unusable either way.
+ */
+const agentIsDead = async (settings: AcpProviderSettings): Promise<boolean> => {
+  const cached = agents.get(agentKey(settings))
+  if (cached === undefined) return false
+  const agent = await cached.catch(() => undefined)
+  return agent === undefined || agent.dead
 }
+
+/**
+ * Evicts the agent **and every session retained for it**.
+ *
+ * Note: the pool is not optional. A retained `AcpSession` is a live ACP session
+ * id, and it only means anything to the process that issued it: a replacement
+ * handed one would be asked about a conversation it has never seen, and its
+ * answer would be an error we could not tell from any other.
+ *
+ * Note: `closeAll` closes **busy** sessions too. A turn in flight sits on an
+ * agent that is already gone, and the pool's `drop` is idempotent, so releasing
+ * it afterwards stays harmless.
+ */
+const evictAgent = async (settings: AcpProviderSettings): Promise<void> => {
+  const key = agentKey(settings)
+  forgetAgent(settings)
+  const pool = pools.get(key)
+  if (pool === undefined) return
+  pools.delete(key)
+  await pool.closeAll()
+}
+
+/** Opens a fresh ACP session, attached to nothing. */
+const openSessionPromise = (settings: AcpProviderSettings): Promise<AcpSession> =>
+  acquireAgent(settings).then((agent) => agent.open({ cwd: sessionCwd(settings) }))
 
 /** Opens the session, with closure guaranteed by the request's `Scope`. */
 export const openSession = (settings: AcpProviderSettings): Effect.Effect<
@@ -397,6 +424,60 @@ const beginTurn = (
   prepared: AcpPrepared,
 ): Effect.Effect<TurnSession, AIError, Scope.Scope> =>
   settings.session === "reuse" ? beginReuse(settings, prepared) : beginFresh(settings, prepared)
+
+/**
+ * `beginTurn` + the option changes, retried **once** on a fresh agent.
+ *
+ * Note: the extent is the design. This covers the whole **pre-prompt** phase -
+ * `session/new`, then `set_config_option` for the model and the effort - because
+ * the agent has not seen the user's message yet, so replaying it costs one
+ * `initialize` and nothing else. That is what turns "the agent died between two
+ * turns" into a slower turn instead of a visible error.
+ *
+ * Note: the gate is `agentIsDead`, not "it threw". A `model` the agent does not
+ * offer also throws, and it has to reach the user: a retry would spend an
+ * `initialize` to fail identically and report the *second* failure, burying the
+ * accepted values.
+ *
+ * Note: **not** extended to the prompt. Past `session/prompt` the agent may have
+ * run tools, and replaying it would run them twice. A death there is a real
+ * error, reported as one by `acp/agent.ts`.
+ *
+ * Note: **one** retry. The recursive branch passes `retry: false`, so a command
+ * that cannot start - a bad flag, no credentials - costs two processes and then
+ * reports its failure.
+ */
+const beginTurnRecovering = (
+  settings: AcpProviderSettings,
+  prepared: AcpPrepared,
+  retry: boolean,
+): Effect.Effect<TurnSession, AIError, Scope.Scope> =>
+  Effect.suspend(() =>
+    Effect.gen(function* () {
+      const turn = yield* beginTurn(settings, prepared)
+      yield* attempt(settings, () => applyModel(turn.session, prepared.model, settings))
+      yield* attempt(settings, () => applyEffort(turn.session, settings))
+      return turn
+    }),
+  ).pipe(
+    Effect.catch((error: AIError) =>
+      Effect.suspend(() =>
+        Effect.flatMap(
+          attempt(settings, async () => (retry ? await agentIsDead(settings) : false)),
+          (dead) => {
+            if (!dead) return Effect.fail(error)
+            return Effect.flatMap(
+              attempt(settings, () => evictAgent(settings)),
+              // The failed attempt's `Scope` finaliser closes its own session, so
+              // nothing leaks: `acquireRelease` has already armed that close by
+              // the time we get here.
+              () => beginTurnRecovering(settings, prepared, false),
+            )
+          },
+        ),
+      ),
+    ),
+  )
 
 /**
  * Applies a session option value **before** the prompt.
@@ -513,8 +594,16 @@ const toFrame = (event: AcpEvent): string =>
     event.type === "tool" ? { ev: { ...event, input: event.input ?? {} } } satisfies AcpFrame : { ev: event } satisfies AcpFrame,
   )
 
-/** Turns an exception of the ACP generator into an `AIError` (an aborted frame, not a silent one). */
-const toFrameError = (error: unknown, settings: AcpProviderSettings): AIError => toAiError(error, settings)
+/**
+ * Turns an exception of the ACP generator into an `AIError` (an aborted frame,
+ * not a silent one).
+ *
+ * Note: **synchronous**, because `Stream.fromAsyncIterable` cannot await its
+ * error mapper. A death during the prompt never reaches it: `acp/agent.ts` turns
+ * that into an `error` event, where the process is visible.
+ */
+const toFrameError = (error: unknown, settings: AcpProviderSettings): AIError =>
+  toAiError(error, settings)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The transport
@@ -559,8 +648,9 @@ const execute = (
   Effect.gen(function* () {
     // The mode is decided **before** everything else: `beginTurn` always
     // returns a `TurnSession`, and nothing after it knows (nor should know) which
-    // mode produced the session.
-    const turn = yield* beginTurn(settings, prepared)
+    // mode produced the session. It also applies the model and the effort, both
+    // part of the retryable phase.
+    const turn = yield* beginTurnRecovering(settings, prepared, true)
     // Registered **after** `beginTurn`: a `Scope`'s finalisers run in reverse
     // order, so cancellation fires before the release - and the poisoning before
     // the cancellation, since it is what decides whether the session is closed.
@@ -576,8 +666,6 @@ const execute = (
           if (cancellation.signal.aborted) turn.poison()
         }),
     )
-    yield* attempt(settings, () => applyModel(turn.session, prepared.model, settings))
-    yield* attempt(settings, () => applyEffort(turn.session, settings))
     // The delta replaces the transcript only if the session was **actually**
     // resumed. In `fresh` mode, and on the first turn of a conversation, the
     // request is sent as-is: the prompt stays byte for byte the one before.

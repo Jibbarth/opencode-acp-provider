@@ -16,7 +16,10 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
@@ -907,6 +910,128 @@ const runTurn = async (
   }
   return outcome.success
 }
+
+describe("transparent recovery: a dead agent costs latency, not an error", () => {
+  const temporary: string[] = []
+
+  afterAll(async () => {
+    for (const directory of temporary) await rm(directory, { recursive: true, force: true })
+  })
+
+  /**
+   * A fresh directory, removed after the run.
+   *
+   * Note: **never** a reusable path. Both the fake's "die once" marker and the
+   * spawn counter are files whose content decides what the agent does: the fake
+   * skips its death when the marker exists, so a stale marker means the agent
+   * never dies and the test asserts against a premise that stopped holding. It
+   * fails rarely and for no visible reason.
+   */
+  const freshDir = async (label: string): Promise<string> => {
+    const directory = await mkdtemp(join(tmpdir(), `acp-recovery-${label}-`))
+    temporary.push(directory)
+    return directory
+  }
+
+  /** The path the fake writes when it dies, so it dies only once. */
+  const deathMarker = async (label: string): Promise<string> =>
+    join(await freshDir(label), "died")
+
+  test("an agent dying on set_config_option is replaced, and the turn succeeds", async () => {
+    // The gap this closes: the agent answers `session/new`, then dies before
+    // `set_config_option`. The client holds a session on a dead process, and the
+    // SDK's only word for it is "ACP connection closed". A retry on
+    // `session/new` alone never notices, because `session/new` already succeeded.
+    //
+    // Note: the model is **not** `gpt-5.6-terra`. `applyModel` sends nothing when
+    // the requested value is already the current one - a deliberate saving - so
+    // asking for the fake's own default would skip `set_config_option` entirely,
+    // and the test would pass on an agent that never misbehaved.
+    const marker = await deathMarker("once")
+    const settings = fakeSettings({ FAKE_DIE_ONCE_ON_CONFIG: marker })
+    const languageModel = model("claude-sonnet-5", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    const events = await runTurn(settings, "claude-sonnet-5", request)
+
+    // The proof is not "no throw": it is the **complete** sequence, identical to a
+    // healthy turn. A retry that failed halfway would still have produced frames.
+    expect(types(events)).toEqual([
+      "step-start",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "step-finish",
+      "finish",
+    ])
+    expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["PONG"])
+    // The fake really did die: without this, the test would pass on a fake that
+    // simply never misbehaved, which is the failure mode of a test like this one.
+    expect(existsSync(marker)).toBe(true)
+  })
+
+  test("the replacement is a different process, not the corpse retried", async () => {
+    // Retrying the *same* cached promise would fail identically forever. The
+    // cache must be evicted, so the second attempt has to be a fresh process.
+    const marker = await deathMarker("evict")
+    const settings = fakeSettings({ FAKE_DIE_ONCE_ON_CONFIG: marker })
+
+    const before = await acquireAgent(settings)
+    expect(before.dead).toBe(false)
+
+    const languageModel = model("claude-sonnet-5", settings)
+    await runTurn(settings, "claude-sonnet-5", buildRequest(languageModel, "PING"))
+
+    const after = await acquireAgent(settings)
+    // A different object, hence a different subprocess - and the one that died is
+    // reported dead, which is what let the retry decide to replace it.
+    expect(after).not.toBe(before)
+    expect(before.dead).toBe(true)
+    expect(after.dead).toBe(false)
+  })
+
+  test("a refusal is reported, not retried into a second identical failure", async () => {
+    // The other side of the gate: the agent is **alive** and refusing. Retrying
+    // would spend an `initialize` to fail the same way, and report the second
+    // failure - burying the list of accepted values under a generic death.
+    const settings = fakeSettings({ FAKE_REJECT_UNKNOWN_MODEL: "1" })
+    const languageModel = model("model-qui-nexiste-pas", settings)
+    const request = buildRequest(languageModel, "PING")
+
+    // `runTurn` throws on failure, so the message is the assertion: the agent's own
+    // refusal, with the accepted values, and not "ACP connection closed".
+    let message = ""
+    try {
+      await runTurn(settings, "model-qui-nexiste-pas", request)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toContain("is not offered by this agent")
+  })
+
+  test("an agent that dies on every attempt costs exactly two processes", async () => {
+    // The bound the retry needs. A command that cannot start - a bad flag, no
+    // credentials - would otherwise respawn forever, each attempt a fresh process
+    // and a fresh wait for the user.
+    const spawns = join(await freshDir("spawns"), "spawns.txt")
+    const settings = fakeSettings({ FAKE_DIE_ALWAYS_ON_CONFIG: "1", FAKE_SPAWN_FILE: spawns })
+    // Not the fake's default, for the same reason as the test above.
+    const languageModel = model("claude-sonnet-5", settings)
+
+    let message = ""
+    try {
+      await runTurn(settings, "claude-sonnet-5", buildRequest(languageModel, "PING"))
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    // **Counted**, not inferred: one attempt, one retry, then the failure is
+    // reported. A third line would mean the loop the bound exists to stop.
+    const launched = (await readFile(spawns, "utf8")).split("\n").filter((line) => line !== "")
+    expect(launched.length).toBe(2)
+    expect(message).not.toBe("")
+  })
+})
 
 describe("end to end: the real route against the ACP agent", () => {
   test("a text turn produces the expected sequence", async () => {
