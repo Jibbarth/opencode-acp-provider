@@ -46,10 +46,10 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.7.0",
-    "@opencode/ai": "~2.0.22",
-    "@opencode/plugin": "~2.0.22",
-    "@opencode/schema": "~2.0.22",
-    "effect": "4.0.0-rc.112",
+    "@opencode/ai": "~2.2.6",
+    "@opencode/plugin": "~2.2.6",
+    "@opencode/schema": "~2.2.6",
+    "effect": "4.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

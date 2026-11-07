@@ -33,10 +33,11 @@
  */
 
 import { Effect, Result, Stream } from "effect"
-import { GenerationOptions, LLMRequest, Message, SystemPart, ToolEntry, Usage } from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
+import { ai, type LLMRequest, Message, ProviderInternalError, SystemPart, ToolEntry, Usage } from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
 
 import { createAcpAgent } from "./src/acp/agent.js"
+import { AcpResponseError } from "./src/adapters/opencode-protocol.js"
 import { SessionPool } from "./src/core/session-pool.js"
 import type { AcpAgent, AcpSession, NormalizedMessage, NormalizedRequest } from "./src/core/types.js"
 import { renderRequest } from "./src/core/prompt.js"
@@ -134,7 +135,7 @@ type Step = { readonly role: "user" | "assistant"; readonly text: string }
 
 /** A request with a system prompt and one tool, like a real OpenCode turn. */
 const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: [SystemPart.make("You are a test assistant. Be brief.")],
     tools: [
@@ -145,7 +146,7 @@ const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMReq
       }),
     ],
     messages: steps.map((step) => (step.role === "user" ? Message.user(step.text) : Message.assistant(step.text))),
-    generation: GenerationOptions.make({ maxTokens: 200 }),
+    maxTokens: 200,
   })
 
 /** The ACP transport does no HTTP: an executor that dies if called says so. */
@@ -167,7 +168,13 @@ const runTurn = async (settings: AcpProviderSettings, steps: readonly Step[]): P
     ).pipe(Effect.result),
   )
   const ms = Date.now() - started
-  if (Result.isFailure(outcome)) throw new Error(`the stream failed: ${outcome.failure.message}`)
+  if (Result.isFailure(outcome)) {
+    const reason = outcome.failure.reason
+    if (reason instanceof ProviderInternalError && reason.cause instanceof AcpResponseError) {
+      return { text: "", usage: undefined, complaint: reason.message, ms }
+    }
+    throw new Error(`the stream failed: ${outcome.failure.message}`)
+  }
   return { ...readEvents(outcome.success), ms }
 }
 
@@ -175,7 +182,6 @@ const runTurn = async (settings: AcpProviderSettings, steps: readonly Step[]): P
 const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
   let text = ""
   let usage: TurnReport["usage"]
-  let complaint: string | undefined
   for (const event of events) {
     if (event.type === "text-delta") text += event.text
     if ((event.type === "step-finish" || event.type === "finish") && event.usage instanceof Usage) {
@@ -185,13 +191,8 @@ const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
         cacheWrite: event.usage.cacheWriteInputTokens ?? 0,
       }
     }
-    // An unparsable answer is a **result**, not a crash: the agent was asked a
-    // question about its memory, and "it answered but not in the contract" is
-    // part of what there is to learn. Throwing here would hide the very case
-    // worth reporting.
-    if (event.type === "provider-error") complaint = event.message
   }
-  return { text, usage, complaint }
+  return { text, usage, complaint: undefined }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

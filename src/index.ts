@@ -13,9 +13,9 @@
  * rather than throwing: the message must name the offending field.
  */
 
-import { ProviderConfigurationError } from "@opencode/ai/schema/index"
-import type { LanguageModel, ProviderOptions } from "@opencode/ai/schema/index"
-import type { ProviderPackage } from "@opencode/ai"
+import { ProviderConfigurationError } from "@opencode/ai/effect"
+import type { LanguageModel, ProviderOptions } from "@opencode/ai/effect"
+import type { ProviderPackage } from "@opencode/ai/effect"
 
 import { makeRoute, providerIdOf } from "./adapters/opencode-transport.js"
 import { parseSettings } from "./settings.js"
@@ -29,7 +29,7 @@ export type ProviderPackageContract = ProviderPackage.Definition<
 >
 
 /** The only function the OpenCode server needs to call. */
-export type ModelContract = (modelID: string, settings: RawProviderSettings) => LanguageModel
+export type ModelContract = (modelID: string, settings: RawProviderSettings) => LanguageModel<ProviderOptions, undefined>
 
 /**
  * Builds the `LanguageModel` of an ACP agent model.

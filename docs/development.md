@@ -32,16 +32,15 @@ its patch line instead. Either way our copy must stay on the same
 `major.minor`, at or above the floor: our provider builds `LanguageModel` and
 `Usage` with our copy, the host reads them with its own — two copies break
 `instanceof` ("The provider response ended unexpectedly").
-`test/opencode.test.ts` locks the range, not a version. `effect` stays on
-`rc.112` for the same reason: it must be the copy `@opencode/ai` was built
-against (typecheck fails otherwise; even `@opencode/*@2.0.22` still depends on
-the rc). Ranges (`^`) everywhere else; `bun.lock` keeps installs reproducible.
+`test/opencode.test.ts` locks the range, not a version. `effect` stays pinned
+to the version `@opencode/ai` was built against. Ranges (`^`) everywhere else;
+`bun.lock` keeps installs reproducible.
 
 | Package | Version | Why |
 | --- | --- | --- |
-| `@opencode/ai`, `@opencode/schema` | `~2.0.16` | Same patch line as the shipping `opencode`; see above |
-| `@opencode/plugin` | `~2.0.16` | Same patch line as the CLI that loads the plugin |
-| `effect` | `4.0.0-rc.112` exact | Must match `@opencode/ai`'s copy; stable `4.0.0` breaks `tsc` until upstream moves |
+| `@opencode/ai`, `@opencode/schema` | `~2.2.6` | Same minor line as the CLI; see above |
+| `@opencode/plugin` | `~2.2.6` | Same minor line as the CLI that loads the plugin |
+| `effect` | `4.1.0` exact | Must match `@opencode/ai`'s copy |
 | `@agentclientprotocol/sdk` | `^1.7.0` | The ACP protocol |
 | `zod` | `^4.6.5` | Never imported directly; satisfies the ACP SDK's peer dependency |
 

@@ -96,7 +96,7 @@ the default `"fresh"` opens one per turn.
 
 ## Requirements
 
-- OpenCode `>= 2.0.16` (`@opencode/plugin` is pinned to the CLI that loads it)
+- OpenCode `2.2.6` or newer in the `2.2.x` line (`@opencode/plugin` must match the CLI)
 - Bun (tests, dev), Node ≥ 20 also works for install and `verify:package`
 - The ACP agent installed and authenticated (`copilot`, `opencode`, …)
 

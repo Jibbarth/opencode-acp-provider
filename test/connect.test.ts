@@ -63,6 +63,16 @@ describe("/connect: the form answers", () => {
     })
   })
 
+  test("OpenCode's key credential metadata carries the /connect form answers", () => {
+    expect(
+      parseConnectCredential({
+        type: "key",
+        key: "opaque",
+        metadata: { name: "copilot", command: "copilot --acp" },
+      }),
+    ).toEqual({ name: "copilot", command: "copilot --acp" })
+  })
+
   test("anything that is not a filled key credential is refused rather than half-built", () => {
     const refused = [
       undefined,

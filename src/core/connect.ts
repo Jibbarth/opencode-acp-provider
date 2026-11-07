@@ -26,18 +26,23 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /**
  * Reads the two form answers out of a `/connect` credential.
  *
- * A `key` method carrying a `form` stores the answers in `configuration`, the
- * `key` itself being opaque, so the answers are the only thing worth reading.
- * Anything else - an OAuth credential, an env-backed one, a form left half
- * filled - yields `undefined` rather than a half-built agent.
+ * OpenCode stores key-form answers in `metadata`; older credential shapes may
+ * expose them as `configuration`. The `key` itself is opaque, so only those
+ * form answers are read. Anything else - an OAuth credential, an env-backed
+ * one, a form left half filled - yields `undefined` rather than a half-built
+ * agent.
  */
 export const parseConnectCredential = (value: unknown): ConnectAgent | undefined => {
   if (!isRecord(value) || value["type"] !== "key") return undefined
-  const configuration = value["configuration"]
-  if (!isRecord(configuration)) return undefined
+  const answers = isRecord(value["metadata"])
+    ? value["metadata"]
+    : isRecord(value["configuration"])
+      ? value["configuration"]
+      : undefined
+  if (answers === undefined) return undefined
 
-  const name = configuration["name"]
-  const command = configuration["command"]
+  const name = answers["name"]
+  const command = answers["command"]
   if (typeof name !== "string" || typeof command !== "string") return undefined
   if (name.trim() === "" || splitCommand(command).length === 0) return undefined
 

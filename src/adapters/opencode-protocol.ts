@@ -40,8 +40,8 @@
 
 import { Effect, Schema } from "effect"
 import { Protocol } from "@opencode/ai/route"
-import { Usage } from "@opencode/ai/schema/index"
-import type { AIError, FinishReason, LLMEvent, LLMRequest } from "@opencode/ai/schema/index"
+import { AIError, ProviderInternalError, Usage } from "@opencode/ai/effect"
+import type { FinishReason, LLMEvent, LLMRequest } from "@opencode/ai/effect"
 
 import { parseAgentOutput } from "../core/parse.js"
 import type { AgentOutput } from "../core/parse.js"
@@ -292,10 +292,13 @@ export interface ReducerState {
   readonly permissions: number
 }
 
+/** Internal error marker, converted to an AIError at the protocol boundary. */
+export type ReducerEvent = LLMEvent | { readonly type: "provider-error"; readonly message: string }
+
 /** The result of one reduction step. */
 export interface Reduction {
   readonly state: ReducerState
-  readonly events: LLMEvent[]
+  readonly events: ReducerEvent[]
 }
 
 /** Initial state - a turn that has produced nothing yet. */
@@ -495,11 +498,7 @@ const toolNameOf = (event: Extract<AcpEvent, { type: "tool" }>): string =>
  * the message honest: a host retrying the very same turn is told "3 times"
  * rather than "twice" again, and is refused again. Only a **result** clears it.
  *
- * Note: the emitted sequence is deliberately the one of an `error` event: a
- * `step-finish{error}` then a `provider-error`, and **nothing** after them. The
- * core refuses any event following a terminal one ("Provider emitted X after
- * the terminal event"), and a turn whose terminator is missing reads like a
- * truncated stream - indistinguishable from a dead pipe, and useless here.
+ * The internal error marker becomes a failed stream at the protocol boundary.
  *
  * Note: the caller owns what has already been emitted (an open step, an open
  * reasoning block) and prepends it: this function only owns the refusal.
@@ -592,7 +591,7 @@ const emitOutput = (state: ReducerState, output: AgentOutput): Reduction => {
  * the wrong, since there is nothing to open.
  */
 export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
-  const events: LLMEvent[] = []
+  const events: ReducerEvent[] = []
 
   // A terminal event is the last one: `@opencode/ai` explicitly rejects anything
   // after it ("Provider emitted X after the terminal event").
@@ -703,10 +702,7 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
       ensureStep()
       closeReasoning()
       events.push({ type: "step-finish", index: next.step, reason: { normalized: "error" } })
-      // `provider-error` **is** the protocol's terminal event: it carries the
-      // agent's message all the way to the interface, where a `finish{error}`
-      // would have lost it. The `done{cancelled}` that follows in the ACP stream
-      // is then ignored (`terminal`).
+      // The protocol converts this marker to an AIError carrying the message.
       events.push({ type: "provider-error", message: event.message })
       return { state: { ...next, stepFinished: true, terminal: true }, events }
     }
@@ -726,11 +722,7 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
       const parsed =
         next.buffer.trim() === "" ? undefined : parseAgentOutput(next.buffer, next.catalog)
       if (parsed !== undefined && !parsed.ok) {
-        // `provider-error` is terminal and the core **refuses** any event after
-        // it, so the missing `step-finish` is emitted - and above all **never** a
-        // `finish` behind it. A `ParseError` denying that `step-finish` would
-        // read like a stream truncation, indistinguishable from a dead pipe and
-        // therefore unusable.
+        // The protocol turns this marker into a stream failure, not a finish.
         events.push({ type: "step-finish", index: next.step, reason: { normalized: "error" } })
         events.push({ type: "provider-error", message: parsed.error.message })
         return { state: { ...next, stepFinished: true, terminal: true }, events }
@@ -776,7 +768,7 @@ export const reduce = (state: ReducerState, event: AcpEvent): Reduction => {
  */
 export const halt = (state: ReducerState): Reduction => {
   if (state.terminal) return { state, events: [] }
-  const events: LLMEvent[] = []
+  const events: ReducerEvent[] = []
   let next = state
   if (!next.started) {
     events.push({ type: "step-start", index: next.step })
@@ -1015,9 +1007,9 @@ export const fromRequest = (
     system,
     tools: flattenTools(request.tools),
     messages,
-    ...(request.generation?.maxTokens === undefined
+    ...(request.maxTokens === undefined
       ? {}
-      : { maxOutputTokens: request.generation.maxTokens }),
+      : { maxOutputTokens: request.maxTokens }),
   }
 
   return Effect.succeed({ model: String(request.model.id), request: normalized })
@@ -1052,9 +1044,23 @@ export const makeProtocol = (settings: AcpProviderSettings): Protocol<
       initial: (request) => initialStateFor(request, settings),
       step: (state, frame) => {
         const { state: next, events } = reduce(state, frame.ev)
-        return Effect.succeed([next, events] as const)
+        return Effect.map(protocolEvents(events), (output) => [next, output] as const)
       },
       // The final flush: fills in the missing `step-finish` / `finish`.
-      onHalt: (state) => Effect.succeed(halt(state).events),
+      onHalt: (state) => protocolEvents(halt(state).events),
     },
   })
+
+export class AcpResponseError extends Error {}
+
+const protocolEvents = (events: readonly ReducerEvent[]): Effect.Effect<readonly LLMEvent[], AIError> => {
+  const output: LLMEvent[] = []
+  for (const event of events) {
+    if (event.type === "provider-error") {
+      const cause = new AcpResponseError(event.message)
+      return Effect.fail(new AIError({ reason: new ProviderInternalError({ message: event.message, cause }) }))
+    }
+    output.push(event)
+  }
+  return Effect.succeed(output)
+}

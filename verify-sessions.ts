@@ -45,19 +45,20 @@ import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
 import {
-  GenerationOptions,
-  LLMRequest,
+  ai,
   Message,
+  ProviderInternalError,
   SystemPart,
   ToolCallPart,
   ToolEntry,
   ToolResultPart,
   Usage,
-} from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
-import type { Message as MessageType } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
+import type { Message as MessageType } from "@opencode/ai/effect"
 
 import { model } from "./src/index.js"
+import { AcpResponseError } from "./src/adapters/opencode-protocol.js"
 import { closeCachedAgents, countRetainedSessions } from "./src/adapters/opencode-transport.js"
 import type { AcpPrepared } from "./src/adapters/opencode-transport.js"
 import { SessionPool } from "./src/core/session-pool.js"
@@ -232,7 +233,6 @@ interface TurnReport {
 const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
   let text = ""
   let usage: TurnReport["usage"]
-  let complaint: string | undefined
   const toolCalls: { id: string; name: string; input: unknown }[] = []
   for (const event of events) {
     if (event.type === "text-delta") text += event.text
@@ -247,11 +247,8 @@ const readEvents = (events: readonly LLMEvent[]): Omit<TurnReport, "ms"> => {
         cacheRead: event.usage.cacheReadInputTokens ?? 0,
       }
     }
-    // An unparsable answer is a **result**, not a crash: a turn the parser
-    // refused is data about the agent's compliance, and must not be hidden.
-    if (event.type === "provider-error") complaint = event.message
   }
-  return { text, toolCalls, usage, complaint }
+  return { text, toolCalls, usage, complaint: undefined }
 }
 
 /** One tool, the only one the agent is offered: a single call per answer. */
@@ -272,12 +269,12 @@ const runTurn = async (
   languageModel: LanguageModel,
   messages: readonly MessageType[],
 ): Promise<TurnReport> => {
-  const request = new LLMRequest({
+  const request = ai.request({
     model: languageModel,
     system: [SystemPart.make("You are a test assistant. Be brief.")],
     tools: [READ_TOOL],
     messages,
-    generation: GenerationOptions.make({ maxTokens: 400 }),
+    maxTokens: 400,
   })
   const route = languageModel.route
   const started = Date.now()
@@ -290,7 +287,13 @@ const runTurn = async (
       }),
     ).pipe(Effect.result),
   )
-  if (Result.isFailure(outcome)) throw new Error(`the stream failed: ${outcome.failure.message}`)
+  if (Result.isFailure(outcome)) {
+    const reason = outcome.failure.reason
+    if (reason instanceof ProviderInternalError && reason.cause instanceof AcpResponseError) {
+      return { text: "", toolCalls: [], usage: undefined, complaint: reason.message, ms: Date.now() - started }
+    }
+    throw new Error(`the stream failed: ${outcome.failure.message}`)
+  }
   return { ...readEvents(outcome.success), ms: Date.now() - started }
 }
 

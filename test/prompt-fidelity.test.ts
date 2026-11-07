@@ -44,18 +44,18 @@ import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
 import {
-  GenerationOptions,
-  LLMRequest,
+  ai, type LLMRequest,
   Message,
   SystemPart,
   ToolCallPart,
   ToolEntry,
   ToolNamespace,
   ToolResultPart,
-} from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
 
 import { fromRequest, halt, initialState, reduce } from "../src/adapters/opencode-protocol.js"
+import type { ReducerEvent } from "../src/adapters/opencode-protocol.js"
 import { closeCachedAgents } from "../src/adapters/opencode-transport.js"
 import type { AcpPrepared } from "../src/adapters/opencode-transport.js"
 import type { NormalizedMessage, NormalizedRequest, NormalizedTool } from "../src/core/types.js"
@@ -221,7 +221,7 @@ const NORMALIZED: NormalizedRequest = {
 
 /** Builds the realistic `LLMRequest` used as the reference. */
 const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] = TOOL_ENTRIES): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: SYSTEM_PARTS.map((text) => SystemPart.make(text)),
     tools: [...tools],
@@ -239,7 +239,7 @@ const buildRequest = (languageModel: LanguageModel, tools: LLMRequest["tools"] =
       ),
       Message.user("and the port?"),
     ],
-    generation: GenerationOptions.make({ maxTokens: 512 }),
+    maxTokens: 512,
   })
 
 /**
@@ -420,7 +420,7 @@ describe("fromRequest: the reconstruction is complete", () => {
     // so it must land in the system section, not in the transcript - otherwise
     // the agent would take it for a line from a past turn.
     const languageModel = model("gpt-5.6-terra", fakeSettings())
-    const request = new LLMRequest({
+    const request = ai.request({
       model: languageModel,
       system: [SystemPart.make("Base system.")],
       tools: [],
@@ -519,7 +519,7 @@ describe("the prompt received on the wire is byte for byte the rendered prompt",
     ] as const) {
       const settings = fakeSettings({ FAKE_PROMPT_FILE: file })
       const languageModel = model("gpt-5.6-terra", settings)
-      const request = new LLMRequest({
+      const request = ai.request({
         model: languageModel,
         system: system.map((text) => SystemPart.make(text)),
         tools: [...TOOL_ENTRIES],
@@ -559,7 +559,7 @@ describe("usage: why the recipe shows 2/24", () => {
    * display its counters.
    */
   const usageOf = (input: number, output: number, cacheWrite: number, cacheRead = 0) => {
-    const events: LLMEvent[] = []
+    const events: ReducerEvent[] = []
     let state = initialState
     const feed = (event: Parameters<typeof reduce>[1]) => {
       const step = reduce(state, event)
@@ -642,7 +642,7 @@ describe("namespaced tools: the flat name is not enough to execute", () => {
     const normalized = normalizedOf(buildRequest(languageModel, namespaced))
 
     const proposal = JSON.stringify({ type: "tool", name: "search_grep", arguments: { pattern: "x" } })
-    const events: LLMEvent[] = []
+    const events: ReducerEvent[] = []
     let state = { ...initialState, catalog: normalized.tools }
     for (const event of [
       { type: "text", text: proposal },
@@ -665,7 +665,7 @@ describe("namespaced tools: the flat name is not enough to execute", () => {
     const languageModel = model("gpt-5.6-terra", fakeSettings())
     const normalized = normalizedOf(buildRequest(languageModel, namespaced))
 
-    const events: LLMEvent[] = []
+    const events: ReducerEvent[] = []
     let state = { ...initialState, catalog: normalized.tools }
     for (const event of [
       { type: "text", text: JSON.stringify({ type: "tool", name: "read", arguments: {} }) },

@@ -36,10 +36,9 @@
 
 import { Effect, Scope, Stream } from "effect"
 import { Auth, Endpoint, Route } from "@opencode/ai/route"
-import type { TransportDef, TransportExecution, TransportRuntime } from "@opencode/ai/route"
-import type { TransportPrepareInput } from "@opencode/ai/route/transport/index"
-import { AIError, InvalidRequestError, ProviderID, ProviderInternalError } from "@opencode/ai/schema/index"
-import type { LLMRequest } from "@opencode/ai/schema/index"
+import type { Transport, TransportExecution, TransportRuntime } from "@opencode/ai/route"
+import { AIError, InvalidRequestError, ProviderID, ProviderInternalError } from "@opencode/ai/effect"
+import type { LLMRequest } from "@opencode/ai/effect"
 
 import { AcpAgentError, createAcpAgent } from "../acp/agent.js"
 import type {
@@ -610,7 +609,7 @@ const toFrameError = (error: unknown, settings: AcpProviderSettings): AIError =>
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** `prepare`: the body already rendered by the protocol, validated before any spawn. */
-const prepare = (input: TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepared, AIError> => {
+const prepare = (input: Transport.TransportPrepareInput<AcpBody>): Effect.Effect<AcpPrepared, AIError> => {
   const body = input.body
   if (body.request.messages.length === 0) {
     // A turn with no message is an upstream bug, not an empty answer: the agent
@@ -700,7 +699,7 @@ const execute = (
 /** The transport, closed over its settings (the route is rebuilt for each). */
 export const makeTransport = (
   settings: AcpProviderSettings,
-): TransportDef<AcpBody, AcpPrepared, string> => ({
+): Transport.Transport<AcpBody, AcpPrepared, string> => ({
   id: `${ROUTE_ID}/transport`,
   prepare,
   execute: (prepared, request, runtime) => execute(prepared, request, runtime, settings),
@@ -711,7 +710,7 @@ export const makeTransport = (
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The complete route, ready to produce a `LanguageModel`. */
-export const makeRoute = (settings: AcpProviderSettings): Route<AcpBody, AcpPrepared> =>
+export const makeRoute = (settings: AcpProviderSettings): Route<AcpBody, AcpPrepared, undefined> =>
   Route.make({
     id: ROUTE_ID,
     provider: providerIdOf(settings),
@@ -723,9 +722,8 @@ export const makeRoute = (settings: AcpProviderSettings): Route<AcpBody, AcpPrep
     // stdio: neither token nor header. `Auth.none` explicitly says "no HTTP
     // authentication" rather than leaving it looking missing.
     auth: Auth.none,
-    compact: undefined,
     transport: makeTransport(settings),
-  })
+  }).with({ compact: undefined })
 
 /** The reducer's state, re-exported so the tests only import the adapter. */
 export type { ReducerState }

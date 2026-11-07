@@ -12,14 +12,13 @@
  */
 import { Effect, Result, Stream } from "effect"
 import {
-  GenerationOptions,
-  LLMRequest,
+  ai,
   Message,
   SystemPart,
   ToolEntry,
   Usage,
-} from "@opencode/ai/schema/index"
-import type { LLMEvent } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LLMEvent } from "@opencode/ai/effect"
 
 import { model } from "./src/index.js"
 import { closeCachedAgents } from "./src/adapters/opencode-transport.js"
@@ -44,7 +43,7 @@ console.log(`# route    : id=${route.id} protocol=${route.protocol} transport=${
 const DEFAULT_TEXT =
   'Answer ONLY with this JSON object, no text around it: {"type":"text","text":"pong"}'
 
-const request = new LLMRequest({
+const request = ai.request({
   model: languageModel,
   system: [SystemPart.make("You are a test assistant.")],
   messages: [Message.user(process.env.ACP_PROBE_TEXT ?? DEFAULT_TEXT)],
@@ -59,7 +58,7 @@ const request = new LLMRequest({
       },
     }),
   ],
-  generation: GenerationOptions.make({ maxTokens: 200 }),
+  maxTokens: 200,
 })
 
 // The ACP transport does no HTTP: an executor that dies if called is supplied,
@@ -119,9 +118,6 @@ for (const e of events) {
       }
       break
     }
-    case "provider-error":
-      console.log(`\n[provider-error] ${e.message}`)
-      break
     case "step-start":
     case "text-start":
     case "text-end":

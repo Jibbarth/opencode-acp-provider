@@ -32,11 +32,8 @@
  * `@opencode/plugin`. All the transformation logic lives in `core/publish.ts`,
  * which does not, and is therefore testable without a host.
  *
- * Note: `@opencode/plugin` is a runtime dependency, pinned to the **CLI**
- * version (`2.0.16`, not `2.0.3`, whose `Context` exposes a `catalog` domain
- * the 2.0.16 server does not implement). The host also provides it at load
- * time; the pinned dependency is what makes a `plugin add` install resolve it
- * on its own.
+ * Note: `@opencode/plugin` must match the CLI's minor version. The host provides
+ * it at load time; the dependency also makes package installation resolve it.
  */
 
 import { existsSync } from "node:fs"

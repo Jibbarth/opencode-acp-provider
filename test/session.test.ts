@@ -28,14 +28,14 @@ import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
 import {
-  LLMRequest,
+  ai, type LLMRequest,
   Message,
   SystemPart,
   ToolCallPart,
   ToolEntry,
   ToolResultPart,
-} from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
 
 import {
   DEFAULT_MAX_SESSIONS,
@@ -1040,7 +1040,7 @@ const runTurn = async (
 type Step = { readonly role: "user" | "assistant" | "tool"; readonly text: string }
 
 const requestOf = (languageModel: LanguageModel, steps: readonly Step[]): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: [SystemPart.make("You are an assistant.")],
     tools: [

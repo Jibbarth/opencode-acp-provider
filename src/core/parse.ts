@@ -261,7 +261,7 @@ const validate = (
  *
  * Pure: no process, no SDK, no global state. Everything it can fail at is
  * returned in `ParseResult` - the caller decides, and the OpenCode adapter turns
- * a failure into a terminal `provider-error`.
+ * a failure into a stream error.
  *
  * @param raw    the raw output concatenated for this turn
  * @param tools  the catalogue sent in the prompt - the **only** source of truth

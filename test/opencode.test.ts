@@ -23,21 +23,21 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
-import { Usage } from "@opencode/ai/schema/index"
+import { Usage } from "@opencode/ai/effect"
 import {
-  GenerationOptions,
-  LLMRequest,
+  ai, type LLMRequest,
   Message,
   ProviderConfigurationError,
+  ProviderInternalError,
   SystemPart,
   ToolCallPart,
   ToolEntry,
   ToolResultPart,
-} from "@opencode/ai/schema/index"
-import type { LLMEvent, LanguageModel } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LLMEvent, LanguageModel } from "@opencode/ai/effect"
 
-import { halt, initialState, reduce } from "../src/adapters/opencode-protocol.js"
-import type { ReducerState } from "../src/adapters/opencode-protocol.js"
+import { AcpResponseError, halt, initialState, reduce } from "../src/adapters/opencode-protocol.js"
+import type { ReducerEvent, ReducerState } from "../src/adapters/opencode-protocol.js"
 import { acquireAgent, closeCachedAgents, forgetAgent } from "../src/adapters/opencode-transport.js"
 import type { AcpPrepared } from "../src/adapters/opencode-transport.js"
 import type { AcpEvent } from "../src/core/types.js"
@@ -81,8 +81,8 @@ const fakeSettings = (
 const replay = (
   events: readonly AcpEvent[],
   from: ReducerState = initialState,
-): { readonly state: ReducerState; readonly events: LLMEvent[] } => {
-  const emitted: LLMEvent[] = []
+): { readonly state: ReducerState; readonly events: ReducerEvent[] } => {
+  const emitted: ReducerEvent[] = []
   let state = from
   for (const event of events) {
     const step = reduce(state, event)
@@ -101,7 +101,7 @@ const withTools = (
 })
 
 /** The event types, to compare a whole sequence at a glance. */
-const types = (events: readonly LLMEvent[]): string[] => events.map((event) => event.type)
+const types = (events: readonly ReducerEvent[]): string[] => events.map((event) => event.type)
 
 /**
  * An agent answer **conforming to the contract** of `core/prompt.ts`.
@@ -120,15 +120,15 @@ const say = (text: string): AcpEvent => ({
 const raw = (text: string): AcpEvent => ({ type: "text", text })
 
 /** The index of an event of this type, or -1. */
-const indexOfType = (events: readonly LLMEvent[], type: string): number =>
+const indexOfType = (events: readonly ReducerEvent[], type: string): number =>
   events.findIndex((event) => event.type === type)
 
 /** The first event of this type; the test assumes it exists. */
-const first = <T extends LLMEvent["type"]>(
-  events: readonly LLMEvent[],
+const first = <T extends ReducerEvent["type"]>(
+  events: readonly ReducerEvent[],
   type: T,
-): Extract<LLMEvent, { type: T }> => {
-  const found = events.find((event): event is Extract<LLMEvent, { type: T }> => event.type === type)
+): Extract<ReducerEvent, { type: T }> => {
+  const found = events.find((event): event is Extract<ReducerEvent, { type: T }> => event.type === type)
   if (found === undefined) throw new Error(`no "${type}" event in ${types(events).join(", ")}`)
   return found
 }
@@ -848,7 +848,7 @@ describe("provider settings", () => {
 
 /** Builds a realistic `LLMRequest`: system, tools, transcript. */
 const buildRequest = (languageModel: LanguageModel, userText: string): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: [
       SystemPart.make("You are an assistant."),
@@ -878,7 +878,7 @@ const buildRequest = (languageModel: LanguageModel, userText: string): LLMReques
         }),
       ),
     ],
-    generation: GenerationOptions.make({ maxTokens: 512 }),
+    maxTokens: 512,
   })
 
 /**
@@ -1166,11 +1166,19 @@ describe("end to end: the real route against the ACP agent", () => {
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "hello")
 
-    const events = await runTurn(settings, "gpt-5.6-terra", request)
-
-    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
-    expect(first(events, "provider-error").message).toContain("hello")
-    expect(indexOfType(events, "finish")).toBe(-1)
+    const route = languageModel.route
+    const outcome = await Effect.runPromise(
+      Effect.scoped(Effect.gen(function* () {
+        const body = yield* route.body.from(request)
+        const prepared: AcpPrepared = yield* route.prepareTransport(body, request)
+        return yield* Stream.runCollect(route.streamPrepared(prepared, request, NO_HTTP))
+      })).pipe(Effect.result),
+    )
+    expect(Result.isFailure(outcome)).toBe(true)
+    if (Result.isSuccess(outcome)) throw new Error("expected an ACP response error")
+    expect(outcome.failure.reason).toBeInstanceOf(ProviderInternalError)
+    expect(outcome.failure.reason.cause).toBeInstanceOf(AcpResponseError)
+    expect(outcome.failure.message).toContain("hello")
   })
 
   test("a hallucinated tool fails naming the transmitted catalogue", async () => {
@@ -1181,12 +1189,7 @@ describe("end to end: the real route against the ACP agent", () => {
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "hello")
 
-    const events = await runTurn(settings, "gpt-5.6-terra", request)
-
-    const message = first(events, "provider-error").message
-    expect(message).toContain("outil_qui_nexiste_pas")
-    expect(message).toContain("read")
-    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
+    await expect(runTurn(settings, "gpt-5.6-terra", request)).rejects.toThrow(/outil_qui_nexiste_pas.*read/s)
   })
 
   test("an answer fenced in a ``` block is accepted", async () => {
@@ -1296,13 +1299,7 @@ describe("end to end: the real route against the ACP agent", () => {
     const languageModel = model("gpt-5.6-terra", settings)
     const request = buildRequest(languageModel, "DIE")
 
-    const events = await runTurn(settings, "gpt-5.6-terra", request)
-
-    expect(first(events, "provider-error").message).toBeTruthy()
-    expect(indexOfType(events, "finish")).toBe(-1)
-    // A `step-finish` **before** the terminal: that is what stops the core from
-    // reading a truncation.
-    expect(indexOfType(events, "step-finish")).toBeLessThan(indexOfType(events, "provider-error"))
+    await expect(runTurn(settings, "gpt-5.6-terra", request)).rejects.toThrow("the stream failed:")
   })
 
   test("the effort variant is applied before the prompt, after the model", async () => {
@@ -1423,7 +1420,7 @@ describe("end to end: the real route against the ACP agent", () => {
   test("a message-less request is refused before any spawn", async () => {
     const settings = fakeSettings()
     const languageModel = model("gpt-5.6-terra", settings)
-    const empty = new LLMRequest({ model: languageModel, system: [], messages: [], tools: [] })
+    const empty = ai.request({ model: languageModel, system: [], messages: [], tools: [] })
     const outcome = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {

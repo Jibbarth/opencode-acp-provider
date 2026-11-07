@@ -27,13 +27,12 @@ import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
 import {
-  GenerationOptions,
-  LLMRequest,
+  ai, type LLMRequest,
   Message,
   SystemPart,
   ToolEntry,
-} from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
+} from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
 
 import { closeCachedAgents } from "../src/adapters/opencode-transport.js"
 import type { AcpEvent } from "../src/core/types.js"
@@ -81,12 +80,12 @@ const settingsOf = (env: Record<string, string>): AcpProviderSettings => {
 }
 
 const requestFor = (languageModel: LanguageModel, text: string): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: [SystemPart.make("You are an assistant.")],
     tools: [ToolEntry.make({ name: "read", description: "Lit", inputSchema: { type: "object" } })],
     messages: [Message.user(text)],
-    generation: GenerationOptions.make({ maxTokens: 100 }),
+    maxTokens: 100,
   })
 
 /** The `session/cancel` the agent received, with their timestamps. */
@@ -150,7 +149,6 @@ describe("cancelling a slow turn, through the real route", () => {
     const seen: readonly LLMEvent[] = outcome.success
     expect(seen.map((event) => event.type)).toEqual(["step-start", "reasoning-start"])
     expect(seen.some((event) => event.type === "finish")).toBe(false)
-    expect(seen.some((event) => event.type === "provider-error")).toBe(false)
 
     // 3. And above all: `session/cancel` **went out**. That is the assertion
     //    telling a cancellation apart from an abandonment.

@@ -25,8 +25,8 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { fileURLToPath } from "node:url"
 
 import { Effect, Result, Stream } from "effect"
-import { LLMRequest, Message, SystemPart, ToolCallPart, ToolEntry, ToolResultPart } from "@opencode/ai/schema/index"
-import type { LanguageModel, LLMEvent } from "@opencode/ai/schema/index"
+import { ai, type LLMRequest, Message, SystemPart, ToolCallPart, ToolEntry, ToolResultPart } from "@opencode/ai/effect"
+import type { LanguageModel, LLMEvent } from "@opencode/ai/effect"
 
 import {
   canonicalArguments,
@@ -38,7 +38,7 @@ import {
 import type { CallFingerprint } from "../src/core/tool-repetition.js"
 import { DEFAULT_MAX_TRACKED, ToolLoopMemory, toolLoop } from "../src/adapters/tool-loop.js"
 import { initialState, reduce } from "../src/adapters/opencode-protocol.js"
-import type { ReducerState } from "../src/adapters/opencode-protocol.js"
+import type { ReducerEvent, ReducerState } from "../src/adapters/opencode-protocol.js"
 import { closeCachedAgents } from "../src/adapters/opencode-transport.js"
 import type { AcpPrepared } from "../src/adapters/opencode-transport.js"
 import type { AcpEvent } from "../src/core/types.js"
@@ -82,14 +82,14 @@ const circular = (): unknown => {
 }
 
 /** The event types, to compare a whole sequence at a glance. */
-const types = (events: readonly LLMEvent[]): string[] => events.map((event) => event.type)
+const types = (events: readonly ReducerEvent[]): string[] => events.map((event) => event.type)
 
 /** The first event of this type, failing loudly rather than on `undefined`. */
-const first = <T extends LLMEvent["type"]>(
-  events: readonly LLMEvent[],
+const first = <T extends ReducerEvent["type"]>(
+  events: readonly ReducerEvent[],
   type: T,
-): Extract<LLMEvent, { type: T }> => {
-  const found = events.find((event): event is Extract<LLMEvent, { type: T }> => event.type === type)
+): Extract<ReducerEvent, { type: T }> => {
+  const found = events.find((event): event is Extract<ReducerEvent, { type: T }> => event.type === type)
   if (found === undefined) throw new Error(`no ${type} in ${types(events).join(", ")}`)
   return found
 }
@@ -359,9 +359,9 @@ const contract = (input: unknown): readonly AcpEvent[] => [
 ]
 
 /** Replays a sequence through the reducer, the way a turn streams. */
-const replay = (state: ReducerState, events: readonly AcpEvent[]): LLMEvent[] => {
+const replay = (state: ReducerState, events: readonly AcpEvent[]): ReducerEvent[] => {
   let next = state
-  const emitted: LLMEvent[] = []
+  const emitted: ReducerEvent[] = []
   for (const event of events) {
     const step = reduce(next, event)
     emitted.push(...step.events)
@@ -498,7 +498,7 @@ const runTurn = async (
 
 /** A conversation opening on `text`, with the `read` tool in the catalogue. */
 const opening = (languageModel: LanguageModel, text: string): LLMRequest =>
-  new LLMRequest({
+  ai.request({
     model: languageModel,
     system: [SystemPart.make("You are an assistant.")],
     tools: [
@@ -528,14 +528,9 @@ describe("end to end: the same prompt twice ends on an explicit error", () => {
     // has validated the agent's message, and a deterministic agent proposes the
     // same call. The second one is refused rather than paid for.
     const languageModel = model("gpt-5.6-terra", settings)
-    const events = await runTurn(settings, "gpt-5.6-terra", opening(languageModel, "GUARD-LOOP-A TOOL_PROPOSAL"))
-    expect(types(events)).toEqual(["step-start", "step-finish", "provider-error"])
-    const message = first(events, "provider-error").message
-    expect(message).toContain('"read"')
-    expect(message).toContain("2 times")
-    // No second `tool-call`, and no `finish` behind the terminal event.
-    expect(types(events)).not.toContain("tool-call")
-    expect(types(events)).not.toContain("finish")
+    await expect(
+      runTurn(settings, "gpt-5.6-terra", opening(languageModel, "GUARD-LOOP-A TOOL_PROPOSAL")),
+    ).rejects.toThrow(/"read".*2 times/s)
   })
 
   test("the same call with a result in between goes through untouched", async () => {
@@ -546,7 +541,7 @@ describe("end to end: the same prompt twice ends on an explicit error", () => {
     const events1 = await runTurn(settings, "gpt-5.6-terra", first1)
     expect(types(events1)).toContain("tool-call")
 
-    const answered = new LLMRequest({
+    const answered = ai.request({
       model: first1.model,
       system: first1.system,
       tools: first1.tools,
