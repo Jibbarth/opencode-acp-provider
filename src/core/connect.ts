@@ -102,9 +102,9 @@ export const mergeAgents = (
   fromConnect: readonly RawAgent[],
   fromConfig: readonly RawAgent[],
 ): RawAgent[] => {
-  const merged = [...fromConnect]
-  const taken = new Set(fromConnect.map((agent) => agent.id))
-  for (const agent of fromConfig) {
+  const merged: RawAgent[] = []
+  const taken = new Set<string>()
+  for (const agent of [...fromConnect, ...fromConfig]) {
     if (taken.has(agent.id)) continue
     taken.add(agent.id)
     merged.push(agent)
