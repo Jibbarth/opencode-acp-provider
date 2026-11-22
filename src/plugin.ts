@@ -913,7 +913,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   // see while the providers are still being discovered is the difference between
   // a feature and a feature one has to guess the timing of.
   const connectable = await registerConnect(ctx)
-  const knownConnections = new Map<string, RawAgent>()
+  let knownConnections = new Map<string, RawAgent>()
   const fromConnect = connectable
     ? await readConnectAgents(ctx, knownConnections).catch((error) => {
         log(`/connect connections unreadable: ${reason(error)}`)
@@ -983,11 +983,16 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     if (running) return
     running = true
     try {
-      const next = mergeAgents(await readConnectAgents(ctx, knownConnections), config.agents)
+      // A tentative read must not change the fallback used by the next poll.
+      const candidateConnections = new Map(knownConnections)
+      const next = mergeAgents(await readConnectAgents(ctx, candidateConnections), config.agents)
       const seen = agentsFingerprint(next)
       const confirmed = trackChange(fingerprint, seen, pending)
       pending = confirmed.pending
-      if (!confirmed.apply) return
+      if (!confirmed.apply) {
+        if (seen === fingerprint) knownConnections = candidateConnections
+        return
+      }
       const { added, removed } = diffAgents(settled, next)
       // An agent that had never been published has nothing to tear down and
       // nothing to announce: only what the catalogue really gained or lost is
@@ -1013,6 +1018,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       }
       settled = next
       fingerprint = seen
+      knownConnections = candidateConnections
       pending = undefined
       if (moved) await reloadCatalogue(ctx)
     } catch (error) {
