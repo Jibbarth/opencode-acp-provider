@@ -105,8 +105,9 @@ describe("the plugin registers a provider from a fake agent", () => {
       let tick
       globalThis.setInterval = (fn) => { tick = fn; return { unref() {} } }
       globalThis.clearInterval = () => {}
-      let connections = [{ type: "credential", id: "copilot" }]
+      let connections = [{ type: "credential", id: "broken" }, { type: "credential", id: "copilot" }]
       let unreadable = false
+      let failing = new Set(["broken"])
       const providers = new Map()
       const context = {
         options: { agents: [], refreshMs: 0 },
@@ -120,10 +121,13 @@ describe("the plugin registers a provider from a fake agent", () => {
           },
           connection: {
             active: () => { throw new Error("must not read the active selection") },
-            resolve: async (connection) => ({ type: "key", metadata: {
-              name: connection.id,
-              command: JSON.stringify(process.execPath) + " run " + JSON.stringify(${JSON.stringify(FAKE)}),
-            } }),
+            resolve: async (connection) => {
+              if (failing.has(connection.id)) throw new Error("credential unavailable")
+              return { type: "key", metadata: {
+                name: connection.id,
+                command: JSON.stringify(process.execPath) + " run " + JSON.stringify(${JSON.stringify(FAKE)}),
+              } }
+            },
           },
         },
         provider: {
@@ -138,7 +142,8 @@ describe("the plugin registers a provider from a fake agent", () => {
       const cleanup = await module.default.setup(context)
       const initial = [...providers.keys()]
       const poll = async () => { tick(); await new Promise((resolve) => setTimeout(resolve, 10)) }
-      connections.push({ type: "credential", id: "codex" })
+      failing = new Set(["copilot"])
+      connections = [connections[1], { type: "credential", id: "codex" }]
       await poll(); await poll()
       for (let attempt = 0; attempt < 100 && providers.size < 2; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 20))

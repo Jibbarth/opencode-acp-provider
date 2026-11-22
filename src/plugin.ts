@@ -824,13 +824,27 @@ const registerConnect = async (ctx: Context): Promise<boolean> => {
 }
 
 /** Reads every saved ACP connection, independently of the host's active selection. */
-const readConnectAgents = async (ctx: Context): Promise<RawAgent[]> => {
+const readConnectAgents = async (ctx: Context, known: Map<string, RawAgent>): Promise<RawAgent[]> => {
   const { data } = await ctx.integration.get({ integrationID: CONNECT_INTEGRATION_ID })
   const agents: RawAgent[] = []
+  const next = new Map<string, RawAgent>()
   for (const connection of data.connections) {
-    const answers = parseConnectCredential(await ctx.integration.connection.resolve(connection))
-    if (answers !== undefined) agents.push(connectAgentToRawAgent(answers))
+    const key = connection.type === "credential" ? `credential:${connection.id}` : `env:${connection.name}`
+    let agent: RawAgent | undefined
+    try {
+      const answers = parseConnectCredential(await ctx.integration.connection.resolve(connection))
+      if (answers !== undefined) agent = connectAgentToRawAgent(answers)
+    } catch (error) {
+      log(`/connect connection "${key}" unreadable: ${reason(error)}`)
+      agent = known.get(key)
+    }
+    if (agent !== undefined) {
+      next.set(key, agent)
+      agents.push(agent)
+    }
   }
+  known.clear()
+  for (const [key, agent] of next) known.set(key, agent)
   return agents
 }
 
@@ -899,8 +913,9 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   // see while the providers are still being discovered is the difference between
   // a feature and a feature one has to guess the timing of.
   const connectable = await registerConnect(ctx)
+  const knownConnections = new Map<string, RawAgent>()
   const fromConnect = connectable
-    ? await readConnectAgents(ctx).catch((error) => {
+    ? await readConnectAgents(ctx, knownConnections).catch((error) => {
         log(`/connect connections unreadable: ${reason(error)}`)
         return []
       })
@@ -968,7 +983,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     if (running) return
     running = true
     try {
-      const next = mergeAgents(await readConnectAgents(ctx), config.agents)
+      const next = mergeAgents(await readConnectAgents(ctx, knownConnections), config.agents)
       const seen = agentsFingerprint(next)
       const confirmed = trackChange(fingerprint, seen, pending)
       pending = confirmed.pending
