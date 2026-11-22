@@ -789,8 +789,8 @@ const connectForm = (): Form.Fields => {
  * `opencode.json`.
  *
  * Note: a `key` method **carries no `id`** - unlike `oauth` and `command` - so
- * this is the only key method the integration has, and `/connect` can hold one
- * connection. `update` on both the integration and the method is an upsert, so
+ * this is the only key method the integration has. It can hold several saved
+ * connections. `update` on both the integration and the method is an upsert, so
  * a second load of the plugin re-registers rather than duplicates.
  *
  * Note: `reload` is what makes the entry appear in the UI. Registering without
@@ -823,29 +823,29 @@ const registerConnect = async (ctx: Context): Promise<boolean> => {
   return true
 }
 
-/**
- * The agent `/connect` currently declares, if any.
- *
- * Note: an integration holds **one** active connection, hence one agent: the
- * answer is a single agent, not a list.
- *
- * Note: `undefined` covers every "no agent" case - no connection at all, a
- * credential of another type, a form half filled - because a `/connect` the
- * plugin cannot read must cost the user his ACP agent and nothing else. A thrown
- * error is logged: swallowing it would be indistinguishable from `/connect`
- * never having registered.
- */
-const readConnectAgent = async (ctx: Context): Promise<RawAgent | undefined> => {
-  try {
-    const connection = await ctx.integration.connection.active(CONNECT_INTEGRATION_ID)
-    if (connection === undefined) return undefined
-    const answers = parseConnectCredential(await ctx.integration.connection.resolve(connection))
-    if (answers === undefined) return undefined
-    return connectAgentToRawAgent(answers)
-  } catch (error) {
-    log(`/connect connection unreadable: ${reason(error)}`)
-    return undefined
+/** Reads every saved ACP connection, independently of the host's active selection. */
+const readConnectAgents = async (ctx: Context, known: Map<string, RawAgent>): Promise<RawAgent[]> => {
+  const { data } = await ctx.integration.get({ integrationID: CONNECT_INTEGRATION_ID })
+  const agents: RawAgent[] = []
+  const next = new Map<string, RawAgent>()
+  for (const connection of data.connections) {
+    const key = connection.type === "credential" ? `credential:${connection.id}` : `env:${connection.name}`
+    let agent: RawAgent | undefined
+    try {
+      const answers = parseConnectCredential(await ctx.integration.connection.resolve(connection))
+      if (answers !== undefined) agent = connectAgentToRawAgent(answers)
+    } catch (error) {
+      log(`/connect connection "${key}" unreadable: ${reason(error)}`)
+      agent = known.get(key)
+    }
+    if (agent !== undefined) {
+      next.set(key, agent)
+      agents.push(agent)
+    }
   }
+  known.clear()
+  for (const [key, agent] of next) known.set(key, agent)
+  return agents
 }
 
 /** Rebuilds the catalogue, so a provider published mid-session reaches `/model`. */
@@ -913,8 +913,13 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
   // see while the providers are still being discovered is the difference between
   // a feature and a feature one has to guess the timing of.
   const connectable = await registerConnect(ctx)
-  const connectAgent = connectable ? await readConnectAgent(ctx) : undefined
-  const fromConnect = connectAgent === undefined ? [] : [connectAgent]
+  let knownConnections = new Map<string, RawAgent>()
+  const fromConnect = connectable
+    ? await readConnectAgents(ctx, knownConnections).catch((error) => {
+        log(`/connect connections unreadable: ${reason(error)}`)
+        return []
+      })
+    : []
   // `/connect` first: an agent the user typed in the UI is the one they last
   // touched (see `mergeAgents`).
   const wanted = mergeAgents(fromConnect, config.agents)
@@ -978,12 +983,16 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
     if (running) return
     running = true
     try {
-      const agent = await readConnectAgent(ctx)
-      const next = mergeAgents(agent === undefined ? [] : [agent], config.agents)
+      // A tentative read must not change the fallback used by the next poll.
+      const candidateConnections = new Map(knownConnections)
+      const next = mergeAgents(await readConnectAgents(ctx, candidateConnections), config.agents)
       const seen = agentsFingerprint(next)
       const confirmed = trackChange(fingerprint, seen, pending)
       pending = confirmed.pending
-      if (!confirmed.apply) return
+      if (!confirmed.apply) {
+        if (seen === fingerprint) knownConnections = candidateConnections
+        return
+      }
       const { added, removed } = diffAgents(settled, next)
       // An agent that had never been published has nothing to tear down and
       // nothing to announce: only what the catalogue really gained or lost is
@@ -1009,6 +1018,7 @@ async function runSetup(ctx: Context): Promise<(() => Promise<void>) | undefined
       }
       settled = next
       fingerprint = seen
+      knownConnections = candidateConnections
       pending = undefined
       if (moved) await reloadCatalogue(ctx)
     } catch (error) {

@@ -99,6 +99,105 @@ describe("plugin loading leaves a trace", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("the plugin registers a provider from a fake agent", () => {
+  test("saved ACP connections coexist and only a deleted connection is removed", async () => {
+    const script = `
+      const module = await import(${JSON.stringify(PLUGIN)})
+      let tick
+      globalThis.setInterval = (fn) => { tick = fn; return { unref() {} } }
+      globalThis.clearInterval = () => {}
+      let connections = [{ type: "credential", id: "broken" }, { type: "credential", id: "copilot" }]
+      let unreadable = false
+      let failing = new Set(["broken"])
+      let suffix = ""
+      let disposals = 0
+      const providers = new Map()
+      const context = {
+        options: { agents: [], refreshMs: 0 },
+        event: { subscribe: () => ({ [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }) },
+        integration: {
+          transform: async (fn) => fn({ update: (_id, fn) => fn({}), method: { update() {} } }),
+          reload: async () => {},
+          get: async () => {
+            if (unreadable) throw new Error("temporary read failure")
+            return { data: { connections } }
+          },
+          connection: {
+            active: () => { throw new Error("must not read the active selection") },
+            resolve: async (connection) => {
+              if (failing.has(connection.id)) throw new Error("credential unavailable")
+              return { type: "key", metadata: {
+                name: connection.id,
+                command: JSON.stringify(process.execPath) + " run " + JSON.stringify(${JSON.stringify(FAKE)}) + suffix,
+              } }
+            },
+          },
+        },
+        provider: {
+          transform: async (fn) => {
+            let id
+            fn({ add: (entry) => { id = entry.info.id; providers.set(id, entry) } })
+            return { dispose: async () => { disposals++; providers.delete(id) } }
+          },
+          reload: async () => {},
+        },
+      }
+      const cleanup = await module.default.setup(context)
+      const initial = [...providers.keys()]
+      const poll = async () => { tick(); await new Promise((resolve) => setTimeout(resolve, 10)) }
+      const copilot = connections[1]
+      connections = []
+      await poll()
+      connections = [copilot]
+      failing = new Set(["copilot"])
+      await poll(); await poll()
+      const afterFlicker = [...providers.keys()]
+      const disposalsAfterFlicker = disposals
+      failing.clear()
+      suffix = " changed"
+      await poll()
+      failing.add("copilot")
+      await poll()
+      const disposalsAfterTentativeChange = disposals
+      suffix = ""
+      failing.clear()
+      await poll()
+      failing = new Set(["copilot"])
+      connections = [copilot, { type: "credential", id: "codex" }]
+      await poll(); await poll()
+      for (let attempt = 0; attempt < 100 && providers.size < 2; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      const afterAdd = [...providers.keys()]
+      unreadable = true
+      await poll(); await poll()
+      const afterFailure = [...providers.keys()]
+      unreadable = false
+      connections = [connections[1]]
+      await poll(); await poll()
+      const afterDelete = [...providers.keys()]
+      await cleanup()
+      console.log(JSON.stringify({ initial, afterFlicker, disposalsAfterFlicker, disposalsAfterTentativeChange, afterAdd, afterFailure, afterDelete, remaining: providers.size }))
+    `
+    const proc = Bun.spawn([process.execPath, "-e", script], {
+      stdout: "pipe", stderr: "pipe", cwd: process.cwd(),
+      env: { ...process.env, XDG_DATA_HOME: join(tmpdir(), `acp-plugin-test-${process.pid}`) },
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+    ])
+    expect({ code, stderr }).toEqual({ code: 0, stderr })
+    expect(JSON.parse(stdout)).toEqual({
+      initial: ["acp-copilot"],
+      afterFlicker: ["acp-copilot"],
+      disposalsAfterFlicker: 0,
+      disposalsAfterTentativeChange: 0,
+      afterAdd: ["acp-copilot", "acp-codex"],
+      afterFailure: ["acp-copilot", "acp-codex"],
+      afterDelete: ["acp-codex"],
+      remaining: 0,
+    })
+  })
+
   test("a valid agent produces a registration, logged and disposable", async () => {
     // A **minimal** host context is built: the plugin only reads `options`,
     // `provider.transform` and `event.subscribe` (with `refreshMs: 0` it does not

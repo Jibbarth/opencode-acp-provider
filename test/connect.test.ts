@@ -142,6 +142,11 @@ describe("/connect and the config file", () => {
     expect(merged.map((agent) => agent.id)).toEqual(["copilot", "codex"])
   })
 
+  test("saved connections with the same name produce only one provider", () => {
+    expect(mergeAgents([named("copilot"), named("copilot"), named("codex")], []).map((agent) => agent.id))
+      .toEqual(["copilot", "codex"])
+  })
+
   test("a merged list is a configuration the publisher accepts", () => {
     const merged = mergeAgents([named("copilot")], [named("codex")])
     const parsed = parsePluginConfig({ agents: merged })

@@ -22,8 +22,8 @@ and fill the form:
 
 The provider shows up in `/model` within seconds, no restart. Edit or remove
 the connection any time from `/connect`; the catalogue follows. `/connect`
-holds one active agent at a time (switch connections there to change it) —
-for several agents side by side, use the file below.
+can hold several saved ACP connections: each becomes its own provider, even
+when another connection is selected as active. Give each agent a distinct name.
 
 Prefer a file? Declare agents under `plugins[].options` instead (or mix both
 sources — they merge, `/connect` first):
